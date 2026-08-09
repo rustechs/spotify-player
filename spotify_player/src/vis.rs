@@ -49,8 +49,9 @@ pub struct VisBands {
     /// quieter — the VU «breathes» with the music.
     pub peak_envelope: f32,
     /// Set to `true` when any visualization audio source is live (local
-    /// librespot sink and/or system-audio capture). The UI uses this flag to
-    /// decide whether to reserve and render the visualization area.
+    /// librespot sink and/or system-audio capture). The UI keeps the viz pane
+    /// reserved whenever a track is loaded; this flag selects live band data
+    /// versus an idle zero baseline (e.g. while paused).
     pub is_active: bool,
     /// Set to `true` only while the integrated librespot sink is playing.
     /// System-audio capture yields whenever this is true so the two sources
