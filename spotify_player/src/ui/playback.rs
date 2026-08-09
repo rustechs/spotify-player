@@ -34,7 +34,7 @@ pub fn render_playback_window(
             let (rect, vis_rect) = {
                 let configs = config::get_config();
                 if configs.app_config.enable_audio_visualization
-                    && state.is_local_streaming_active()
+                    && state.is_visualization_active()
                 {
                     let chunks = Layout::vertical([
                         Constraint::Fill(0),
@@ -450,13 +450,13 @@ fn split_rect_for_playback_window(state: &SharedState, rect: Rect) -> (Rect, Rec
     #[cfg(feature = "image")]
     let playback_width = std::cmp::max(configs.app_config.cover_img_width + 1, playback_width);
 
-    // When visualization is enabled *and* librespot is actively streaming,
-    // reserve extra rows for the bar chart. When the local player is idle
-    // (e.g. playback on an external Spotify Connect device) the rows are not
-    // reserved so the space is available to the rest of the layout.
+    // When visualization is enabled *and* a live audio source is feeding bands
+    // (local librespot and/or system-audio capture), reserve extra rows for the
+    // bar chart. Otherwise the rows are not reserved so the space is available
+    // to the rest of the layout.
     #[cfg(feature = "streaming")]
     let playback_width = playback_width
-        + if configs.app_config.enable_audio_visualization && state.is_local_streaming_active() {
+        + if configs.app_config.enable_audio_visualization && state.is_visualization_active() {
             super::streaming::VIS_HEIGHT as usize
         } else {
             0

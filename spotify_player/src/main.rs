@@ -12,6 +12,8 @@ mod playlist_folders;
 mod state;
 #[cfg(feature = "streaming")]
 mod streaming;
+#[cfg(feature = "system-audio-visualization")]
+mod system_audio;
 mod token;
 mod ui;
 mod utils;
@@ -164,6 +166,9 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
                 client::start_player_event_watcher(&state, &client_pub);
             }
         })?;
+
+    #[cfg(feature = "system-audio-visualization")]
+    system_audio::start(state.clone());
 
     if !state.is_daemon {
         #[cfg(feature = "image")]

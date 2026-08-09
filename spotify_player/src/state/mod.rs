@@ -89,10 +89,20 @@ impl State {
 
     /// Returns `true` when the local librespot player is actively streaming
     /// audio (i.e. a `Playing` event has been received and no `Paused` / `stop`
-    /// has occurred since).  Used by the UI to decide whether to allocate and
-    /// render the audio-visualization area.
+    /// has occurred since).
     #[cfg(feature = "streaming")]
+    #[allow(dead_code)]
     pub fn is_local_streaming_active(&self) -> bool {
+        self.vis_bands
+            .as_ref()
+            .is_some_and(|b| b.lock().local_sink_active)
+    }
+
+    /// Returns `true` when any visualization audio source is live (local
+    /// librespot sink and/or system-audio capture). Used by the UI to decide
+    /// whether to allocate and render the audio-visualization area.
+    #[cfg(feature = "streaming")]
+    pub fn is_visualization_active(&self) -> bool {
         self.vis_bands.as_ref().is_some_and(|b| b.lock().is_active)
     }
 }

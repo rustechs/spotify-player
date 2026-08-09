@@ -36,8 +36,8 @@ const DECAY_FACTOR: f32 = 0.985;
 const DECAY_FACTOR_PEAK: f32 = 0.9985;
 /// Reference sample rate used by the **render-side** decay helpers
 /// (`decay_for_elapsed`, `peak_decay_for_elapsed`).
-/// The audio sink uses its own `VisualizationSink::sample_rate` field so that
-/// decay timings stay precise if librespot streams at 48 000 Hz instead.
+/// The audio processors use their own `sample_rate` field so that
+/// decay timings stay precise if audio arrives at 48 000 Hz instead.
 const SAMPLE_RATE: f32 = 44_100.0;
 
 /// Shared frequency-band state exposed between the audio sink and the UI.
@@ -58,10 +58,14 @@ pub struct VisBands {
     /// Kept separate from per-band values so quiet passages look genuinely
     /// quieter — the VU «breathes» with the music.
     pub peak_envelope: f32,
-    /// Set to `true` when librespot reports a `Playing` event and `false` on
-    /// `Paused` or `stop()`.  The UI uses this flag to skip rendering (and
-    /// reclaim the screen space) when audio is not being streamed locally.
+    /// Set to `true` when any visualization audio source is live (local
+    /// librespot sink and/or system-audio capture). The UI uses this flag to
+    /// decide whether to reserve and render the visualization area.
     pub is_active: bool,
+    /// Set to `true` only while the integrated librespot sink is playing.
+    /// System-audio capture yields whenever this is true so the two sources
+    /// never fight over `values`.
+    pub local_sink_active: bool,
 }
 
 impl VisBands {
@@ -71,6 +75,7 @@ impl VisBands {
             updated_at: Instant::now(),
             peak_envelope: 1e-6,
             is_active: false,
+            local_sink_active: false,
         }
     }
 }
@@ -86,8 +91,8 @@ impl Default for VisBands {
 ///
 /// Used **only on the render side** (`render_audio_visualization`) to interpolate
 /// bar heights smoothly between audio-sink updates. It uses the fixed `SAMPLE_RATE`
-/// reference (44 100 Hz); the audio sink inlines its own calculation using
-/// `VisualizationSink::sample_rate` so both sides are independently accurate.
+/// reference (44 100 Hz); audio processors inline their own calculation using
+/// their `sample_rate` so both sides are independently accurate.
 pub fn decay_for_elapsed(elapsed: std::time::Duration) -> f32 {
     let elapsed_hops = elapsed.as_secs_f32() * SAMPLE_RATE / HOP_SIZE as f32;
     DECAY_FACTOR.powf(elapsed_hops)
@@ -103,19 +108,16 @@ pub fn peak_decay_for_elapsed(elapsed: std::time::Duration) -> f32 {
     DECAY_FACTOR_PEAK.powf(elapsed_hops)
 }
 
-/// An audio sink wrapper that computes real-time FFT frequency bands from the
-/// decoded audio stream and exposes them via a shared buffer for the UI.
+/// Shared FFT processor that turns mono PCM into log-scale frequency bands.
 ///
-/// It forwards every audio packet unchanged to the real backend, so playback
-/// is not affected.
-pub struct VisualizationSink {
-    inner: Box<dyn Sink>,
+/// Used by both the local librespot `VisualizationSink` and (optionally) the
+/// system-audio capture path, so Connect-controlled desktop Spotify can drive
+/// the same UI bars.
+pub struct BandProcessor {
     /// Ring-buffer of mono f32 samples waiting to be processed.
     /// `VecDeque` gives O(1) front-drain instead of Vec's O(remaining) shift.
     sample_buf: VecDeque<f32>,
     /// Shared state written every hop and read by the UI render thread.
-    /// Guarded by a `Mutex`; the render path uses `try_lock()` to avoid
-    /// blocking the audio thread.
     bands: Arc<Mutex<VisBands>>,
     /// Forward FFT plan reused every hop — `rustfft` plans are thread-safe
     /// and allocation-free once created.
@@ -128,10 +130,10 @@ pub struct VisualizationSink {
     /// Reusable magnitude buffer — avoids a `Vec` allocation per hop.
     magnitudes: Vec<f32>,
     /// Actual audio sample rate in Hz — used for precise hop-based decay
-    /// calculation, since librespot can run at 44100 or 48000 Hz.
+    /// calculation, since librespot / Pulse can run at 44100 or 48000 Hz.
     sample_rate: f32,
     /// Precomputed (start, end) bin-index ranges for each log-scale band.
-    /// Computed once in `new()` so `write()` never runs `powf` per hop.
+    /// Computed once in `new()` so processing never runs `powf` per hop.
     band_ranges: Vec<(usize, usize)>,
     /// Reusable output buffer for `fill_log_bands` — no `Vec` allocation per hop.
     new_bands: [f32; NUM_BANDS],
@@ -139,12 +141,12 @@ pub struct VisualizationSink {
     smooth_scratch: [f32; NUM_BANDS],
 }
 
-impl VisualizationSink {
-    /// Create a new `VisualizationSink` wrapping `inner`.
+impl BandProcessor {
+    /// Create a processor that publishes into `bands`.
     ///
-    /// `sample_rate` should match the actual librespot audio format sample rate
-    /// (44100 or 48000 Hz) so that hop-based decay timings are accurate.
-    pub fn new(inner: Box<dyn Sink>, bands: Arc<Mutex<VisBands>>, sample_rate: f32) -> Self {
+    /// `sample_rate` should match the PCM source (44100 or 48000 Hz) so that
+    /// hop-based decay timings are accurate.
+    pub fn new(bands: Arc<Mutex<VisBands>>, sample_rate: f32) -> Self {
         let mut planner = FftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(FFT_SIZE);
         let hann_window: Vec<f32> = (0..FFT_SIZE)
@@ -154,7 +156,6 @@ impl VisualizationSink {
             .collect();
         let band_ranges = precompute_band_ranges(FFT_SIZE / 2, NUM_BANDS);
         Self {
-            inner,
             sample_buf: VecDeque::with_capacity(FFT_SIZE * 2),
             bands,
             fft,
@@ -167,6 +168,123 @@ impl VisualizationSink {
             smooth_scratch: [0.0f32; NUM_BANDS],
         }
     }
+
+    /// Push mono f32 samples and publish any completed FFT hops.
+    pub fn push_mono_samples<I>(&mut self, samples: I)
+    where
+        I: IntoIterator<Item = f32>,
+    {
+        self.sample_buf.extend(samples);
+        self.process_hops();
+    }
+
+    /// Clear queued samples and zero published bands (used on local sink stop).
+    pub fn reset(&mut self) {
+        let mut g = self.bands.lock();
+        g.values.fill(0.0);
+        g.peak_envelope = 1e-6;
+        g.updated_at = Instant::now();
+        g.is_active = false;
+        g.local_sink_active = false;
+        drop(g);
+        self.sample_buf.clear();
+    }
+
+    fn process_hops(&mut self) {
+        // Update vis_bands after EVERY hop (not at the end of the batch).
+        //
+        // Batching reduces mutex contention but delays the first update by the
+        // full packet duration (~46 ms for a 2048-sample packet). With per-hop
+        // updates a transient at the START of a packet is visible within one hop
+        // (~2.9 ms) + render delay (~32 ms) instead of ~78 ms.
+        //
+        // Decay correctness is preserved by using wall-clock elapsed from
+        // vis_bands.updated_at: hops within the same write() call are ~3 ms apart,
+        // so DECAY_FACTOR ^ (~1 hop elapsed) ≈ 0.985 ≈ 1.0 — no peak smearing.
+        while self.sample_buf.len() >= FFT_SIZE {
+            // Fill fft_buf using as_slices() to avoid make_contiguous()'s
+            // potential O(n) rotation, and reuse the preallocated buffer.
+            {
+                let (front, back) = self.sample_buf.as_slices();
+                if front.len() >= FFT_SIZE {
+                    for (dst, (&s, &w)) in self
+                        .fft_buf
+                        .iter_mut()
+                        .zip(front.iter().zip(self.hann_window.iter()))
+                    {
+                        *dst = Complex::new(s * w, 0.0);
+                    }
+                } else {
+                    let split = front.len();
+                    for (dst, (&s, &w)) in self.fft_buf[..split]
+                        .iter_mut()
+                        .zip(front.iter().zip(self.hann_window[..split].iter()))
+                    {
+                        *dst = Complex::new(s * w, 0.0);
+                    }
+                    let remaining = FFT_SIZE - split;
+                    for (dst, (&s, &w)) in self.fft_buf[split..].iter_mut().zip(
+                        back[..remaining]
+                            .iter()
+                            .zip(self.hann_window[split..].iter()),
+                    ) {
+                        *dst = Complex::new(s * w, 0.0);
+                    }
+                }
+            }
+
+            self.fft.process(&mut self.fft_buf);
+
+            // Compute magnitudes in place — no allocation per hop.
+            for (mag, c) in self.magnitudes.iter_mut().zip(self.fft_buf.iter()) {
+                *mag = c.norm();
+            }
+
+            // Fill pre-allocated band buffers in-place — no Vec allocation per hop.
+            fill_log_bands(&self.magnitudes, &self.band_ranges, &mut self.new_bands);
+            smooth_bands(&mut self.new_bands, &mut self.smooth_scratch);
+
+            // Apply wall-clock decay since the last hop, then rise to any louder value.
+            // Use self.sample_rate for precision (may be 44100 or 48000 Hz).
+            let mut g = self.bands.lock();
+            let elapsed_hops =
+                g.updated_at.elapsed().as_secs_f32() * self.sample_rate / HOP_SIZE as f32;
+            let decay = DECAY_FACTOR.powf(elapsed_hops);
+            let peak_decay = DECAY_FACTOR_PEAK.powf(elapsed_hops);
+            let frame_peak = self.new_bands.iter().copied().fold(0.0_f32, f32::max);
+            for (stored, fresh) in g.values.iter_mut().zip(self.new_bands.iter()) {
+                *stored = (*stored * decay).max(*fresh);
+            }
+            g.peak_envelope = (g.peak_envelope * peak_decay).max(frame_peak);
+            g.updated_at = Instant::now();
+            drop(g);
+
+            self.sample_buf.drain(..HOP_SIZE);
+        }
+    }
+}
+
+/// An audio sink wrapper that computes real-time FFT frequency bands from the
+/// decoded audio stream and exposes them via a shared buffer for the UI.
+///
+/// It forwards every audio packet unchanged to the real backend, so playback
+/// is not affected.
+pub struct VisualizationSink {
+    inner: Box<dyn Sink>,
+    processor: BandProcessor,
+}
+
+impl VisualizationSink {
+    /// Create a new `VisualizationSink` wrapping `inner`.
+    ///
+    /// `sample_rate` should match the actual librespot audio format sample rate
+    /// (44100 or 48000 Hz) so that hop-based decay timings are accurate.
+    pub fn new(inner: Box<dyn Sink>, bands: Arc<Mutex<VisBands>>, sample_rate: f32) -> Self {
+        Self {
+            inner,
+            processor: BandProcessor::new(bands, sample_rate),
+        }
+    }
 }
 
 impl Sink for VisualizationSink {
@@ -177,97 +295,20 @@ impl Sink for VisualizationSink {
     fn stop(&mut self) -> SinkResult<()> {
         // Zero out the bands and reset normalization when playback stops so the
         // bars fall to silence and the next session starts with a fresh baseline.
-        let mut g = self.bands.lock();
-        g.values.fill(0.0);
-        g.peak_envelope = 1e-6;
-        g.updated_at = Instant::now();
-        g.is_active = false;
-        drop(g);
-        self.sample_buf.clear();
+        self.processor.reset();
         self.inner.stop()
     }
 
     fn write(&mut self, packet: AudioPacket, converter: &mut Converter) -> SinkResult<()> {
         if let AudioPacket::Samples(ref samples) = packet {
             // Samples are interleaved stereo (L, R, L, R, …); mix down to mono f32.
-            self.sample_buf.extend(samples.chunks(2).map(|c| {
+            self.processor.push_mono_samples(samples.chunks(2).map(|c| {
                 if c.len() == 2 {
                     f64::midpoint(c[0], c[1]) as f32
                 } else {
                     c[0] as f32
                 }
             }));
-
-            // Update vis_bands after EVERY hop (not at the end of the batch).
-            //
-            // Batching reduces mutex contention but delays the first update by the
-            // full packet duration (~46 ms for a 2048-sample packet). With per-hop
-            // updates a transient at the START of a packet is visible within one hop
-            // (~2.9 ms) + render delay (~32 ms) instead of ~78 ms.
-            //
-            // Decay correctness is preserved by using wall-clock elapsed from
-            // vis_bands.updated_at: hops within the same write() call are ~3 ms apart,
-            // so DECAY_FACTOR ^ (~1 hop elapsed) ≈ 0.985 ≈ 1.0 — no peak smearing.
-            while self.sample_buf.len() >= FFT_SIZE {
-                // Fill fft_buf using as_slices() to avoid make_contiguous()'s
-                // potential O(n) rotation, and reuse the preallocated buffer.
-                {
-                    let (front, back) = self.sample_buf.as_slices();
-                    if front.len() >= FFT_SIZE {
-                        for (dst, (&s, &w)) in self
-                            .fft_buf
-                            .iter_mut()
-                            .zip(front.iter().zip(self.hann_window.iter()))
-                        {
-                            *dst = Complex::new(s * w, 0.0);
-                        }
-                    } else {
-                        let split = front.len();
-                        for (dst, (&s, &w)) in self.fft_buf[..split]
-                            .iter_mut()
-                            .zip(front.iter().zip(self.hann_window[..split].iter()))
-                        {
-                            *dst = Complex::new(s * w, 0.0);
-                        }
-                        let remaining = FFT_SIZE - split;
-                        for (dst, (&s, &w)) in self.fft_buf[split..].iter_mut().zip(
-                            back[..remaining]
-                                .iter()
-                                .zip(self.hann_window[split..].iter()),
-                        ) {
-                            *dst = Complex::new(s * w, 0.0);
-                        }
-                    }
-                }
-
-                self.fft.process(&mut self.fft_buf);
-
-                // Compute magnitudes in place — no allocation per hop.
-                for (mag, c) in self.magnitudes.iter_mut().zip(self.fft_buf.iter()) {
-                    *mag = c.norm();
-                }
-
-                // Fill pre-allocated band buffers in-place — no Vec allocation per hop.
-                fill_log_bands(&self.magnitudes, &self.band_ranges, &mut self.new_bands);
-                smooth_bands(&mut self.new_bands, &mut self.smooth_scratch);
-
-                // Apply wall-clock decay since the last hop, then rise to any louder value.
-                // Use self.sample_rate for precision (may be 44100 or 48000 Hz).
-                let mut g = self.bands.lock();
-                let elapsed_hops =
-                    g.updated_at.elapsed().as_secs_f32() * self.sample_rate / HOP_SIZE as f32;
-                let decay = DECAY_FACTOR.powf(elapsed_hops);
-                let peak_decay = DECAY_FACTOR_PEAK.powf(elapsed_hops);
-                let frame_peak = self.new_bands.iter().copied().fold(0.0_f32, f32::max);
-                for (stored, fresh) in g.values.iter_mut().zip(self.new_bands.iter()) {
-                    *stored = (*stored * decay).max(*fresh);
-                }
-                g.peak_envelope = (g.peak_envelope * peak_decay).max(frame_peak);
-                g.updated_at = Instant::now();
-                drop(g);
-
-                self.sample_buf.drain(..HOP_SIZE);
-            }
         }
 
         self.inner.write(packet, converter)

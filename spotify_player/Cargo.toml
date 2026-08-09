@@ -53,6 +53,8 @@ serde_json = "1.0.151"
 regex = "1.13.1"
 daemonize = { version = "0.5.0", optional = true }
 rustfft = { version = "6", optional = true }
+libpulse-binding = { version = "2.30", optional = true }
+libpulse-simple-binding = { version = "2.29", optional = true }
 ttl_cache = "0.5.1"
 clap_complete = "4.6.7"
 which = "8.0.5"
@@ -92,6 +94,13 @@ rodiojack-backend = ["streaming", "librespot-playback/rodiojack-backend"]
 sdl-backend = ["streaming", "librespot-playback/sdl-backend"]
 gstreamer-backend = ["streaming", "librespot-playback/gstreamer-backend"]
 streaming = ["librespot-playback", "librespot-connect", "rustfft"]
+# Capture PipeWire/Pulse monitor audio so the spectrum visualizer works when
+# controlling an external Spotify Connect device (e.g. desktop Spotify).
+system-audio-visualization = [
+	"streaming",
+	"dep:libpulse-binding",
+	"dep:libpulse-simple-binding",
+]
 media-control = ["souvlaki", "winit", "windows"]
 image = ["ratatui-image", "dep:image"]
 sixel = ["image"]
@@ -100,7 +109,7 @@ notify = ["notify-rust"]
 daemon = ["daemonize", "streaming"]
 fzf = ["fuzzy-matcher"]
 
-default = ["rodio-backend", "media-control"]
+default = ["rodio-backend", "media-control", "system-audio-visualization"]
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"

@@ -114,6 +114,17 @@ pub struct AppConfig {
     #[cfg(feature = "streaming")]
     pub enable_audio_visualization: bool,
 
+    /// When true (and `enable_audio_visualization` is true), capture the
+    /// PipeWire/Pulse default-sink monitor so the spectrum visualizer works
+    /// while controlling an external Spotify Connect device.
+    #[cfg(feature = "system-audio-visualization")]
+    pub enable_system_audio_visualization: bool,
+
+    /// Pulse/PipeWire source name for system-audio visualization.
+    /// Use `"auto"` to follow `<default-sink>.monitor`.
+    #[cfg(feature = "system-audio-visualization")]
+    pub system_audio_source: String,
+
     #[cfg(feature = "notify")]
     pub enable_notify: bool,
 
@@ -375,6 +386,12 @@ impl Default for AppConfig {
 
             #[cfg(feature = "streaming")]
             enable_audio_visualization: false,
+
+            #[cfg(feature = "system-audio-visualization")]
+            enable_system_audio_visualization: false,
+
+            #[cfg(feature = "system-audio-visualization")]
+            system_audio_source: "auto".to_string(),
 
             #[cfg(feature = "notify")]
             enable_notify: true,
