@@ -277,7 +277,7 @@ cargo install spotify_player --no-default-features
 
 ### Audio Visualization
 
-Real-time audio visualization is displayed in the playback window as a frequency-band bar chart (64 log-scale bands from bass (left) to treble (right)) while music is streamed locally via the integrated [librespot](https://github.com/librespot-org/librespot) player.
+Real-time audio visualization is displayed in the playback window as a frequency-band bar chart (128 log-scale bands from bass (left) to treble (right)) while music is streamed locally via the integrated [librespot](https://github.com/librespot-org/librespot) player.
 
 With the `system-audio-visualization` feature (enabled by default in this fork), set `enable_system_audio_visualization` to `true` to also drive the bars from the PipeWire/Pulse default-sink monitor when playback is on an external Spotify Connect device (for example desktop Spotify playing local/lossless files). The visualization area is still hidden when nothing is playing.
 

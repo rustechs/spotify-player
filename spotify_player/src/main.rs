@@ -17,6 +17,8 @@ mod system_audio;
 mod token;
 mod ui;
 mod utils;
+#[cfg(feature = "streaming")]
+mod vis;
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;

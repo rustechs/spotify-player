@@ -30,7 +30,8 @@ This file guides Claude Code when working in this repository.
 | `event/{page,popup}.rs`       | Key event dispatch per page / popup overlay                                 |
 | `ui/mod.rs`                   | ratatui render loop; main layout dispatch                                   |
 | `ui/{page,playback,popup}.rs` | Render functions for pages, playback bar, popups                            |
-| `ui/streaming.rs`             | FFT audio visualizer: `BandProcessor`, `VisualizationSink`, `VisBands`, bar chart |
+| `vis.rs`                      | Shared FFT state/processor: `VisBands`, `BandProcessor` (feature-gated)     |
+| `ui/streaming.rs`             | librespot `VisualizationSink` + spectrum bar-chart render (feature-gated)   |
 | `streaming.rs`                | librespot connection + audio backend setup (feature-gated)                  |
 | `system_audio.rs`             | PipeWire/Pulse monitor capture for Connect-device visualization (feature-gated) |
 | `cli/`                        | Unix socket server and client for inter-process CLI commands                |

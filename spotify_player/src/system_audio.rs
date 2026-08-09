@@ -7,7 +7,7 @@
 use crate::{
     config,
     state::SharedState,
-    ui::streaming::{BandProcessor, VisBands},
+    vis::{BandProcessor, VisBands},
 };
 use anyhow::{anyhow, Context, Result};
 use libpulse_binding::{sample, stream};
