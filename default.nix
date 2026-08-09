@@ -30,6 +30,8 @@
   withNotify ? true,
   withSixel ? true,
   withFuzzy ? true,
+  # Connect-device spectrum viz via PipeWire/Pulse monitor (matches Cargo default in this fork).
+  withSystemAudioVisualization ? true,
   stdenv,
   makeBinaryWrapper,
 }:
@@ -82,6 +84,7 @@ rustPlatform.buildRustPackage rec {
   ++ lib.optionals (withAudioBackend == "alsa") [ alsa-lib ]
   ++ lib.optionals (withAudioBackend == "pulseaudio") [ libpulseaudio ]
   ++ lib.optionals (withAudioBackend == "rodio" && stdenv.hostPlatform.isLinux) [ alsa-lib ]
+  ++ lib.optionals withSystemAudioVisualization [ libpulseaudio ]
   ++ lib.optionals (withAudioBackend == "portaudio") [ portaudio ]
   ++ lib.optionals (withAudioBackend == "jackaudio") [ libjack2 ]
   ++ lib.optionals (withAudioBackend == "rodiojack") [
@@ -106,6 +109,7 @@ rustPlatform.buildRustPackage rec {
     ++ lib.optionals withDaemon [ "daemon" ]
     ++ lib.optionals withNotify [ "notify" ]
     ++ lib.optionals withStreaming [ "streaming" ]
+    ++ lib.optionals withSystemAudioVisualization [ "system-audio-visualization" ]
     ++ lib.optionals withSixel [ "sixel" ]
     ++ lib.optionals withFuzzy [ "fzf" ];
 

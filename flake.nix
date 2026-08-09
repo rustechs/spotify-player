@@ -30,6 +30,7 @@
               # spotify-player dependencies
               alsa-lib
               dbus-glib
+              libpulseaudio
               libsixel
               openssl
             ];
