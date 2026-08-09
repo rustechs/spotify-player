@@ -84,12 +84,4 @@ impl State {
     pub fn should_use_custom_queue(&self) -> bool {
         self.is_streaming_enabled() && config::get_config().app_config.custom_queue
     }
-
-    /// Returns `true` when any visualization audio source is live (local
-    /// librespot sink and/or system-audio capture). Used by the UI to decide
-    /// whether to allocate and render the audio-visualization area.
-    #[cfg(feature = "streaming")]
-    pub fn is_visualization_active(&self) -> bool {
-        self.vis_bands.as_ref().is_some_and(|b| b.lock().is_active)
-    }
 }

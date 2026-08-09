@@ -104,14 +104,20 @@ pub fn render_audio_visualization(frame: &mut Frame, state: &SharedState, rect: 
         return;
     };
     let guard = vis_lock.lock();
-    if !guard.is_active {
-        return;
-    }
-    let display_decay = decay_for_elapsed(guard.updated_at.elapsed());
-    let peak_norm =
-        (guard.peak_envelope * peak_decay_for_elapsed(guard.updated_at.elapsed())).max(1e-6);
-    // Copy the fixed-size array by value — no heap allocation.
-    let values = guard.values;
+    // When no live audio source is feeding bands (paused / silence), keep the
+    // chart mounted but draw an idle zero baseline instead of hiding it.
+    let values = if guard.is_active {
+        let display_decay = decay_for_elapsed(guard.updated_at.elapsed());
+        let peak_norm =
+            (guard.peak_envelope * peak_decay_for_elapsed(guard.updated_at.elapsed())).max(1e-6);
+        let mut normalised = guard.values;
+        for v in &mut normalised {
+            *v = ((*v * display_decay) / peak_norm).clamp(0.0, 1.0).powf(0.5);
+        }
+        normalised
+    } else {
+        [0.0f32; crate::vis::NUM_BANDS]
+    };
     drop(guard);
     let num_bars = (rect.width as usize).min(values.len()).max(1);
     // Multiply by 8 to use ratatui's eighth-block characters (▁▂▃▄▅▆▇█),
@@ -122,11 +128,7 @@ pub fn render_audio_visualization(frame: &mut Frame, state: &SharedState, rect: 
     let bars: Vec<Bar> = (0..num_bars)
         .map(|i| {
             let idx = ((i as f64 * step) as usize).min(values.len() - 1);
-            // Normalise against the slow peak envelope, then apply inter-frame decay.
-            // Sqrt (gamma 0.5) scaling boosts quiet signals without clipping louds.
-            let norm = ((values[idx] * display_decay) / peak_norm)
-                .clamp(0.0, 1.0)
-                .powf(0.5);
+            let norm = values[idx];
             let val = (norm * max_val as f32) as u64;
             Bar::default()
                 .value(val)
