@@ -5811,6 +5811,8 @@ dependencies = [
  "fuzzy-matcher",
  "html-escape",
  "image",
+ "libpulse-binding",
+ "libpulse-simple-binding",
  "librespot-connect",
  "librespot-core",
  "librespot-metadata",

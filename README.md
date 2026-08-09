@@ -69,23 +69,23 @@ A Spotify Premium account is **required**.
 ##### Linux
 
 - [Rust and cargo](https://www.rust-lang.org/tools/install) as the build dependencies
-- install `openssl`, `alsa-lib` (`streaming` feature), `libdbus` (`media-control` feature).
+- install `openssl`, `alsa-lib` (`streaming` feature), `libdbus` (`media-control` feature), `libpulse` (`system-audio-visualization` feature, enabled by default in this fork).
   - For example, on Debian based systems, run the below command to install application's dependencies:
 
     ```shell
-    sudo apt install libssl-dev libasound2-dev libdbus-1-dev
+    sudo apt install libssl-dev libasound2-dev libdbus-1-dev libpulse-dev
     ```
 
   - On RHEL/Fedora based systems, run the below command to install application's dependencies :
 
     ```shell
-    sudo dnf install openssl-devel alsa-lib-devel dbus-devel
+    sudo dnf install openssl-devel alsa-lib-devel dbus-devel pulseaudio-libs-devel
     ```
 
     or if you're using `yum`:
 
     ```shell
-    sudo yum install openssl-devel alsa-lib-devel dbus-devel
+    sudo yum install openssl-devel alsa-lib-devel dbus-devel pulseaudio-libs-devel
     ```
 
 ### Binaries
@@ -277,9 +277,11 @@ cargo install spotify_player --no-default-features
 
 ### Audio Visualization
 
-Real-time audio visualization is displayed in the playback window as a frequency-band bar chart (64 log-scale bands from bass (left) to treble (right)) while music is streamed locally via the integrated [librespot](https://github.com/librespot-org/librespot) player. The visualization area is hidden when playback is on an external Spotify Connect device or when the playback is not playing.
+Real-time audio visualization is displayed in the playback window as a frequency-band bar chart (128 log-scale bands from bass (left) to treble (right)) while music is streamed locally via the integrated [librespot](https://github.com/librespot-org/librespot) player.
 
-Set `enable_audio_visualization` to `true` in your config to enable this feature. See [config docs](https://github.com/aome510/spotify-player/blob/master/docs/config.md).
+With the `system-audio-visualization` feature (enabled by default in this fork), set `enable_system_audio_visualization` to `true` to also drive the bars from the PipeWire/Pulse default-sink monitor when playback is on an external Spotify Connect device (for example desktop Spotify playing local/lossless files). The visualization area is still hidden when nothing is playing.
+
+Set `enable_audio_visualization` to `true` in your config to enable this feature. See [config docs](./docs/config.md).
 
 ![Audio Visualization](https://github.com/user-attachments/assets/8c21c1b0-5276-4a9e-b719-e0c2bd555537)
 

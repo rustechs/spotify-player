@@ -34,7 +34,7 @@ pub struct State {
     /// `Some` only when `enable_audio_visualization` is `true`; avoids allocating
     /// the mutex/state entirely when the feature is not in use.
     #[cfg(feature = "streaming")]
-    pub vis_bands: Option<Arc<Mutex<crate::ui::streaming::VisBands>>>,
+    pub vis_bands: Option<Arc<Mutex<crate::vis::VisBands>>>,
 
     pub logs: Arc<Mutex<VecDeque<String>>>,
 }
@@ -58,9 +58,7 @@ impl State {
             is_daemon,
             #[cfg(feature = "streaming")]
             vis_bands: if configs.app_config.enable_audio_visualization {
-                Some(Arc::new(Mutex::new(
-                    crate::ui::streaming::VisBands::default(),
-                )))
+                Some(Arc::new(Mutex::new(crate::vis::VisBands::default())))
             } else {
                 None
             },
@@ -87,12 +85,11 @@ impl State {
         self.is_streaming_enabled() && config::get_config().app_config.custom_queue
     }
 
-    /// Returns `true` when the local librespot player is actively streaming
-    /// audio (i.e. a `Playing` event has been received and no `Paused` / `stop`
-    /// has occurred since).  Used by the UI to decide whether to allocate and
-    /// render the audio-visualization area.
+    /// Returns `true` when any visualization audio source is live (local
+    /// librespot sink and/or system-audio capture). Used by the UI to decide
+    /// whether to allocate and render the audio-visualization area.
     #[cfg(feature = "streaming")]
-    pub fn is_local_streaming_active(&self) -> bool {
+    pub fn is_visualization_active(&self) -> bool {
         self.vis_bands.as_ref().is_some_and(|b| b.lock().is_active)
     }
 }

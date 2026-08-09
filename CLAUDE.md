@@ -30,8 +30,10 @@ This file guides Claude Code when working in this repository.
 | `event/{page,popup}.rs`       | Key event dispatch per page / popup overlay                                 |
 | `ui/mod.rs`                   | ratatui render loop; main layout dispatch                                   |
 | `ui/{page,playback,popup}.rs` | Render functions for pages, playback bar, popups                            |
-| `ui/streaming.rs`             | FFT audio visualizer: `VisualizationSink`, `VisBands`, bar chart            |
+| `vis.rs`                      | Shared FFT state/processor: `VisBands`, `BandProcessor` (feature-gated)     |
+| `ui/streaming.rs`             | librespot `VisualizationSink` + spectrum bar-chart render (feature-gated)   |
 | `streaming.rs`                | librespot connection + audio backend setup (feature-gated)                  |
+| `system_audio.rs`             | PipeWire/Pulse monitor capture for Connect-device visualization (feature-gated) |
 | `cli/`                        | Unix socket server and client for inter-process CLI commands                |
 | `auth.rs`                     | OAuth scopes and librespot credential/session building                      |
 | `media_control.rs`            | OS media key integration via `souvlaki` (feature-gated)                     |
@@ -53,6 +55,7 @@ Event/UI threads never call async functions directly. They send a `ClientRequest
 | Feature                                                                                                                                 | Effect                                                   |
 | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
 | `streaming`                                                                                                                             | librespot playback, Spotify Connect, audio visualization |
+| `system-audio-visualization`                                                                                                            | PipeWire/Pulse monitor capture for Connect-device spectrum viz |
 | `rodio-backend`                                                                                                                         | Default audio sink (rodio)                               |
 | `alsa-backend`, `pulseaudio-backend`, `portaudio-backend`, `jackaudio-backend`, `rodiojack-backend`, `sdl-backend`, `gstreamer-backend` | Alternative audio sinks                                  |
 | `media-control`                                                                                                                         | OS media key integration                                 |

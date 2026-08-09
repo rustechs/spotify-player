@@ -51,6 +51,8 @@ spotify_player -o device.volume=80 -o theme=dracula
 | `enable_media_control`            | Enable media control support (requires `media-control` feature).                                     | `true` (Linux), `false` (macOS/Windows)                                |
 | `enable_streaming`                | Enable streaming (`Always`, `Never`, or `DaemonOnly`).                                               | `Always`                                                               |
 | `enable_audio_visualization`      | Show a real-time frequency bar chart in the playback window (requires `streaming` feature).          | `false`                                                                |
+| `enable_system_audio_visualization` | Capture PipeWire/Pulse monitor audio so the visualizer works with external Connect devices (requires `system-audio-visualization` feature). | `false` |
+| `system_audio_source`             | Pulse/PipeWire source for system-audio visualization (`auto` = `<default-sink>.monitor`).            | `auto`                                                                 |
 | `enable_notify`                   | Enable notifications (requires `notify` feature).                                                    | `true`                                                                 |
 | `enable_cover_image_cache`        | Cache album cover images.                                                                            | `true`                                                                 |
 | `notify_streaming_only`           | Send notifications only when streaming is active (requires `streaming` and `notify` features).       | `false`                                                                |
