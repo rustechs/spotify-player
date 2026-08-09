@@ -317,8 +317,8 @@ impl Sink for VisualizationSink {
 
 /// Precomputes the `(start, end)` FFT bin ranges for each log-scale band.
 ///
-/// Called once in `VisualizationSink::new()`; the result is stored and
-/// reused every hop so `write()` never runs `powf` per band per frame.
+/// Called once in `BandProcessor::new()`; the result is stored and
+/// reused every hop so processing never runs `powf` per band per frame.
 /// Bin 0 (DC component) is skipped by starting `used_up_to` at 1.
 fn precompute_band_ranges(num_bins: usize, num_bands: usize) -> Vec<(usize, usize)> {
     let log_min = 1.0_f64;

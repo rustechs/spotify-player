@@ -33,8 +33,7 @@ pub fn render_playback_window(
             #[cfg(feature = "streaming")]
             let (rect, vis_rect) = {
                 let configs = config::get_config();
-                if configs.app_config.enable_audio_visualization
-                    && state.is_visualization_active()
+                if configs.app_config.enable_audio_visualization && state.is_visualization_active()
                 {
                     let chunks = Layout::vertical([
                         Constraint::Fill(0),

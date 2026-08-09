@@ -124,7 +124,7 @@ fn capture_loop(state: &SharedState, bands: &Arc<Mutex<VisBands>>, source_cfg: &
         }
 
         if let Err(err) = stream.read(&mut raw) {
-            tracing::warn!("system-audio-vis: read failed: {err}; reopening stream");
+            tracing::warn!("system-audio-vis: read failed: {err:#}; reopening stream");
             simple = None;
             current_source = None;
             std::thread::sleep(RETRY_DELAY);
