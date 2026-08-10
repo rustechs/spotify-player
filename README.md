@@ -425,8 +425,8 @@ List of supported commands:
 | `PreviousTrack`                 | previous track                                                                                     | `p`                |
 | `ResumePause`                   | resume/pause based on the current playback                                                         | `space`            |
 | `PlayRandom`                    | play a random track in the current context                                                         | `.`                |
-| `Repeat`                        | cycle the repeat mode                                                                              | `C-r`              |
-| `Shuffle`                       | toggle the shuffle mode                                                                            | `C-s`              |
+| `Repeat`                        | cycle the repeat mode                                                                              | `r`                |
+| `Shuffle`                       | toggle the shuffle mode                                                                            | `s`, `C-s`         |
 | `VolumeChange`                  | change playback volume by an offset (default shortcuts use 5%)                                     | `+`, `-`           |
 | `Mute`                          | toggle playback volume between 0% and previous level                                               | `_`                |
 | `SeekStart`                     | seek start of current track                                                                        | `^`                |
@@ -441,7 +441,7 @@ List of supported commands:
 | `SelectFirstOrScrollToTop`      | select the first item in a list/table or scroll to the top                                         | `g g`, `home`      |
 | `SelectLastOrScrollToBottom`    | select the last item in a list/table or scroll to the bottom                                       | `G`, `end`         |
 | `ChooseSelected`                | choose the selected item                                                                           | `enter`            |
-| `RefreshPlayback`               | manually refresh the current playback                                                              | `r`                |
+| `RefreshPlayback`               | manually refresh the current playback                                                              | `C-r`              |
 | `RestartIntegratedClient`       | restart the integrated client (`streaming` feature only)                                           | `R`                |
 | `ShowActionsOnSelectedItem`     | open a popup showing actions on a selected item                                                    | `g a`, `C-space`   |
 | `ShowActionsOnCurrentTrack`     | open a popup showing actions on the current track                                                  | `a`                |
@@ -468,14 +468,14 @@ List of supported commands:
 | `PreviousPage`                  | go to the previous page                                                                            | `backspace`, `C-q` |
 | `OpenLogs`                      | go the the application logs page                                                                   | `g o`              |
 | `OpenSpotifyLinkFromClipboard`  | open a Spotify link from clipboard                                                                 | `O`                |
-| `SortTrackByTitle`              | sort the track table (if any) by track's title                                                     | `s t`              |
-| `SortTrackByArtists`            | sort the track table (if any) by track's artists                                                   | `s a`              |
-| `SortTrackByAlbum`              | sort the track table (if any) by track's album                                                     | `s A`              |
-| `SortTrackByAddedDate`          | sort the track table (if any) by track's added date                                                | `s D`              |
-| `SortTrackByDuration`           | sort the track table (if any) by track's duration                                                  | `s d`              |
-| `SortLibraryAlphabetically`     | sort the library alphabetically                                                                    | `s l a`            |
-| `SortLibraryByRecent`           | sort the library (playlists and albums) by recently added items                                    | `s l r`            |
-| `ReverseOrder`                  | reverse the order of the track table (if any)                                                      | `s r`              |
+| `SortTrackByTitle`              | sort the track table (if any) by track's title                                                     | `o t`              |
+| `SortTrackByArtists`            | sort the track table (if any) by track's artists                                                   | `o a`              |
+| `SortTrackByAlbum`              | sort the track table (if any) by track's album                                                     | `o A`              |
+| `SortTrackByAddedDate`          | sort the track table (if any) by track's added date                                                | `o D`              |
+| `SortTrackByDuration`           | sort the track table (if any) by track's duration                                                  | `o d`              |
+| `SortLibraryAlphabetically`     | sort the library alphabetically                                                                    | `o l a`            |
+| `SortLibraryByRecent`           | sort the library (playlists and albums) by recently added items                                    | `o l r`            |
+| `ReverseOrder`                  | reverse the order of the track table (if any)                                                      | `o r`              |
 | `MovePlaylistItemUp`            | move playlist item up one position                                                                 | `C-k`              |
 | `MovePlaylistItemDown`          | move playlist item down one position                                                               | `C-j`              |
 | `CreatePlaylist`                | create a new playlist                                                                              | `N`                |
