@@ -208,6 +208,7 @@ impl BandProcessor {
     }
 
     /// Request a zero-padded first FFT hop on the next batch (e.g. after pause).
+    #[cfg(all(feature = "system-audio-visualization", target_os = "linux"))]
     pub fn mark_warm_start(&mut self) {
         self.warm_start = true;
     }
