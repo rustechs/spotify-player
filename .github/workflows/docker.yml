@@ -6,8 +6,28 @@ on:
       - main
 
 jobs:
+  check-secrets:
+    name: Check Docker Hub credentials
+    runs-on: ubuntu-latest
+    outputs:
+      has_docker_secrets: ${{ steps.check.outputs.has_docker_secrets }}
+    steps:
+      - name: Detect configured Hub secrets
+        id: check
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_PASSWORD: ${{ secrets.DOCKERHUB_PASSWORD }}
+        run: |
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_PASSWORD" ]; then
+            echo "has_docker_secrets=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_docker_secrets=false" >> "$GITHUB_OUTPUT"
+          fi
+
   docker:
     name: Docker Build and Push
+    needs: check-secrets
+    if: needs.check-secrets.outputs.has_docker_secrets == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out the repo
