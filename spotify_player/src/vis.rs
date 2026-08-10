@@ -28,7 +28,8 @@ const DECAY_FACTOR_PEAK: f32 = 0.9985;
 /// (`decay_for_elapsed`, `peak_decay_for_elapsed`).
 /// The audio processors use their own `sample_rate` field so that
 /// decay timings stay precise if audio arrives at 48 000 Hz instead.
-const SAMPLE_RATE: f32 = 44_100.0;
+/// Nominal PCM sample rate used for frequency-axis labels in the UI.
+pub const SAMPLE_RATE: f32 = 44_100.0;
 
 /// Shared frequency-band state exposed between the audio sink and the UI.
 /// Storing `updated_at` lets the render function apply smooth time-based decay
@@ -57,6 +58,8 @@ pub struct VisBands {
     /// System-audio capture yields whenever this is true so the two sources
     /// never fight over `values`.
     pub local_sink_active: bool,
+    /// PCM sample rate (Hz) of the active visualization source; used for axis labels.
+    pub sample_rate: f32,
 }
 
 impl VisBands {
@@ -67,6 +70,7 @@ impl VisBands {
             peak_envelope: 1e-6,
             is_active: false,
             local_sink_active: false,
+            sample_rate: SAMPLE_RATE,
         }
     }
 }
@@ -247,6 +251,7 @@ impl BandProcessor {
                 *stored = (*stored * decay).max(*fresh);
             }
             g.peak_envelope = (g.peak_envelope * peak_decay).max(frame_peak);
+            g.sample_rate = self.sample_rate;
             g.updated_at = Instant::now();
             drop(g);
 
@@ -310,5 +315,48 @@ fn smooth_bands(bands: &mut [f32], scratch: &mut [f32]) {
         let prev = scratch[if i > 0 { i - 1 } else { 0 }];
         let next = scratch[if i + 1 < n { i + 1 } else { n - 1 }];
         bands[i] = prev * 0.25 + scratch[i] * 0.5 + next * 0.25;
+    }
+}
+
+/// Lowest displayed frequency (Hz) on the log-scale axis — first usable FFT bin.
+pub fn min_display_hz(sample_rate: f32) -> f32 {
+    sample_rate / FFT_SIZE as f32
+}
+
+/// Highest displayed frequency (Hz) — Nyquist.
+pub fn max_display_hz(sample_rate: f32) -> f32 {
+    sample_rate / 2.0
+}
+
+/// Map a frequency (Hz) to a horizontal fraction in `[0, 1]` on the log-scale axis.
+pub fn freq_to_x_fraction(freq_hz: f32, sample_rate: f32) -> f32 {
+    let f_min = min_display_hz(sample_rate);
+    let f_max = max_display_hz(sample_rate);
+    let log_f = freq_hz.clamp(f_min, f_max).log10();
+    let log_min = f_min.log10();
+    let log_max = f_max.log10();
+    ((log_f - log_min) / (log_max - log_min)).clamp(0.0, 1.0)
+}
+
+/// Convert dB relative to peak into the normalised bar scale used for rendering.
+pub fn db_to_norm(db: f32) -> f32 {
+    10_f32.powf(db / 40.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freq_to_x_fraction_maps_endpoints() {
+        let rate = 44_100.0;
+        assert!((freq_to_x_fraction(min_display_hz(rate), rate) - 0.0).abs() < 1e-6);
+        assert!((freq_to_x_fraction(max_display_hz(rate), rate) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn db_to_norm_matches_render_curve() {
+        assert!((db_to_norm(0.0) - 1.0).abs() < 1e-6);
+        assert!(db_to_norm(-40.0) < db_to_norm(-12.0));
     }
 }

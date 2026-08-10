@@ -50,7 +50,7 @@ spotify_player -o device.volume=80 -o theme=dracula
 | `page_size_in_rows`               | Number of rows per page for navigation.                                                              | `20`                                                                   |
 | `enable_media_control`            | Enable media control support (requires `media-control` feature).                                     | `true` (Linux), `false` (macOS/Windows)                                |
 | `enable_streaming`                | Enable streaming (`Always`, `Never`, or `DaemonOnly`).                                               | `Always`                                                               |
-| `enable_audio_visualization`      | Show a real-time frequency bar chart in the playback window (requires `streaming` feature).          | `false`                                                                |
+| `enable_audio_visualization`      | Show a real-time frequency bar chart with dB/Hz axis labels and themed grid in the playback window (requires `streaming` feature). | `false`                                                                |
 | `enable_system_audio_visualization` | Capture PipeWire/Pulse monitor audio so the visualizer works with external Connect devices (requires `system-audio-visualization` feature; Linux only). | `false` |
 | `system_audio_source`             | Pulse/PipeWire source for system-audio visualization (`auto` = `<default-sink>.monitor`; Linux only).            | `auto`                                                                 |
 | `enable_notify`                   | Enable notifications (requires `notify` feature).                                                    | `true`                                                                 |
@@ -62,7 +62,7 @@ spotify_player -o device.volume=80 -o theme=dracula
 | `explicit_icon`                   | Icon for explicit songs.                                                                             | `(E)`                                                                  |
 | `border_type`                     | Border style: `Hidden`, `Plain`, `Rounded`, `Double`, or `Thick`.                                    | `Plain`                                                                |
 | `progress_bar_type`               | Progress bar style: `Rectangle` or `Line`.                                                           | `Rectangle`                                                            |
-| `progress_bar_position`           | Progress bar position: `Bottom` or `Right`.                                                          | `Bottom`                                                               |
+| `progress_bar_position`           | Progress bar position: `Bottom` or `Right`. When `enable_audio_visualization` is `true`, the bar is always placed below the chart regardless of this setting. | `Bottom`                                                               |
 | `layout`                          | Layout configuration (see below).                                                                    | See below                                                              |
 | `genre_num`                       | Max number of genres to display in playback text.                                                    | `2`                                                                    |
 | `cover_img_length`                | Cover image length in terminal columns (requires `image` feature).                                   | `0` (auto, see notes)                                                  |
@@ -83,7 +83,7 @@ spotify_player -o device.volume=80 -o theme=dracula
 - `ap_port` and `proxy` are passed to Librespot for session configuration. Librespot uses its defaults if unset.
 - Setting a positive `app_refresh_duration_in_ms` increases API usage and may trigger rate limits. By default, `playback_refresh_duration_in_ms` is `3000` (every 3 seconds). Set it to `0` to refresh playback only on events or commands.
 - `enable_streaming` accepts `Always`, `Never`, or `DaemonOnly`. For backward compatibility, `true`/`false` are also accepted.
-- `border_type`, `progress_bar_type`, and `progress_bar_position` accept only the values listed in the table above.
+- `border_type`, `progress_bar_type`, and `progress_bar_position` accept only the values listed in the table above. With `enable_audio_visualization` enabled, `progress_bar_position` is ignored and the progress bar is always rendered below the visualization.
 - `explicit_icon` can be set to any Unicode character or an empty string to disable explicit markers.
 - `cover_img_length = 0` (the default) auto-derives the cover's column count from the terminal's cell aspect ratio. Set a non-zero `cover_img_length` to size the box manually.
 
