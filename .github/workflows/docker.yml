@@ -9,6 +9,7 @@ jobs:
   docker:
     name: Docker Build and Push
     runs-on: ubuntu-latest
+    if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_PASSWORD != '' }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
