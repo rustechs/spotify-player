@@ -130,6 +130,11 @@ pub struct AppConfig {
 
     pub enable_cover_image_cache: bool,
 
+    /// Prefer transferring playback to a Connect device with this name when no
+    /// device is active (e.g. `"estelle"` for the desktop Spotify client).
+    /// Especially useful with `enable_streaming = "Never"`.
+    pub preferred_device: Option<String>,
+
     pub device: DeviceConfig,
 
     #[cfg(all(feature = "streaming", feature = "notify"))]
@@ -346,7 +351,9 @@ impl Default for AppConfig {
             proxy: None,
             ap_port: None,
             app_refresh_duration_in_ms: 32,
-            playback_refresh_duration_in_ms: 3000,
+            // Event-driven by default. Polling every second burns Spotify Web API
+            // quota and can freeze the TUI after 429s / hung session reconnects.
+            playback_refresh_duration_in_ms: 0,
 
             page_size_in_rows: 20,
 
@@ -397,6 +404,8 @@ impl Default for AppConfig {
             enable_notify: true,
 
             enable_cover_image_cache: true,
+
+            preferred_device: None,
 
             device: DeviceConfig::default(),
 

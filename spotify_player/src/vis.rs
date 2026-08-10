@@ -13,6 +13,9 @@ const FFT_SIZE: usize = 1024;
 /// Number of new samples consumed per FFT frame (overlap = `FFT_SIZE` - `HOP_SIZE`).
 /// At 44100 Hz: 128 samples ≈ 2.9 ms between updates.
 const HOP_SIZE: usize = 128;
+/// Mono samples required before the first zero-padded FFT hop (~one Pulse read at
+/// 48 kHz) so bars appear without waiting for a full 1024-sample window.
+const WARM_START_MIN_SAMPLES: usize = HOP_SIZE;
 pub const NUM_BANDS: usize = 128;
 
 /// Per-FFT-frame decay multiplier for individual bands.
@@ -60,6 +63,11 @@ pub struct VisBands {
     pub local_sink_active: bool,
     /// PCM sample rate (Hz) of the active visualization source; used for axis labels.
     pub sample_rate: f32,
+    /// Playable-item key the full-scale intro was armed for (track/episode id).
+    /// Re-armed whenever the loaded item changes so bars flash with each new track.
+    intro_item_key: Option<String>,
+    /// Wall-clock start of the full-scale (0 dB) intro decay. `None` when idle.
+    intro_started_at: Option<Instant>,
 }
 
 impl VisBands {
@@ -71,6 +79,37 @@ impl VisBands {
             is_active: false,
             local_sink_active: false,
             sample_rate: SAMPLE_RATE,
+            intro_item_key: None,
+            intro_started_at: None,
+        }
+    }
+
+    /// Arm a full-scale decaying intro for `item_key` if it is a new playable item.
+    ///
+    /// The UI blends this with live FFT data so bars appear immediately with the
+    /// axes, then fall using the same render-side decay as music response.
+    pub fn arm_intro_for_item(&mut self, item_key: &str) {
+        if self.intro_item_key.as_deref() == Some(item_key) {
+            return;
+        }
+        self.intro_item_key = Some(item_key.to_string());
+        self.intro_started_at = Some(Instant::now());
+    }
+
+    /// Clear intro state when no track is loaded.
+    pub fn clear_intro(&mut self) {
+        self.intro_item_key = None;
+        self.intro_started_at = None;
+    }
+
+    /// Current intro bar height in `[0, 1]`, or `None` if the intro has finished.
+    pub fn intro_level(&self) -> Option<f32> {
+        let started = self.intro_started_at?;
+        let level = decay_for_elapsed(started.elapsed());
+        if level < 1e-3 {
+            None
+        } else {
+            Some(level)
         }
     }
 }
@@ -134,6 +173,9 @@ pub struct BandProcessor {
     new_bands: [f32; NUM_BANDS],
     /// Scratch buffer for `smooth_bands` — avoids `to_vec()` allocation per hop.
     smooth_scratch: [f32; NUM_BANDS],
+    /// When true, emit one zero-padded FFT hop as soon as `WARM_START_MIN_SAMPLES`
+    /// are buffered instead of waiting for `FFT_SIZE` samples.
+    warm_start: bool,
 }
 
 impl BandProcessor {
@@ -161,7 +203,13 @@ impl BandProcessor {
             band_ranges,
             new_bands: [0.0f32; NUM_BANDS],
             smooth_scratch: [0.0f32; NUM_BANDS],
+            warm_start: true,
         }
+    }
+
+    /// Request a zero-padded first FFT hop on the next batch (e.g. after pause).
+    pub fn mark_warm_start(&mut self) {
+        self.warm_start = true;
     }
 
     /// Push mono f32 samples and publish any completed FFT hops.
@@ -181,8 +229,10 @@ impl BandProcessor {
         g.updated_at = Instant::now();
         g.is_active = false;
         g.local_sink_active = false;
+        g.clear_intro();
         drop(g);
         self.sample_buf.clear();
+        self.warm_start = true;
     }
 
     fn process_hops(&mut self) {
@@ -196,66 +246,73 @@ impl BandProcessor {
         // Decay correctness is preserved by using wall-clock elapsed from
         // vis_bands.updated_at: hops within the same write() call are ~3 ms apart,
         // so DECAY_FACTOR ^ (~1 hop elapsed) ≈ 0.985 ≈ 1.0 — no peak smearing.
+        if self.warm_start
+            && self.sample_buf.len() >= WARM_START_MIN_SAMPLES
+            && self.sample_buf.len() < FFT_SIZE
+        {
+            self.run_hop(self.sample_buf.len());
+            self.warm_start = false;
+        }
+
         while self.sample_buf.len() >= FFT_SIZE {
-            // Fill fft_buf using as_slices() to avoid make_contiguous()'s
-            // potential O(n) rotation, and reuse the preallocated buffer.
-            {
-                let (front, back) = self.sample_buf.as_slices();
-                if front.len() >= FFT_SIZE {
-                    for (dst, (&s, &w)) in self
-                        .fft_buf
-                        .iter_mut()
-                        .zip(front.iter().zip(self.hann_window.iter()))
-                    {
-                        *dst = Complex::new(s * w, 0.0);
-                    }
+            self.run_hop(FFT_SIZE);
+            self.warm_start = false;
+        }
+    }
+
+    fn run_hop(&mut self, sample_count: usize) {
+        debug_assert!(sample_count <= FFT_SIZE);
+        self.fill_fft_window(sample_count);
+
+        self.fft.process(&mut self.fft_buf);
+
+        // Compute magnitudes in place — no allocation per hop.
+        for (mag, c) in self.magnitudes.iter_mut().zip(self.fft_buf.iter()) {
+            *mag = c.norm();
+        }
+
+        // Fill pre-allocated band buffers in-place — no Vec allocation per hop.
+        fill_log_bands(&self.magnitudes, &self.band_ranges, &mut self.new_bands);
+        smooth_bands(&mut self.new_bands, &mut self.smooth_scratch);
+
+        // Apply wall-clock decay since the last hop, then rise to any louder value.
+        // Use self.sample_rate for precision (may be 44100 or 48000 Hz).
+        let mut g = self.bands.lock();
+        let elapsed_hops =
+            g.updated_at.elapsed().as_secs_f32() * self.sample_rate / HOP_SIZE as f32;
+        let decay = DECAY_FACTOR.powf(elapsed_hops);
+        let peak_decay = DECAY_FACTOR_PEAK.powf(elapsed_hops);
+        let frame_peak = self.new_bands.iter().copied().fold(0.0_f32, f32::max);
+        for (stored, fresh) in g.values.iter_mut().zip(self.new_bands.iter()) {
+            *stored = (*stored * decay).max(*fresh);
+        }
+        g.peak_envelope = (g.peak_envelope * peak_decay).max(frame_peak);
+        g.sample_rate = self.sample_rate;
+        g.updated_at = Instant::now();
+        g.is_active = true;
+        drop(g);
+
+        self.sample_buf.drain(..HOP_SIZE);
+    }
+
+    fn fill_fft_window(&mut self, sample_count: usize) {
+        let (front, back) = self.sample_buf.as_slices();
+        for (i, (dst, &w)) in self
+            .fft_buf
+            .iter_mut()
+            .zip(self.hann_window.iter())
+            .enumerate()
+        {
+            let s = if i < sample_count {
+                if i < front.len() {
+                    front[i]
                 } else {
-                    let split = front.len();
-                    for (dst, (&s, &w)) in self.fft_buf[..split]
-                        .iter_mut()
-                        .zip(front.iter().zip(self.hann_window[..split].iter()))
-                    {
-                        *dst = Complex::new(s * w, 0.0);
-                    }
-                    let remaining = FFT_SIZE - split;
-                    for (dst, (&s, &w)) in self.fft_buf[split..].iter_mut().zip(
-                        back[..remaining]
-                            .iter()
-                            .zip(self.hann_window[split..].iter()),
-                    ) {
-                        *dst = Complex::new(s * w, 0.0);
-                    }
+                    back[i - front.len()]
                 }
-            }
-
-            self.fft.process(&mut self.fft_buf);
-
-            // Compute magnitudes in place — no allocation per hop.
-            for (mag, c) in self.magnitudes.iter_mut().zip(self.fft_buf.iter()) {
-                *mag = c.norm();
-            }
-
-            // Fill pre-allocated band buffers in-place — no Vec allocation per hop.
-            fill_log_bands(&self.magnitudes, &self.band_ranges, &mut self.new_bands);
-            smooth_bands(&mut self.new_bands, &mut self.smooth_scratch);
-
-            // Apply wall-clock decay since the last hop, then rise to any louder value.
-            // Use self.sample_rate for precision (may be 44100 or 48000 Hz).
-            let mut g = self.bands.lock();
-            let elapsed_hops =
-                g.updated_at.elapsed().as_secs_f32() * self.sample_rate / HOP_SIZE as f32;
-            let decay = DECAY_FACTOR.powf(elapsed_hops);
-            let peak_decay = DECAY_FACTOR_PEAK.powf(elapsed_hops);
-            let frame_peak = self.new_bands.iter().copied().fold(0.0_f32, f32::max);
-            for (stored, fresh) in g.values.iter_mut().zip(self.new_bands.iter()) {
-                *stored = (*stored * decay).max(*fresh);
-            }
-            g.peak_envelope = (g.peak_envelope * peak_decay).max(frame_peak);
-            g.sample_rate = self.sample_rate;
-            g.updated_at = Instant::now();
-            drop(g);
-
-            self.sample_buf.drain(..HOP_SIZE);
+            } else {
+                0.0
+            };
+            *dst = Complex::new(s * w, 0.0);
         }
     }
 }

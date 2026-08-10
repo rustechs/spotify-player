@@ -170,7 +170,7 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
         })?;
 
     #[cfg(all(feature = "system-audio-visualization", target_os = "linux"))]
-    system_audio::start(state.clone());
+    system_audio::start(state);
 
     if !state.is_daemon {
         #[cfg(feature = "image")]
