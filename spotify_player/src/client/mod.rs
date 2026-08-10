@@ -46,6 +46,13 @@ const PLAYBACK_TYPES: [&rspotify::model::AdditionalType; 2] = [
 /// Without this, a hung `session.connect` freezes the TUI (and CLI socket).
 const SESSION_RECONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Default HTTP timeout for the app's direct `reqwest` client (`http_get` helpers).
+/// rspotify's client already defaults to 10s; keep this in the same ballpark.
+const HTTP_CLIENT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Upper bound for Spotify `Retry-After` sleeps so a huge header cannot wedge the app.
+const MAX_RETRY_AFTER: Duration = Duration::from_mins(1);
+
 /// The application's Spotify client
 #[derive(Clone)]
 pub struct AppClient {
@@ -127,7 +134,15 @@ impl AppClient {
 
         Ok(Self {
             spotify: Arc::new(spotify::Spotify::new()),
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .timeout(HTTP_CLIENT_TIMEOUT)
+                .build()
+                .unwrap_or_else(|err| {
+                    tracing::warn!(
+                        "Failed to build HTTP client with timeout, falling back to default: {err:#}"
+                    );
+                    reqwest::Client::new()
+                }),
             auth_config,
             api_client,
 
@@ -2159,7 +2174,9 @@ fn rate_limit_backoff(attempt: u32) -> Duration {
 }
 
 async fn sleep_rate_limit(attempt: u32, retry_after_secs: Option<u64>, context: &str) {
-    let wait = retry_after_secs.map_or_else(|| rate_limit_backoff(attempt), Duration::from_secs);
+    let wait = retry_after_secs
+        .map_or_else(|| rate_limit_backoff(attempt), Duration::from_secs)
+        .min(MAX_RETRY_AFTER);
     tracing::warn!(
         "Spotify API rate limited ({context}); backing off {wait:?} (attempt {})",
         attempt + 1
@@ -2259,6 +2276,7 @@ fn patch_missing_show_fields(value: &mut serde_json::Value) {
 mod tests {
     use super::{
         move_seed_track_to_front, order_transfer_device_ids, process_spotify_api_response,
+        rate_limit_backoff, MAX_RETRY_AFTER,
     };
     use crate::state::{Device, Track};
     use rspotify::model::TrackId;
@@ -2385,5 +2403,20 @@ mod tests {
         let markets = &patched["items"][0]["show"]["available_markets"];
         assert!(markets.is_array());
         assert!(markets.as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rate_limit_backoff_is_bounded() {
+        assert_eq!(rate_limit_backoff(0).as_secs(), 1);
+        assert_eq!(rate_limit_backoff(4).as_secs(), 16);
+        assert_eq!(rate_limit_backoff(10).as_secs(), 16);
+        // Oversized Retry-After values must still be capped before sleep.
+        assert!(MAX_RETRY_AFTER.as_secs() <= 60);
+        assert!(
+            std::time::Duration::from_secs(u64::MAX)
+                .min(MAX_RETRY_AFTER)
+                .as_secs()
+                <= 60
+        );
     }
 }

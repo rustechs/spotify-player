@@ -225,9 +225,11 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
         }
     }
 
-    // infinite loop to keep the main thread alive
+    // Keep the async runtime alive without blocking a worker thread.
+    // `std::thread::sleep` here would pin one tokio worker forever and can
+    // contribute to CLI/socket starvation under load.
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(1));
+        tokio::time::sleep(std::time::Duration::from_hours(1)).await;
     }
 }
 

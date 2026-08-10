@@ -38,7 +38,7 @@ const VIZ_SIGNAL_FLOOR: f32 = 1e-5;
 /// waiting for the Spotify API `is_playing` flag (which can lag by seconds).
 /// When the API says paused and the monitor is silent, bars stay flat unless
 /// a full-scale intro decay is still in progress.
-fn should_show_viz_bars(guard: &VisBands, state: &SharedState) -> bool {
+fn should_show_viz_bars(guard: &VisBands, playback_is_playing: bool) -> bool {
     if guard.intro_level().is_some() {
         return true;
     }
@@ -52,12 +52,7 @@ fn should_show_viz_bars(guard: &VisBands, state: &SharedState) -> bool {
         return true;
     }
 
-    let player = state.player.read();
-    player.playback.as_ref().is_some_and(|p| p.is_playing)
-        || player
-            .buffered_playback
-            .as_ref()
-            .is_some_and(|p| p.is_playing)
+    playback_is_playing
 }
 
 fn playable_item_key(item: &rspotify::model::PlayableItem) -> Option<String> {
@@ -312,16 +307,24 @@ pub fn render_audio_visualization(
         return;
     };
 
+    // Read player metadata before taking `vis_bands` so we never nest
+    // player under vis (system-audio holds vis) while the UI already holds `ui`.
+    let (playing_key, playback_is_playing) = {
+        let player = state.player.read();
+        let key = player.currently_playing().and_then(playable_item_key);
+        let playing = player.playback.as_ref().is_some_and(|p| p.is_playing)
+            || player
+                .buffered_playback
+                .as_ref()
+                .is_some_and(|p| p.is_playing);
+        (key, playing)
+    };
+
     // Arm a full-scale (0 dB) intro as soon as track metadata is on screen so
     // bars appear with the axes, then fall with the usual render-side decay.
     {
         let mut guard = vis_lock.lock();
-        match state
-            .player
-            .read()
-            .currently_playing()
-            .and_then(playable_item_key)
-        {
+        match playing_key {
             Some(key) => guard.arm_intro_for_item(&key),
             None => guard.clear_intro(),
         }
@@ -330,7 +333,7 @@ pub fn render_audio_visualization(
     let guard = vis_lock.lock();
     let sample_rate = guard.sample_rate;
     let intro_level = guard.intro_level();
-    let mut values = if should_show_viz_bars(&guard, state) {
+    let mut values = if should_show_viz_bars(&guard, playback_is_playing) {
         let display_decay = decay_for_elapsed(guard.updated_at.elapsed());
         let peak_norm =
             (guard.peak_envelope * peak_decay_for_elapsed(guard.updated_at.elapsed())).max(1e-6);

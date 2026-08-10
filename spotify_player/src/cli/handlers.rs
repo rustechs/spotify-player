@@ -146,6 +146,9 @@ fn handle_playback_subcommand(args: &ArgMatches) -> Result<Request> {
 fn try_connect_to_client(socket: &UdpSocket, configs: &config::Configs) -> Result<()> {
     let port = configs.app_config.client_port;
     socket.connect(("127.0.0.1", port))?;
+    // Don't hang forever if the running instance's socket handler is wedged.
+    socket.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+    socket.set_write_timeout(Some(std::time::Duration::from_secs(2)))?;
 
     // send an empty buffer as a connection request to the client
     socket.send(&[])?;
@@ -176,6 +179,10 @@ fn try_connect_to_client(socket: &UdpSocket, configs: &config::Configs) -> Resul
             return Err(err.into());
         }
     }
+
+    // CLI request/response may legitimately take several seconds (Spotify API).
+    socket.set_read_timeout(Some(std::time::Duration::from_secs(35)))?;
+    socket.set_write_timeout(Some(std::time::Duration::from_secs(35)))?;
 
     Ok(())
 }
