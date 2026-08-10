@@ -32,20 +32,26 @@ pub fn render_playback_window(
             // branch, so the full rect is used when there is nothing playing.
             // Keep the area reserved while a track is loaded (including pause) so
             // the layout does not jump; bars idle at zero when audio is silent.
+            // With visualization enabled the progress bar is always placed below
+            // the spectrogram, regardless of `progress_bar_position`.
             #[cfg(feature = "streaming")]
-            let (rect, vis_rect) = {
+            let (rect, vis_rect, progress_override) = {
                 let configs = config::get_config();
                 if configs.app_config.enable_audio_visualization {
                     let chunks = Layout::vertical([
-                        Constraint::Fill(0),
+                        Constraint::Length(playback_format_line_count()),
                         Constraint::Length(super::streaming::VIS_HEIGHT),
+                        Constraint::Length(1),
                     ])
                     .split(rect);
-                    (chunks[0], Some(chunks[1]))
+                    (chunks[0], Some(chunks[1]), Some(chunks[2]))
                 } else {
-                    (rect, None)
+                    (rect, None, None)
                 }
             };
+
+            #[cfg(not(feature = "streaming"))]
+            let progress_override: Option<Rect> = None;
 
             let (metadata_rect, progress_bar_rect) = {
                 // Render the track's cover image if `image` feature is enabled
@@ -53,7 +59,12 @@ pub fn render_playback_window(
                 {
                     let configs = config::get_config();
                     // Split the allocated rectangle into `metadata_rect`, `cover_img_rect` and `progress_bar_rect`
-                    let (metadata_rect, cover_img_rect, progress_bar_rect) =
+                    let (metadata_rect, cover_img_rect, progress_bar_rect) = if let Some(progress) =
+                        progress_override
+                    {
+                        let hor_chunks = split_rect_for_cover_img(rect, &ui.picker);
+                        (hor_chunks.1, hor_chunks.0, progress)
+                    } else {
                         match configs.app_config.progress_bar_position {
                             config::ProgressBarPosition::Bottom => {
                                 let ver_chunks = split_rect_for_progress_bar(rect); // rect, progress_bar_rect
@@ -65,7 +76,8 @@ pub fn render_playback_window(
                                 let ver_chunks = split_rect_for_progress_bar(hor_chunks.1); // metadata_rect, progress_bar_rect
                                 (ver_chunks.0, hor_chunks.0, ver_chunks.1)
                             }
-                        };
+                        }
+                    };
 
                     let url = match item {
                         rspotify::model::PlayableItem::Track(track) => {
@@ -110,8 +122,12 @@ pub fn render_playback_window(
 
                 #[cfg(not(feature = "image"))]
                 {
-                    let chunks = split_rect_for_progress_bar(rect);
-                    (chunks.0, chunks.1)
+                    if let Some(progress) = progress_override {
+                        (rect, progress)
+                    } else {
+                        let chunks = split_rect_for_progress_bar(rect);
+                        (chunks.0, chunks.1)
+                    }
                 }
             };
 
@@ -134,11 +150,11 @@ pub fn render_playback_window(
                 player.playback_progress().expect("non-empty playback"),
                 duration,
             );
-            render_playback_progress_bar(frame, ui, progress, duration, progress_bar_rect);
             #[cfg(feature = "streaming")]
             if let Some(vis_r) = vis_rect {
-                super::streaming::render_audio_visualization(frame, state, vis_r);
+                super::streaming::render_audio_visualization(frame, state, &ui.theme, vis_r);
             }
+            render_playback_progress_bar(frame, ui, progress, duration, progress_bar_rect);
             return other_rect;
         }
     }
@@ -183,6 +199,13 @@ pub fn render_playback_window(
     }
 
     other_rect
+}
+
+/// Line count implied by `playback_format` (one plus the number of `\n` separators).
+#[cfg(feature = "streaming")]
+fn playback_format_line_count() -> u16 {
+    let format_str = &config::get_config().app_config.playback_format;
+    format_str.bytes().filter(|&b| b == b'\n').count() as u16 + 1
 }
 
 fn split_rect_for_progress_bar(rect: Rect) -> (Rect, Rect) {
@@ -445,24 +468,38 @@ fn render_playback_progress_bar(
 #[allow(unused_variables)]
 fn split_rect_for_playback_window(state: &SharedState, rect: Rect) -> (Rect, Rect) {
     let configs = config::get_config();
+    // When visualization is enabled, size the window to fit metadata, progress, and
+    // the chart tightly instead of inheriting slack from `playback_window_height`.
+    #[cfg(feature = "streaming")]
+    let playback_width = if configs.app_config.enable_audio_visualization
+        && state.player.read().currently_playing().is_some()
+    {
+        playback_format_line_count() as usize + super::streaming::VIS_HEIGHT as usize + 1
+    } else {
+        configs.app_config.layout.playback_window_height
+    };
+
+    #[cfg(not(feature = "streaming"))]
     let playback_width = configs.app_config.layout.playback_window_height;
+
     // the playback window's width should not be smaller than the cover image's width + 1
     #[cfg(feature = "image")]
     let playback_width = std::cmp::max(configs.app_config.cover_img_width + 1, playback_width);
 
-    // When visualization is enabled and a track is loaded (playing or paused),
-    // reserve extra rows for the bar chart so pause does not collapse the layout.
-    #[cfg(feature = "streaming")]
-    let playback_width = playback_width
-        + if configs.app_config.enable_audio_visualization
-            && state.player.read().currently_playing().is_some()
-        {
-            super::streaming::VIS_HEIGHT as usize
-        } else {
-            0
-        };
-
     // add lines for top/bottom borders depending on the progress bar's position
+    #[cfg(feature = "streaming")]
+    let num_lines = if configs.app_config.enable_audio_visualization
+        && state.player.read().currently_playing().is_some()
+    {
+        2
+    } else {
+        match configs.app_config.progress_bar_position {
+            config::ProgressBarPosition::Bottom => 2,
+            config::ProgressBarPosition::Right => 1,
+        }
+    };
+
+    #[cfg(not(feature = "streaming"))]
     let num_lines = match configs.app_config.progress_bar_position {
         config::ProgressBarPosition::Bottom => 2,
         config::ProgressBarPosition::Right => 1,
