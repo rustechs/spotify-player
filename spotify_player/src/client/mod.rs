@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::ops::Deref;
-use std::{borrow::Cow, collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crate::state::Lyrics;
 use crate::{auth, config};
@@ -42,6 +42,10 @@ const PLAYBACK_TYPES: [&rspotify::model::AdditionalType; 2] = [
     &rspotify::model::AdditionalType::Episode,
 ];
 
+/// Cap on how long we wait to recreate an invalid librespot session.
+/// Without this, a hung `session.connect` freezes the TUI (and CLI socket).
+const SESSION_RECONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// The application's Spotify client
 #[derive(Clone)]
 pub struct AppClient {
@@ -53,6 +57,8 @@ pub struct AppClient {
     api_client: WebApiClient,
     #[cfg(feature = "streaming")]
     stream_conn: Arc<Mutex<Option<librespot_connect::Spirc>>>,
+    /// Serialize session recreation and prevent concurrent hung reconnects.
+    session_reconnect: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Deref for AppClient {
@@ -127,6 +133,7 @@ impl AppClient {
 
             #[cfg(feature = "streaming")]
             stream_conn: Arc::new(Mutex::new(None)),
+            session_reconnect: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -158,12 +165,19 @@ impl AppClient {
                 // a retry logic is implemented to ensure the application's state is properly initialized
                 let delay = std::time::Duration::from_secs(1);
 
-                for _ in 0..5 {
+                for attempt in 0u32..5 {
                     tokio::time::sleep(delay).await;
 
-                    if let Err(err) = client.retrieve_current_playback(&state, false).await {
-                        tracing::error!("Failed to retrieve current playback: {err:#}");
-                        return;
+                    match client.retrieve_current_playback(&state, false).await {
+                        Ok(()) => {}
+                        Err(err) => {
+                            tracing::error!("Failed to retrieve current playback: {err:#}");
+                            // Keep trying after rate-limit storms; give up only on hard failures.
+                            if !is_rate_limit_msg(&err) {
+                                return;
+                            }
+                            continue;
+                        }
                     }
 
                     // if playback exists, don't connect to a new device
@@ -171,35 +185,55 @@ impl AppClient {
                         continue;
                     }
 
-                    let id = match client.find_available_device().await {
-                        Ok(Some(id)) => Some(Cow::Owned(id)),
-                        Ok(None) => None,
+                    let device_ids = match client.find_available_device_ids().await {
+                        Ok(ids) => ids,
                         Err(err) => {
                             tracing::error!("Failed to find an available device: {err:#}");
-                            None
+                            Vec::new()
                         }
                     };
 
-                    if let Some(id) = id {
+                    if device_ids.is_empty() {
+                        tracing::warn!(
+                            "No transferable Spotify Connect device found (attempt {})",
+                            attempt + 1
+                        );
+                        continue;
+                    }
+
+                    let mut connected = false;
+                    for id in device_ids {
                         tracing::info!("Trying to connect to device (id={id}, resume={resume})");
-                        if let Err(err) = client.transfer_playback(&id, Some(false)).await {
-                            tracing::warn!("Connection failed (device_id={id}): {err:#}");
-                        } else {
-                            tracing::info!("Connection succeeded (device_id={id})!");
-                            if resume {
-                                if let Err(err) =
-                                    client.resume_playback(Some(id.as_ref()), None).await
-                                {
-                                    tracing::warn!(
-                                        "Failed to resume playback after reconnect: {err:#}"
-                                    );
+                        match client.transfer_playback(&id, Some(false)).await {
+                            Ok(()) => {
+                                tracing::info!("Connection succeeded (device_id={id})!");
+                                if resume {
+                                    if let Err(err) =
+                                        client.resume_playback(Some(id.as_ref()), None).await
+                                    {
+                                        tracing::warn!(
+                                            "Failed to resume playback after reconnect: {err:#}"
+                                        );
+                                    }
+                                }
+                                // upon new connection, reset the buffered playback
+                                state.player.write().buffered_playback = None;
+                                client.update_playback(&state);
+                                connected = true;
+                                break;
+                            }
+                            Err(err) => {
+                                tracing::warn!("Connection failed (device_id={id}): {err:#}");
+                                // Try the next candidate (404s, offline devices, etc.).
+                                if is_rate_limit_msg(&err) {
+                                    sleep_rate_limit(attempt, None, "transfer playback").await;
                                 }
                             }
-                            // upon new connection, reset the buffered playback
-                            state.player.write().buffered_playback = None;
-                            client.update_playback(&state);
-                            break;
                         }
+                    }
+
+                    if connected {
+                        break;
                     }
                 }
             }
@@ -263,11 +297,29 @@ impl AppClient {
 
     /// Check if the current session is valid and if invalid, create a new session
     pub async fn check_valid_session(&self, state: &SharedState) -> Result<()> {
-        if self.spotify.session().await.is_invalid() {
-            tracing::info!("Client's current session is invalid, creating a new session...");
-            self.new_session(Some(state), false)
-                .await
-                .context("create new client session")?;
+        if !self.spotify.session().await.is_invalid() {
+            return Ok(());
+        }
+
+        // Serialize reconnects so a hung connect cannot pile up watchers / requests.
+        let _guard = self.session_reconnect.lock().await;
+        if !self.spotify.session().await.is_invalid() {
+            return Ok(());
+        }
+
+        tracing::info!("Client's current session is invalid, creating a new session...");
+        match tokio::time::timeout(
+            SESSION_RECONNECT_TIMEOUT,
+            self.new_session(Some(state), false),
+        )
+        .await
+        {
+            Ok(result) => result.context("create new client session")?,
+            Err(_) => {
+                anyhow::bail!(
+                    "timed out after {SESSION_RECONNECT_TIMEOUT:?} recreating Spotify session"
+                )
+            }
         }
         Ok(())
     }
@@ -456,7 +508,20 @@ impl AppClient {
             }
             #[cfg(feature = "streaming")]
             ClientRequest::RestartIntegratedClient => {
-                self.new_session(Some(state), false).await?;
+                let _guard = self.session_reconnect.lock().await;
+                match tokio::time::timeout(
+                    SESSION_RECONNECT_TIMEOUT,
+                    self.new_session(Some(state), false),
+                )
+                .await
+                {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        anyhow::bail!(
+                            "timed out after {SESSION_RECONNECT_TIMEOUT:?} restarting integrated client"
+                        )
+                    }
+                }
             }
             ClientRequest::GetCurrentUser => {
                 let user = self.current_user().await?;
@@ -481,7 +546,9 @@ impl AppClient {
                     .collect();
 
                 #[cfg(feature = "streaming")]
-                self.ensure_integrated_device(&mut devices).await;
+                if self.is_integrated_streaming_active() {
+                    self.ensure_integrated_device(&mut devices).await;
+                }
 
                 state.player.write().devices = devices;
             }
@@ -714,7 +781,7 @@ impl AppClient {
 
     pub fn update_playback(&self, state: &SharedState) {
         // After handling a request changing the player's playback,
-        // update the playback state by making multiple get-playback requests.
+        // update the playback state by making a few get-playback requests.
         //
         // Q: Why do we need more than one request to update the playback?
         // A: It might take a while for Spotify server to reflect the new change,
@@ -723,12 +790,18 @@ impl AppClient {
         let state = state.clone();
         tokio::task::spawn(async move {
             let delay = std::time::Duration::from_secs(1);
-            for _ in 0..5 {
+            for attempt in 0u32..3 {
                 tokio::time::sleep(delay).await;
-                if let Err(err) = client.retrieve_current_playback(&state, false).await {
-                    tracing::error!(
-                        "Encountered an error when updating the playback state: {err:#}"
-                    );
+                match client.retrieve_current_playback(&state, false).await {
+                    Ok(()) => {}
+                    Err(err) => {
+                        tracing::error!(
+                            "Encountered an error when updating the playback state: {err:#}"
+                        );
+                        if is_rate_limit_msg(&err) {
+                            sleep_rate_limit(attempt, None, "update playback").await;
+                        }
+                    }
                 }
             }
         });
@@ -782,37 +855,59 @@ impl AppClient {
             .collect())
     }
 
-    /// Find an available device. If found, return the device's ID.
-    async fn find_available_device(&self) -> Result<Option<String>> {
-        let devices = self.available_devices().await?;
+    /// Find available Connect devices to transfer playback to, ordered by preference.
+    ///
+    /// Preference order:
+    /// 1. Currently active device (if any) — returned alone
+    /// 2. `preferred_device` name match (config)
+    /// 3. Real API devices (not the synthetic integrated librespot device)
+    /// 4. Integrated streaming device — only when this process is actually streaming
+    async fn find_available_device_ids(&self) -> Result<Vec<String>> {
+        let api_devices = self.available_devices().await?;
 
-        // if there is an active device, return it
-        if let Some(d) = devices.iter().find(|d| d.is_active) {
-            return Ok(d.id.clone());
+        // if there is an active device, return it alone
+        if let Some(d) = api_devices.iter().find(|d| d.is_active) {
+            if let Some(id) = d.id.clone() {
+                return Ok(vec![id]);
+            }
         }
 
         #[allow(unused_mut)]
-        let mut devices = devices
+        // mutated only when the streaming feature injects the integrated device
+        let mut devices = api_devices
             .into_iter()
             .filter_map(Device::try_from_device)
             .collect::<Vec<_>>();
 
         #[cfg(feature = "streaming")]
-        self.ensure_integrated_device(&mut devices).await;
+        let include_integrated = self.is_integrated_streaming_active();
+        #[cfg(not(feature = "streaming"))]
+        let include_integrated = false;
 
-        tracing::info!("no active device found, available devices: {devices:?}");
-
-        if devices.is_empty() {
-            return Ok(None);
+        #[cfg(feature = "streaming")]
+        if include_integrated {
+            self.ensure_integrated_device(&mut devices).await;
         }
 
-        // Prioritize the integrated device; otherwise, use the first available device.
-        let id = devices
-            .iter()
-            .position(|d| d.is_integrated)
-            .unwrap_or_default();
+        tracing::info!(
+            "no active device found, available devices: {devices:?} (include_integrated={include_integrated})"
+        );
 
-        Ok(Some(devices.remove(id).id))
+        let preferred = config::get_config().app_config.preferred_device.as_deref();
+
+        Ok(order_transfer_device_ids(
+            &devices,
+            preferred,
+            include_integrated,
+        ))
+    }
+
+    /// Whether this process currently has (or will have) a real integrated
+    /// librespot Connect endpoint. When `enable_streaming = Never`, the session
+    /// still has a `device_id`, but transferring to it returns HTTP 404.
+    #[cfg(feature = "streaming")]
+    fn is_integrated_streaming_active(&self) -> bool {
+        self.stream_conn.lock().is_some()
     }
 
     /// Ensures the integrated librespot device (of *this* running instance) is present in `devices`.
@@ -1538,37 +1633,42 @@ impl AppClient {
     where
         T: serde::de::DeserializeOwned,
     {
-        /// a helper function to process an API response from Spotify server
-        ///
-        /// This function is mainly used to patch upstream API bugs , resulting in
-        /// a type error when a third-party library like `rspotify` parses the response
-        fn process_spotify_api_response(text: &str) -> String {
-            text.to_string()
+        let mut attempt = 0u32;
+        loop {
+            let access_token = self.token().await.context("get token")?;
+            tracing::debug!("{access_token} {url}");
+
+            let response = self
+                .http
+                .get(url)
+                .query(payload)
+                .header(
+                    reqwest::header::AUTHORIZATION,
+                    format!("Bearer {access_token}"),
+                )
+                .send()
+                .await?;
+
+            let status = response.status();
+            let retry_after = parse_retry_after_secs(response.headers());
+            let text = process_spotify_api_response(&response.text().await?);
+            tracing::debug!("{text}");
+
+            if status == StatusCode::TOO_MANY_REQUESTS {
+                if attempt >= 4 {
+                    anyhow::bail!("failed to send a Spotify API request {url}: {text}");
+                }
+                sleep_rate_limit(attempt, retry_after, &format!("GET {url}")).await;
+                attempt += 1;
+                continue;
+            }
+
+            if status != StatusCode::OK {
+                anyhow::bail!("failed to send a Spotify API request {url}: {text}");
+            }
+
+            return Ok(serde_json::from_str(&text)?);
         }
-
-        let access_token = self.token().await.context("get token")?;
-        tracing::debug!("{access_token} {url}");
-
-        let response = self
-            .http
-            .get(url)
-            .query(payload)
-            .header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {access_token}"),
-            )
-            .send()
-            .await?;
-
-        let status = response.status();
-        let text = process_spotify_api_response(&response.text().await?);
-        tracing::debug!("{text}");
-
-        if status != StatusCode::OK {
-            anyhow::bail!("failed to send a Spotify API request {url}: {text}");
-        }
-
-        Ok(serde_json::from_str(&text)?)
     }
 
     async fn all_paging_items<T>(&self, base_url: &str, mut count: usize) -> Result<Vec<T>>
@@ -1661,8 +1761,20 @@ impl AppClient {
         reset_buffered_playback: bool,
     ) -> Result<()> {
         let new_playback = {
-            // update the playback state
-            let playback = self.current_playback2().await?;
+            // update the playback state (retry on HTTP 429)
+            let playback = {
+                let mut attempt = 0u32;
+                loop {
+                    match self.current_playback2().await {
+                        Ok(playback) => break playback,
+                        Err(err) if is_rate_limit_msg(&err) && attempt < 4 => {
+                            sleep_rate_limit(attempt, None, "current playback").await;
+                            attempt += 1;
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
+            };
             let mut player = state.player.write();
 
             let prev_item = player.currently_playing();
@@ -2034,10 +2146,121 @@ fn move_seed_track_to_front(tracks: &mut Vec<Track>, seed_track: Track) {
     tracks.insert(0, seed_track);
 }
 
+fn is_rate_limit_msg(err: &impl std::fmt::Display) -> bool {
+    let msg = format!("{err:#}").to_ascii_lowercase();
+    msg.contains("429")
+        || msg.contains("too many requests")
+        || msg.contains("api rate limit exceeded")
+        || msg.contains("rate limit")
+}
+
+fn rate_limit_backoff(attempt: u32) -> Duration {
+    Duration::from_secs(1u64 << attempt.min(4)).min(Duration::from_secs(30))
+}
+
+async fn sleep_rate_limit(attempt: u32, retry_after_secs: Option<u64>, context: &str) {
+    let wait = retry_after_secs.map_or_else(|| rate_limit_backoff(attempt), Duration::from_secs);
+    tracing::warn!(
+        "Spotify API rate limited ({context}); backing off {wait:?} (attempt {})",
+        attempt + 1
+    );
+    tokio::time::sleep(wait).await;
+}
+
+fn parse_retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .parse()
+        .ok()
+}
+
+/// Order Connect device IDs for transfer attempts.
+///
+/// Prefer `preferred_name`, then non-integrated devices, then (optionally) the
+/// integrated librespot device. When streaming is disabled, integrated devices
+/// are omitted entirely — transferring to them returns HTTP 404.
+fn order_transfer_device_ids(
+    devices: &[Device],
+    preferred_name: Option<&str>,
+    include_integrated: bool,
+) -> Vec<String> {
+    let preferred_name = preferred_name.map(str::trim).filter(|s| !s.is_empty());
+
+    let mut ids = Vec::new();
+    let mut push_unique = |id: &str| {
+        if !ids.iter().any(|existing| existing == id) {
+            ids.push(id.to_string());
+        }
+    };
+
+    if let Some(name) = preferred_name {
+        for device in devices.iter().filter(|d| d.name.eq_ignore_ascii_case(name)) {
+            if include_integrated || !device.is_integrated {
+                push_unique(&device.id);
+            }
+        }
+    }
+
+    for device in devices.iter().filter(|d| !d.is_integrated) {
+        push_unique(&device.id);
+    }
+
+    if include_integrated {
+        for device in devices.iter().filter(|d| d.is_integrated) {
+            push_unique(&device.id);
+        }
+    }
+
+    ids
+}
+
+/// Patch Spotify API JSON so rspotify 0.15 can deserialize responses that omit
+/// fields Spotify no longer always returns (notably `available_markets` on shows).
+fn process_spotify_api_response(text: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(text) {
+        Ok(mut value) => {
+            patch_missing_show_fields(&mut value);
+            value.to_string()
+        }
+        Err(_) => text.to_string(),
+    }
+}
+
+fn patch_missing_show_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let looks_like_show = map.contains_key("media_type")
+                && map.contains_key("name")
+                && (map.contains_key("publisher")
+                    || map.contains_key("languages")
+                    || map.contains_key("episodes"));
+            if looks_like_show && !map.contains_key("available_markets") {
+                map.insert(
+                    "available_markets".to_string(),
+                    serde_json::Value::Array(Vec::new()),
+                );
+            }
+            for child in map.values_mut() {
+                patch_missing_show_fields(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                patch_missing_show_fields(item);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::move_seed_track_to_front;
-    use crate::state::Track;
+    use super::{
+        move_seed_track_to_front, order_transfer_device_ids, process_spotify_api_response,
+    };
+    use crate::state::{Device, Track};
     use rspotify::model::TrackId;
 
     fn sample_track(id: &'static str, name: &str) -> Track {
@@ -2077,5 +2300,90 @@ mod tests {
         assert_eq!(tracks.len(), 2);
         assert_eq!(tracks[0].id, seed.id);
         assert_eq!(tracks[1].id, second.id);
+    }
+
+    #[test]
+    fn order_devices_skips_integrated_when_streaming_disabled() {
+        let devices = vec![
+            Device {
+                id: "integrated".into(),
+                name: "spotify-player".into(),
+                is_integrated: true,
+            },
+            Device {
+                id: "desktop".into(),
+                name: "estelle".into(),
+                is_integrated: false,
+            },
+            Device {
+                id: "everywhere".into(),
+                name: "Everywhere".into(),
+                is_integrated: false,
+            },
+        ];
+
+        assert_eq!(
+            order_transfer_device_ids(&devices, Some("estelle"), false),
+            vec!["desktop".to_string(), "everywhere".to_string()]
+        );
+    }
+
+    #[test]
+    fn order_devices_puts_integrated_last_when_streaming_enabled() {
+        let devices = vec![
+            Device {
+                id: "integrated".into(),
+                name: "spotify-player".into(),
+                is_integrated: true,
+            },
+            Device {
+                id: "desktop".into(),
+                name: "estelle".into(),
+                is_integrated: false,
+            },
+        ];
+
+        assert_eq!(
+            order_transfer_device_ids(&devices, None, true),
+            vec!["desktop".to_string(), "integrated".to_string()]
+        );
+    }
+
+    #[test]
+    fn process_spotify_api_response_fills_missing_available_markets() {
+        let raw = r#"{
+            "items": [{
+                "added_at": "2024-01-01T00:00:00Z",
+                "show": {
+                    "copyrights": [],
+                    "description": "desc",
+                    "explicit": false,
+                    "external_urls": {},
+                    "href": "https://api.spotify.com/v1/shows/abc",
+                    "id": "abc",
+                    "images": [],
+                    "is_externally_hosted": false,
+                    "languages": ["en"],
+                    "media_type": "audio",
+                    "name": "A Show",
+                    "publisher": "Pub",
+                    "type": "show",
+                    "uri": "spotify:show:abc",
+                    "total_episodes": 1
+                }
+            }],
+            "total": 1,
+            "limit": 50,
+            "offset": 0,
+            "href": "https://api.spotify.com/v1/me/shows",
+            "next": null,
+            "previous": null
+        }"#;
+
+        let patched: serde_json::Value =
+            serde_json::from_str(&process_spotify_api_response(raw)).unwrap();
+        let markets = &patched["items"][0]["show"]["available_markets"];
+        assert!(markets.is_array());
+        assert!(markets.as_array().unwrap().is_empty());
     }
 }

@@ -29,6 +29,48 @@ const X_AXIS_UNIT_WIDTH: u16 = 2;
 const DB_GRID_TICKS: [i32; 3] = [-12, -24, -36];
 const DB_LABEL_TICKS: [i32; 4] = [0, -12, -24, -36];
 const FREQ_TICKS_HZ: [f32; 6] = [100.0, 500.0, 1_000.0, 5_000.0, 10_000.0, 20_000.0];
+/// Raw band peak below which we treat the monitor as silent (pause / idle).
+const VIZ_SIGNAL_FLOOR: f32 = 1e-5;
+
+/// Whether the UI should draw live bar heights from `VisBands`.
+///
+/// Bars follow monitor audio as soon as there is measurable signal, without
+/// waiting for the Spotify API `is_playing` flag (which can lag by seconds).
+/// When the API says paused and the monitor is silent, bars stay flat unless
+/// a full-scale intro decay is still in progress.
+fn should_show_viz_bars(guard: &VisBands, state: &SharedState) -> bool {
+    if guard.intro_level().is_some() {
+        return true;
+    }
+
+    if !guard.is_active {
+        return false;
+    }
+
+    let raw_peak = guard.values.iter().copied().fold(0.0_f32, f32::max);
+    if raw_peak > VIZ_SIGNAL_FLOOR {
+        return true;
+    }
+
+    let player = state.player.read();
+    player.playback.as_ref().is_some_and(|p| p.is_playing)
+        || player
+            .buffered_playback
+            .as_ref()
+            .is_some_and(|p| p.is_playing)
+}
+
+fn playable_item_key(item: &rspotify::model::PlayableItem) -> Option<String> {
+    match item {
+        rspotify::model::PlayableItem::Track(track) => {
+            track.id.as_ref().map(rspotify::prelude::Id::uri)
+        }
+        rspotify::model::PlayableItem::Episode(episode) => {
+            Some(rspotify::prelude::Id::uri(&episode.id))
+        }
+        rspotify::model::PlayableItem::Unknown(_) => None,
+    }
+}
 
 /// An audio sink wrapper that computes real-time FFT frequency bands from the
 /// decoded audio stream and exposes them via a shared buffer for the UI.
@@ -269,9 +311,26 @@ pub fn render_audio_visualization(
     let Some(vis_lock) = state.vis_bands.as_ref() else {
         return;
     };
+
+    // Arm a full-scale (0 dB) intro as soon as track metadata is on screen so
+    // bars appear with the axes, then fall with the usual render-side decay.
+    {
+        let mut guard = vis_lock.lock();
+        match state
+            .player
+            .read()
+            .currently_playing()
+            .and_then(playable_item_key)
+        {
+            Some(key) => guard.arm_intro_for_item(&key),
+            None => guard.clear_intro(),
+        }
+    }
+
     let guard = vis_lock.lock();
     let sample_rate = guard.sample_rate;
-    let values = if guard.is_active {
+    let intro_level = guard.intro_level();
+    let mut values = if should_show_viz_bars(&guard, state) {
         let display_decay = decay_for_elapsed(guard.updated_at.elapsed());
         let peak_norm =
             (guard.peak_envelope * peak_decay_for_elapsed(guard.updated_at.elapsed())).max(1e-6);
@@ -283,6 +342,11 @@ pub fn render_audio_visualization(
     } else {
         [0.0f32; crate::vis::NUM_BANDS]
     };
+    if let Some(level) = intro_level {
+        for v in &mut values {
+            *v = (*v).max(level);
+        }
+    }
     drop(guard);
 
     if rect.height < 2 || rect.width <= Y_AXIS_WIDTH + 1 {
@@ -315,7 +379,8 @@ pub fn render_audio_visualization(
         .map(|i| {
             let idx = ((i as f64 * step) as usize).min(values.len() - 1);
             let norm = values[idx];
-            let val = (norm * max_val as f32) as u64;
+            let val = (norm * max_val as f32).round() as u64;
+            let val = if norm > 0.0 { val.max(1) } else { 0 };
             Bar::default()
                 .value(val)
                 .text_value("")

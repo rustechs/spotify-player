@@ -29,7 +29,7 @@ const IDLE_POLL: Duration = Duration::from_millis(100);
 
 /// Spawn a background thread that taps the Pulse/PipeWire default-sink monitor
 /// (or a configured source) and publishes FFT bands for the UI.
-pub fn start(state: SharedState) {
+pub fn start(state: &SharedState) {
     let configs = config::get_config();
     if !configs.app_config.enable_audio_visualization
         || !configs.app_config.enable_system_audio_visualization
@@ -43,7 +43,7 @@ pub fn start(state: SharedState) {
 
     if let Err(err) = std::thread::Builder::new()
         .name("system-audio-vis".to_string())
-        .spawn(move || capture_loop(&state, &bands, &source))
+        .spawn(move || capture_loop(&bands, &source))
     {
         tracing::error!("Failed to spawn system-audio visualization thread: {err:#}");
     } else {
@@ -51,7 +51,7 @@ pub fn start(state: SharedState) {
     }
 }
 
-fn capture_loop(state: &SharedState, bands: &Arc<Mutex<VisBands>>, source_cfg: &str) {
+fn capture_loop(bands: &Arc<Mutex<VisBands>>, source_cfg: &str) {
     let mut processor = BandProcessor::new(Arc::clone(bands), CAPTURE_RATE as f32);
     let mut simple: Option<Simple> = None;
     let mut current_source: Option<String> = None;
@@ -59,32 +59,19 @@ fn capture_loop(state: &SharedState, bands: &Arc<Mutex<VisBands>>, source_cfg: &
     let mut raw = vec![0u8; READ_FRAMES * CHANNELS as usize * BYTES_PER_SAMPLE];
 
     loop {
-        let local_active = bands.lock().local_sink_active;
-        let playing = {
-            let player = state.player.read();
-            player
-                .buffered_playback
-                .as_ref()
-                .is_some_and(|p| p.is_playing)
-                || player.playback.as_ref().is_some_and(|p| p.is_playing)
-        };
-
-        let should_capture = !local_active && playing;
-
-        if !should_capture {
+        if bands.lock().local_sink_active {
             if was_capturing {
-                // Drop the stream so we don't keep a monitor node open while idle.
                 simple = None;
                 current_source = None;
-                // Only clear activity if the local sink has not taken over.
-                let mut g = bands.lock();
-                if !g.local_sink_active {
-                    g.is_active = false;
-                }
+                processor.reset();
                 was_capturing = false;
             }
             std::thread::sleep(IDLE_POLL);
             continue;
+        }
+
+        if !was_capturing {
+            processor.mark_warm_start();
         }
 
         let desired_source = match resolve_source(source_cfg) {
@@ -103,6 +90,7 @@ fn capture_loop(state: &SharedState, bands: &Arc<Mutex<VisBands>>, source_cfg: &
                     tracing::info!("system-audio-vis: capturing from '{desired_source}'");
                     simple = Some(s);
                     current_source = Some(desired_source);
+                    processor.mark_warm_start();
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -120,7 +108,6 @@ fn capture_loop(state: &SharedState, bands: &Arc<Mutex<VisBands>>, source_cfg: &
             continue;
         };
 
-        // Re-check before blocking on read so a local sink takeover is noticed quickly.
         if bands.lock().local_sink_active {
             continue;
         }
@@ -144,12 +131,6 @@ fn capture_loop(state: &SharedState, bands: &Arc<Mutex<VisBands>>, source_cfg: &
             0.5 * (l + r)
         }));
 
-        {
-            let mut g = bands.lock();
-            if !g.local_sink_active {
-                g.is_active = true;
-            }
-        }
         was_capturing = true;
     }
 }
