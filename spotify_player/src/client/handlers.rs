@@ -29,14 +29,26 @@ pub async fn start_client_handler(
         let client = client.clone();
         let span = tracing::info_span!("client_request", request = ?request);
 
-        tokio::task::spawn(
-            async move {
-                if let Err(err) = client.handle_request(&state, request).await {
-                    tracing::error!("Failed to handle client request: {err:#}");
-                }
+        // Player mutations read and write `buffered_playback`; run them serially so
+        // rapid repeat/shuffle/etc. keys cannot race on stale state.
+        if matches!(&request, ClientRequest::Player(_)) {
+            if let Err(err) = client
+                .handle_request(&state, request)
+                .instrument(span)
+                .await
+            {
+                tracing::error!("Failed to handle client request: {err:#}");
             }
-            .instrument(span),
-        );
+        } else {
+            tokio::task::spawn(
+                async move {
+                    if let Err(err) = client.handle_request(&state, request).await {
+                        tracing::error!("Failed to handle client request: {err:#}");
+                    }
+                }
+                .instrument(span),
+            );
+        }
     }
 }
 
