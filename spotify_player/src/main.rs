@@ -12,9 +12,13 @@ mod playlist_folders;
 mod state;
 #[cfg(feature = "streaming")]
 mod streaming;
+#[cfg(all(feature = "system-audio-visualization", target_os = "linux"))]
+mod system_audio;
 mod token;
 mod ui;
 mod utils;
+#[cfg(feature = "streaming")]
+mod vis;
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
@@ -164,6 +168,9 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
                 client::start_player_event_watcher(&state, &client_pub);
             }
         })?;
+
+    #[cfg(all(feature = "system-audio-visualization", target_os = "linux"))]
+    system_audio::start(state.clone());
 
     if !state.is_daemon {
         #[cfg(feature = "image")]

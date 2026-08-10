@@ -30,8 +30,10 @@ This file guides Claude Code when working in this repository.
 | `event/{page,popup}.rs`       | Key event dispatch per page / popup overlay                                 |
 | `ui/mod.rs`                   | ratatui render loop; main layout dispatch                                   |
 | `ui/{page,playback,popup}.rs` | Render functions for pages, playback bar, popups                            |
-| `ui/streaming.rs`             | FFT audio visualizer: `VisualizationSink`, `VisBands`, bar chart            |
+| `vis.rs`                      | Shared FFT state/processor: `VisBands`, `BandProcessor` (feature-gated)     |
+| `ui/streaming.rs`             | librespot `VisualizationSink` + spectrum bar-chart render (feature-gated)   |
 | `streaming.rs`                | librespot connection + audio backend setup (feature-gated)                  |
+| `system_audio.rs`             | PipeWire/Pulse monitor capture for Connect-device visualization (Linux; `system-audio-visualization` feature) |
 | `cli/`                        | Unix socket server and client for inter-process CLI commands                |
 | `auth.rs`                     | OAuth scopes and librespot credential/session building                      |
 | `media_control.rs`            | OS media key integration via `souvlaki` (feature-gated)                     |
@@ -53,6 +55,7 @@ Event/UI threads never call async functions directly. They send a `ClientRequest
 | Feature                                                                                                                                 | Effect                                                   |
 | --------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
 | `streaming`                                                                                                                             | librespot playback, Spotify Connect, audio visualization |
+| `system-audio-visualization`                                                                                                            | PipeWire/Pulse monitor capture for Connect-device spectrum viz (Linux only) |
 | `rodio-backend`                                                                                                                         | Default audio sink (rodio)                               |
 | `alsa-backend`, `pulseaudio-backend`, `portaudio-backend`, `jackaudio-backend`, `rodiojack-backend`, `sdl-backend`, `gstreamer-backend` | Alternative audio sinks                                  |
 | `media-control`                                                                                                                         | OS media key integration                                 |
@@ -63,7 +66,7 @@ Event/UI threads never call async functions directly. They send a `ClientRequest
 | `daemon`                                                                                                                                | Daemonize mode (implies `streaming`)                     |
 | `fzf`                                                                                                                                   | Fuzzy search                                             |
 
-Default: `rodio-backend` + `media-control`. Gate feature-specific code with `#[cfg(feature = "...")]`.
+Default: `rodio-backend` + `media-control` + `system-audio-visualization` (Linux only; the capture path is a no-op on other platforms). Gate feature-specific code with `#[cfg(feature = "...")]`.
 
 ## Verifying changes
 
@@ -71,8 +74,8 @@ CI treats all warnings as errors. Before committing, run what CI runs:
 
 ```sh
 cargo fmt --all                      # CI checks: cargo fmt --all -- --check
-cargo test --no-default-features --features rodio-backend,media-control,image,notify,fzf
-cargo clippy --no-default-features --features rodio-backend,media-control,image,notify,fzf -- -D warnings
+cargo test --no-default-features --features rodio-backend,media-control,system-audio-visualization,image,notify,fzf
+cargo clippy --no-default-features --features rodio-backend,media-control,system-audio-visualization,image,notify,fzf -- -D warnings
 cargo clippy --no-default-features -- -D warnings   # core paths, no features
 ```
 

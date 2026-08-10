@@ -383,6 +383,7 @@ fn print_features() {
 
     print_feature!("daemon");
     print_feature!("streaming");
+    print_feature!("system-audio-visualization");
     print_feature!("media-control");
     print_feature!("image");
     print_feature!("ratatui-image");

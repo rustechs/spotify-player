@@ -7,7 +7,7 @@ on:
       - "spotify_player/Cargo.lock"
   push:
     branches:
-      - "master"
+      - "main"
     paths:
       - "spotify_player/Cargo.lock"
 

@@ -4,12 +4,12 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
   push:
-    branches: master
+    branches: main
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  RUST_FEATURES: "rodio-backend,media-control,image,notify,fzf"
+  RUST_FEATURES: "rodio-backend,media-control,system-audio-visualization,image,notify,fzf"
 
 jobs:
   rust-ci:
@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install libssl-dev libasound2-dev libdbus-1-dev libxcb-shape0-dev libxcb-xfixes0-dev
+        run: sudo apt-get update && sudo apt-get install libssl-dev libasound2-dev libdbus-1-dev libpulse-dev libxcb-shape0-dev libxcb-xfixes0-dev
         if: ${{ runner.os == 'Linux' }}
 
       - name: Checkout source
