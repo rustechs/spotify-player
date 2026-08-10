@@ -275,7 +275,9 @@ pub async fn new_connection(
                                     playback.is_playing = true;
                                 }
                                 if let Some(ref bands) = state.vis_bands {
-                                    bands.lock().is_active = true;
+                                    let mut g = bands.lock();
+                                    g.local_sink_active = true;
+                                    g.is_active = true;
                                 }
                             }
                             PlayerEvent::Paused { .. } => {
@@ -284,7 +286,9 @@ pub async fn new_connection(
                                     playback.is_playing = false;
                                 }
                                 if let Some(ref bands) = state.vis_bands {
-                                    bands.lock().is_active = false;
+                                    let mut g = bands.lock();
+                                    g.local_sink_active = false;
+                                    g.is_active = false;
                                 }
                             }
                             _ => {}

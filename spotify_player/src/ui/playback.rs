@@ -30,12 +30,12 @@ pub fn render_playback_window(
         if let Some(item) = &playback.item {
             // Carve off the visualization rows here, inside the active-playback
             // branch, so the full rect is used when there is nothing playing.
+            // Keep the area reserved while a track is loaded (including pause) so
+            // the layout does not jump; bars idle at zero when audio is silent.
             #[cfg(feature = "streaming")]
             let (rect, vis_rect) = {
                 let configs = config::get_config();
-                if configs.app_config.enable_audio_visualization
-                    && state.is_local_streaming_active()
-                {
+                if configs.app_config.enable_audio_visualization {
                     let chunks = Layout::vertical([
                         Constraint::Fill(0),
                         Constraint::Length(super::streaming::VIS_HEIGHT),
@@ -450,13 +450,13 @@ fn split_rect_for_playback_window(state: &SharedState, rect: Rect) -> (Rect, Rec
     #[cfg(feature = "image")]
     let playback_width = std::cmp::max(configs.app_config.cover_img_width + 1, playback_width);
 
-    // When visualization is enabled *and* librespot is actively streaming,
-    // reserve extra rows for the bar chart. When the local player is idle
-    // (e.g. playback on an external Spotify Connect device) the rows are not
-    // reserved so the space is available to the rest of the layout.
+    // When visualization is enabled and a track is loaded (playing or paused),
+    // reserve extra rows for the bar chart so pause does not collapse the layout.
     #[cfg(feature = "streaming")]
     let playback_width = playback_width
-        + if configs.app_config.enable_audio_visualization && state.is_local_streaming_active() {
+        + if configs.app_config.enable_audio_visualization
+            && state.player.read().currently_playing().is_some()
+        {
             super::streaming::VIS_HEIGHT as usize
         } else {
             0
