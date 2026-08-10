@@ -16,7 +16,24 @@ use super::ClientRequest;
 struct PlayerEventHandlerState {
     get_context_timer: Instant,
     last_playback_refresh_timer: Instant,
+    /// Last time we enqueued a track-end `GetCurrentPlayback` (debounce stampede).
+    last_track_end_fetch: Instant,
+    /// Last time we enqueued a `GetCurrentUserQueue` from the watcher.
+    last_queue_fetch: Instant,
 }
+
+/// Cap how long any single client request may block the handler / a worker task.
+/// Without this, a hung Spotify HTTP call (or oversized Retry-After sleep) can wedge
+/// the TUI command path and the CLI UDP socket indefinitely.
+const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Minimum gap between track-end playback refreshes. The watcher runs every 100ms and
+/// used to enqueue `GetCurrentPlayback` on every tick once progress >= duration, which
+/// stampedes the API when a fetch is slow or hung.
+const TRACK_END_FETCH_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Minimum gap between watcher-driven queue refreshes (missing/mismatched queue).
+const QUEUE_FETCH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// starts the client's request handler
 pub async fn start_client_handler(
@@ -31,19 +48,38 @@ pub async fn start_client_handler(
 
         // Player mutations read and write `buffered_playback`; run them serially so
         // rapid repeat/shuffle/etc. keys cannot race on stale state.
+        // Bound the wait so a single hung Player API call cannot stall the loop forever.
         if matches!(&request, ClientRequest::Player(_)) {
-            if let Err(err) = client
-                .handle_request(&state, request)
-                .instrument(span)
-                .await
+            match tokio::time::timeout(
+                CLIENT_REQUEST_TIMEOUT,
+                client.handle_request(&state, request).instrument(span),
+            )
+            .await
             {
-                tracing::error!("Failed to handle client request: {err:#}");
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => tracing::error!("Failed to handle client request: {err:#}"),
+                Err(_) => tracing::error!(
+                    "Timed out after {CLIENT_REQUEST_TIMEOUT:?} handling Player client request"
+                ),
             }
         } else {
             tokio::task::spawn(
                 async move {
-                    if let Err(err) = client.handle_request(&state, request).await {
-                        tracing::error!("Failed to handle client request: {err:#}");
+                    match tokio::time::timeout(
+                        CLIENT_REQUEST_TIMEOUT,
+                        client.handle_request(&state, request),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => {
+                            tracing::error!("Failed to handle client request: {err:#}");
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                "Timed out after {CLIENT_REQUEST_TIMEOUT:?} handling client request"
+                            );
+                        }
                     }
                 }
                 .instrument(span),
@@ -72,6 +108,7 @@ pub async fn start_session_watcher(state: SharedState, client: super::AppClient)
 fn handle_playback_change_event(
     state: &SharedState,
     client_pub: &flume::Sender<ClientRequest>,
+    handler_state: &mut PlayerEventHandlerState,
 ) -> anyhow::Result<()> {
     let player = state.player.read();
     let (playback, id, duration) = match (
@@ -92,21 +129,27 @@ fn handle_playback_change_event(
     };
 
     if let Some(progress) = player.playback_progress() {
-        // update the playback when the current track ends
-        if progress >= duration && playback.is_playing {
+        // Update playback when the current track ends. Debounce: the watcher ticks
+        // every 100ms and must not enqueue a request on every tick while waiting.
+        if progress >= duration
+            && playback.is_playing
+            && handler_state.last_track_end_fetch.elapsed() >= TRACK_END_FETCH_INTERVAL
+        {
             client_pub.send(ClientRequest::GetCurrentPlayback)?;
+            handler_state.last_track_end_fetch = Instant::now();
         }
     }
 
-    if let Some(queue) = player.queue.as_ref() {
-        // queue needs to be updated if its playing track is different from actual playback's playing track
-        if let Some(queue_track) = queue.currently_playing.as_ref() {
-            if queue_track.id().expect("null track_id") != id {
-                client_pub.send(ClientRequest::GetCurrentUserQueue)?;
-            }
-        }
-    } else {
+    let needs_queue_fetch = match player.queue.as_ref() {
+        Some(queue) => queue
+            .currently_playing
+            .as_ref()
+            .is_some_and(|queue_track| queue_track.id().expect("null track_id") != id),
+        None => true,
+    };
+    if needs_queue_fetch && handler_state.last_queue_fetch.elapsed() >= QUEUE_FETCH_INTERVAL {
         client_pub.send(ClientRequest::GetCurrentUserQueue)?;
+        handler_state.last_queue_fetch = Instant::now();
     }
 
     Ok(())
@@ -117,80 +160,110 @@ fn handle_page_change_event(
     client_pub: &flume::Sender<ClientRequest>,
     handler_state: &mut PlayerEventHandlerState,
 ) -> anyhow::Result<()> {
-    match state.ui.lock().current_page_mut() {
-        PageState::Context {
-            id,
-            context_page_type,
-            state: page_state,
-        } => {
-            let expected_id = match context_page_type {
-                ContextPageType::Browsing(context_id) => Some(context_id.clone()),
-                ContextPageType::CurrentPlaying => state.player.read().playing_context_id(),
-            };
-
-            let new_id = if *id == expected_id {
-                false
+    // Never hold `ui` across `player`/`data` locks — the UI thread takes `ui` then
+    // `player`/`vis_bands` during draw; inverted or overlapping orders freeze the TUI.
+    let (playing_context_id, playing_track) = {
+        let player = state.player.read();
+        let track = player.currently_playing().and_then(|item| {
+            if let rspotify::model::PlayableItem::Track(track) = item {
+                Some((
+                    track.name.clone(),
+                    map_join(&track.artists, |a| &a.name, ", "),
+                    track.id.clone(),
+                ))
             } else {
-                // update the context state and request new data when moving to a new context page
-                tracing::info!("Current context ID ({:?}) is different from the expected ID ({:?}), update the context state", id, expected_id);
+                None
+            }
+        });
+        (player.playing_context_id(), track)
+    };
 
-                *id = expected_id;
+    let mut context_to_fetch = None;
 
-                // update the UI page state based on the context's type
-                match id {
-                    Some(id) => {
-                        *page_state = Some(match id {
-                            ContextId::Album(_) => ContextPageUIState::new_album(),
-                            ContextId::Artist(_) => ContextPageUIState::new_artist(),
-                            ContextId::Playlist(_) => ContextPageUIState::new_playlist(),
-                            ContextId::Tracks(_) => ContextPageUIState::new_tracks(),
-                            ContextId::Show(_) => ContextPageUIState::new_show(),
-                        });
+    {
+        let mut ui = state.ui.lock();
+        match ui.current_page_mut() {
+            PageState::Context {
+                id,
+                context_page_type,
+                state: page_state,
+            } => {
+                let expected_id = match context_page_type {
+                    ContextPageType::Browsing(context_id) => Some(context_id.clone()),
+                    ContextPageType::CurrentPlaying => playing_context_id,
+                };
+
+                let new_id = if *id == expected_id {
+                    false
+                } else {
+                    tracing::info!(
+                        "Current context ID ({:?}) is different from the expected ID ({:?}), update the context state",
+                        id,
+                        expected_id
+                    );
+
+                    *id = expected_id;
+
+                    match id {
+                        Some(id) => {
+                            *page_state = Some(match id {
+                                ContextId::Album(_) => ContextPageUIState::new_album(),
+                                ContextId::Artist(_) => ContextPageUIState::new_artist(),
+                                ContextId::Playlist(_) => ContextPageUIState::new_playlist(),
+                                ContextId::Tracks(_) => ContextPageUIState::new_tracks(),
+                                ContextId::Show(_) => ContextPageUIState::new_show(),
+                            });
+                        }
+                        None => {
+                            *page_state = None;
+                        }
                     }
-                    None => {
-                        *page_state = None;
-                    }
-                }
-                true
-            };
+                    true
+                };
 
-            // request new context's data if not found in memory
-            // To avoid making too many requests, only request if context id is changed
-            // or it's been a while since the last request.
-            if let Some(id) = id {
-                if !matches!(id, ContextId::Tracks(_))
-                    && !state.data.read().caches.context.contains_key(&id.uri())
-                    && (new_id
-                        || handler_state.get_context_timer.elapsed() > Duration::from_secs(5))
-                {
-                    client_pub.send(ClientRequest::GetContext(id.clone()))?;
-                    handler_state.get_context_timer = Instant::now();
+                // Candidate for GetContext when id changed or refresh interval elapsed.
+                // Cache check happens after releasing `ui` (lock-order: never hold ui across data).
+                if let Some(id) = id {
+                    if !matches!(id, ContextId::Tracks(_))
+                        && (new_id
+                            || handler_state.get_context_timer.elapsed() > Duration::from_secs(5))
+                    {
+                        context_to_fetch = Some(id.clone());
+                    }
                 }
             }
-        }
 
-        PageState::Lyrics {
-            track_uri,
-            track,
-            artists,
-        } => {
-            if let Some(rspotify::model::PlayableItem::Track(current_track)) =
-                state.player.read().currently_playing()
-            {
-                if current_track.name != *track {
-                    if let Some(id) = &current_track.id {
-                        tracing::info!("Currently playing track \"{}\" is different from the track \"{track}\" shown up in the lyrics page. Fetching new track's lyrics...", current_track.name);
-                        track.clone_from(&current_track.name);
-                        *artists = map_join(&current_track.artists, |a| &a.name, ", ");
-                        *track_uri = id.uri();
-                        client_pub.send(ClientRequest::GetLyrics {
-                            track_id: id.clone_static(),
-                        })?;
+            PageState::Lyrics {
+                track_uri,
+                track,
+                artists,
+            } => {
+                if let Some((name, artist_names, track_id)) = playing_track {
+                    if name != *track {
+                        if let Some(id) = track_id {
+                            tracing::info!(
+                                "Currently playing track \"{name}\" is different from the track \"{track}\" shown up in the lyrics page. Fetching new track's lyrics..."
+                            );
+                            *track = name;
+                            *artists = artist_names;
+                            *track_uri = id.uri();
+                            client_pub.send(ClientRequest::GetLyrics {
+                                track_id: id.clone_static(),
+                            })?;
+                        }
                     }
                 }
             }
+            _ => {}
         }
-        _ => {}
+    }
+
+    // Fetch only if missing from cache; (new_id || timer) already selected the candidate.
+    if let Some(id) = context_to_fetch {
+        if !state.data.read().caches.context.contains_key(&id.uri()) {
+            client_pub.send(ClientRequest::GetContext(id))?;
+            handler_state.get_context_timer = Instant::now();
+        }
     }
 
     Ok(())
@@ -203,7 +276,8 @@ fn handle_player_event(
 ) -> anyhow::Result<()> {
     handle_page_change_event(state, client_pub, handler_state)
         .context("handle page change event")?;
-    handle_playback_change_event(state, client_pub).context("handle playback change event")?;
+    handle_playback_change_event(state, client_pub, handler_state)
+        .context("handle playback change event")?;
 
     Ok(())
 }
@@ -215,9 +289,15 @@ pub fn start_player_event_watcher(state: &SharedState, client_pub: &flume::Sende
     let refresh_duration = Duration::from_millis(100);
     let playback_refresh_duration =
         Duration::from_millis(configs.app_config.playback_refresh_duration_in_ms);
+    // Start elapsed so the first legitimate track-end/queue fetch is not delayed.
+    let fetch_epoch = Instant::now()
+        .checked_sub(QUEUE_FETCH_INTERVAL)
+        .unwrap_or_else(Instant::now);
     let mut handler_state = PlayerEventHandlerState {
         get_context_timer: Instant::now(),
         last_playback_refresh_timer: Instant::now(),
+        last_track_end_fetch: fetch_epoch,
+        last_queue_fetch: fetch_epoch,
     };
 
     loop {

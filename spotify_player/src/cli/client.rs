@@ -32,6 +32,10 @@ pub async fn start_socket(
     state: Option<&SharedState>,
     socket: Option<tokio::net::UdpSocket>,
 ) {
+    /// Bound for a single CLI socket command so one hung Spotify call cannot
+    /// permanently block the UDP listener (and all subsequent CLI commands).
+    const SOCKET_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
     let socket = if let Some(s) = socket {
         s
     } else {
@@ -49,6 +53,8 @@ pub async fn start_socket(
             }
         }
     };
+    let socket = std::sync::Arc::new(socket);
+    let state = state.cloned();
 
     let mut buf = [0; MAX_REQUEST_SIZE];
 
@@ -62,34 +68,61 @@ pub async fn start_socket(
                     continue;
                 }
 
-                let req_buf = &buf[0..n_bytes];
-                let request: Request = match serde_json::from_slice(req_buf) {
-                    Ok(v) => v,
-                    Err(err) => {
-                        tracing::error!("Cannot deserialize the socket request: {err:#}");
-                        continue;
-                    }
-                };
+                let req_buf = buf[..n_bytes].to_vec();
+                let client = client.clone();
+                let state = state.clone();
+                let socket = std::sync::Arc::clone(&socket);
 
-                let span = tracing::info_span!("socket_request", request = ?request, dest_addr = ?dest_addr);
-
-                async {
-                    let response = match handle_socket_request(client, state, request).await {
+                tokio::task::spawn(async move {
+                    let request: Request = match serde_json::from_slice(&req_buf) {
+                        Ok(v) => v,
                         Err(err) => {
-                            tracing::error!("Failed to handle socket request: {err:#}");
-                            let msg = format!("Bad request: {err:#}");
-                            Response::Err(msg.into_bytes())
+                            tracing::error!("Cannot deserialize the socket request: {err:#}");
+                            return;
                         }
-                        Ok(data) => Response::Ok(data),
                     };
-                    send_response(response, &socket, dest_addr)
-                        .await
-                        .unwrap_or_default();
 
-                    tracing::info!("Successfully handled the socket request.",);
-                }
-                .instrument(span)
-                .await;
+                    let span = tracing::info_span!(
+                        "socket_request",
+                        request = ?request,
+                        dest_addr = ?dest_addr
+                    );
+
+                    async {
+                        let response = match tokio::time::timeout(
+                            SOCKET_REQUEST_TIMEOUT,
+                            handle_socket_request(&client, state.as_ref(), request),
+                        )
+                        .await
+                        {
+                            Ok(Ok(data)) => {
+                                tracing::info!("Successfully handled the socket request.");
+                                Response::Ok(data)
+                            }
+                            Ok(Err(err)) => {
+                                tracing::error!("Failed to handle socket request: {err:#}");
+                                let msg = format!("Bad request: {err:#}");
+                                Response::Err(msg.into_bytes())
+                            }
+                            Err(_) => {
+                                tracing::error!(
+                                    "Timed out after {SOCKET_REQUEST_TIMEOUT:?} handling socket request"
+                                );
+                                Response::Err(
+                                    format!(
+                                        "Timed out after {SOCKET_REQUEST_TIMEOUT:?} handling request"
+                                    )
+                                    .into_bytes(),
+                                )
+                            }
+                        };
+                        send_response(response, &socket, dest_addr)
+                            .await
+                            .unwrap_or_default();
+                    }
+                    .instrument(span)
+                    .await;
+                });
             }
         }
     }
