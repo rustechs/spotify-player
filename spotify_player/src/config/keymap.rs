@@ -64,7 +64,11 @@ impl Default for KeymapConfig {
                 },
                 Keymap {
                     key_sequence: "C-r".into(),
-                    command: Command::Repeat,
+                    command: Command::RefreshPlayback,
+                },
+                Keymap {
+                    key_sequence: "s".into(),
+                    command: Command::Shuffle,
                 },
                 Keymap {
                     key_sequence: "C-s".into(),
@@ -100,7 +104,7 @@ impl Default for KeymapConfig {
                 },
                 Keymap {
                     key_sequence: "r".into(),
-                    command: Command::RefreshPlayback,
+                    command: Command::Repeat,
                 },
                 Keymap {
                     key_sequence: "/".into(),
@@ -292,35 +296,35 @@ impl Default for KeymapConfig {
                     command: Command::SelectLastOrScrollToBottom,
                 },
                 Keymap {
-                    key_sequence: "s t".into(),
+                    key_sequence: "o t".into(),
                     command: Command::SortTrackByTitle,
                 },
                 Keymap {
-                    key_sequence: "s a".into(),
+                    key_sequence: "o a".into(),
                     command: Command::SortTrackByArtists,
                 },
                 Keymap {
-                    key_sequence: "s A".into(),
+                    key_sequence: "o A".into(),
                     command: Command::SortTrackByAlbum,
                 },
                 Keymap {
-                    key_sequence: "s d".into(),
+                    key_sequence: "o d".into(),
                     command: Command::SortTrackByDuration,
                 },
                 Keymap {
-                    key_sequence: "s D".into(),
+                    key_sequence: "o D".into(),
                     command: Command::SortTrackByAddedDate,
                 },
                 Keymap {
-                    key_sequence: "s r".into(),
+                    key_sequence: "o r".into(),
                     command: Command::ReverseTrackOrder,
                 },
                 Keymap {
-                    key_sequence: "s l a".into(),
+                    key_sequence: "o l a".into(),
                     command: Command::SortLibraryAlphabetically,
                 },
                 Keymap {
-                    key_sequence: "s l r".into(),
+                    key_sequence: "o l r".into(),
                     command: Command::SortLibraryByRecent,
                 },
                 Keymap {
