@@ -73,8 +73,14 @@ Default: `rodio-backend` + `media-control` + `system-audio-visualization` (Linux
 CI treats all warnings as errors. Before committing, run what CI runs:
 
 ```sh
-cargo fmt --all                      # CI checks: cargo fmt --all -- --check
+./scripts/lint.sh   # fmt --check + clippy with/without features (-D warnings)
 cargo test --no-default-features --features rodio-backend,media-control,system-audio-visualization,image,notify,fzf
+```
+
+Or the individual steps:
+
+```sh
+cargo fmt --all -- --check
 cargo clippy --no-default-features --features rodio-backend,media-control,system-audio-visualization,image,notify,fzf -- -D warnings
 cargo clippy --no-default-features -- -D warnings   # core paths, no features
 ```
