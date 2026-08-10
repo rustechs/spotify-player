@@ -458,8 +458,8 @@ List of supported commands:
 | `CurrentlyPlayingContextPage`   | go to the currently playing context page                                                           | `g space`          |
 | `TopTrackPage`                  | go to the user top track page                                                                      | `g t`              |
 | `RecentlyPlayedTrackPage`       | go to the user recently played track page                                                          | `g r`              |
-| `LikedTrackPage`                | go to the user liked track page                                                                    | `g y`              |
-| `LyricsPage`                    | go to the lyrics page of the current track                                                         | `g L`, `l`         |
+| `LikedTrackPage`                | go to the user liked track page                                                                    | `g y`, `l`         |
+| `LyricsPage`                    | go to the lyrics page of the current track                                                         | `g L`              |
 | `LibraryPage`                   | go to the user library page                                                                        | `g l`              |
 | `SearchPage`                    | go to the search page                                                                              | `g s`              |
 | `BrowsePage`                    | go to the browse page                                                                              | `g b`              |
@@ -503,7 +503,7 @@ List of available actions:
 - `ShowActionsOnAlbum`
 - `ShowActionsOnArtist`
 - `ShowActionsOnShow`
-- `ToggleLiked`
+- `ToggleLiked` (default shortcuts: `L` on the selected item, `C-l` on the currently playing track)
 - `CopyLink`
 - `Follow`
 - `Unfollow`

@@ -33,7 +33,18 @@ pub struct ActionMap {
 impl Default for KeymapConfig {
     fn default() -> Self {
         KeymapConfig {
-            actions: vec![],
+            actions: vec![
+                ActionMap {
+                    key_sequence: "L".into(),
+                    target: ActionTarget::SelectedItem,
+                    action: Action::ToggleLiked,
+                },
+                ActionMap {
+                    key_sequence: "C-l".into(),
+                    target: ActionTarget::PlayingTrack,
+                    action: Action::ToggleLiked,
+                },
+            ],
             keymaps: vec![
                 Keymap {
                     key_sequence: "n".into(),
@@ -182,7 +193,7 @@ impl Default for KeymapConfig {
                 },
                 Keymap {
                     key_sequence: "l".into(),
-                    command: Command::LyricsPage,
+                    command: Command::LikedTrackPage,
                 },
                 Keymap {
                     key_sequence: "g l".into(),
