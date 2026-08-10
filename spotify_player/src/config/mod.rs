@@ -351,8 +351,7 @@ impl Default for AppConfig {
             proxy: None,
             ap_port: None,
             app_refresh_duration_in_ms: 32,
-            // Event-driven by default. Polling every second burns Spotify Web API
-            // quota and can freeze the TUI after 429s / hung session reconnects.
+            // Event-driven by default; polling burns Web API quota and can 429-wedge the TUI.
             playback_refresh_duration_in_ms: 0,
 
             page_size_in_rows: 20,

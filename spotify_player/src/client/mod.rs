@@ -165,7 +165,7 @@ impl AppClient {
                 // a retry logic is implemented to ensure the application's state is properly initialized
                 let delay = std::time::Duration::from_secs(1);
 
-                for attempt in 0..5 {
+                for attempt in 0u32..5 {
                     tokio::time::sleep(delay).await;
 
                     match client.retrieve_current_playback(&state, false).await {
@@ -224,11 +224,9 @@ impl AppClient {
                             }
                             Err(err) => {
                                 tracing::warn!("Connection failed (device_id={id}): {err:#}");
-                                // Fall through to the next candidate (e.g. skip phantom
-                                // integrated device that returns 404 when streaming is Never).
+                                // Try the next candidate (404s, offline devices, etc.).
                                 if is_rate_limit_msg(&err) {
-                                    sleep_rate_limit(attempt as u32, None, "transfer playback")
-                                        .await;
+                                    sleep_rate_limit(attempt, None, "transfer playback").await;
                                 }
                             }
                         }
@@ -792,7 +790,7 @@ impl AppClient {
         let state = state.clone();
         tokio::task::spawn(async move {
             let delay = std::time::Duration::from_secs(1);
-            for attempt in 0..3 {
+            for attempt in 0u32..3 {
                 tokio::time::sleep(delay).await;
                 match client.retrieve_current_playback(&state, false).await {
                     Ok(()) => {}
@@ -801,7 +799,7 @@ impl AppClient {
                             "Encountered an error when updating the playback state: {err:#}"
                         );
                         if is_rate_limit_msg(&err) {
-                            sleep_rate_limit(attempt as u32, None, "update playback").await;
+                            sleep_rate_limit(attempt, None, "update playback").await;
                         }
                     }
                 }
