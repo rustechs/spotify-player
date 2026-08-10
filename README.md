@@ -285,6 +285,8 @@ Set `enable_audio_visualization` to `true` in your config to enable this feature
 
 ![Audio Visualization](https://github.com/user-attachments/assets/8c21c1b0-5276-4a9e-b719-e0c2bd555537)
 
+*Screenshot predates dB/Hz axis labels and themed grid; capture a new playback-window image after upgrading to replace this asset.*
+
 ### Media Control
 
 Media control is enabled by default. Set `enable_media_control` to `true` in your config to use it. See [config docs](https://github.com/aome510/spotify-player/blob/master/docs/config.md#media-control).
