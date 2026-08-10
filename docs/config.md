@@ -367,4 +367,5 @@ target = "PlayingTrack"
 [[actions]]
 action="ToggleLiked"
 key_sequence="C-l"
+target = "PlayingTrack"
 ```
