@@ -14,59 +14,103 @@ use crate::{
     utils::map_join,
 };
 
+struct MediaItemInfo {
+    title: String,
+    album_or_show: String,
+    artist_or_publisher: String,
+    duration: Option<std::time::Duration>,
+    cover_url: Option<String>,
+}
+
+struct MediaSnapshot {
+    is_playing: bool,
+    progress: Option<MediaPosition>,
+    track: Option<MediaItemInfo>,
+    episode: Option<MediaItemInfo>,
+}
+
 fn update_control_metadata(
     state: &SharedState,
     controls: &mut MediaControls,
     prev_info: &mut String,
 ) -> Result<(), souvlaki::Error> {
-    let player = state.player.read();
-
-    match player.currently_playing() {
-        None => {}
-        Some(item) => {
+    // Snapshot under `player`, then drop before D-Bus I/O. Holding the read lock across
+    // souvlaki/dbus calls lets a waiting playback writer block new readers (CLI/UI) and
+    // can stall the whole tokio runtime when workers pile up on the fair RwLock.
+    let Some(snapshot) = ({
+        let player = state.player.read();
+        player.currently_playing().map(|item| {
             let progress = player
                 .playback_progress()
                 .and_then(|p| Some(MediaPosition(p.to_std().ok()?)));
-
-            if player.playback.as_ref().expect("playback").is_playing {
-                controls.set_playback(MediaPlayback::Playing { progress })?;
-            } else {
-                controls.set_playback(MediaPlayback::Paused { progress })?;
+            let is_playing = player.playback.as_ref().expect("playback").is_playing;
+            let (track, episode) = match item {
+                rspotify::model::PlayableItem::Unknown(_) => (None, None),
+                rspotify::model::PlayableItem::Track(track) => (
+                    Some(MediaItemInfo {
+                        title: track.name.clone(),
+                        album_or_show: track.album.name.clone(),
+                        artist_or_publisher: map_join(&track.artists, |a| &a.name, ", "),
+                        duration: track.duration.to_std().ok(),
+                        cover_url: utils::get_track_album_image_url(track).map(str::to_owned),
+                    }),
+                    None,
+                ),
+                rspotify::model::PlayableItem::Episode(episode) => (
+                    None,
+                    Some(MediaItemInfo {
+                        title: episode.name.clone(),
+                        album_or_show: episode.show.name.clone(),
+                        artist_or_publisher: episode.show.publisher.clone(),
+                        duration: episode.duration.to_std().ok(),
+                        cover_url: utils::get_episode_show_image_url(episode).map(str::to_owned),
+                    }),
+                ),
+            };
+            MediaSnapshot {
+                is_playing,
+                progress,
+                track,
+                episode,
             }
+        })
+    }) else {
+        return Ok(());
+    };
 
-            match item {
-                rspotify::model::PlayableItem::Unknown(_) => {}
-                rspotify::model::PlayableItem::Track(track) => {
-                    // only update metadata when the track information is changed
-                    let track_info = format!("{}/{}", track.name, track.album.name);
-                    if track_info != *prev_info {
-                        controls.set_metadata(MediaMetadata {
-                            title: Some(&track.name),
-                            album: Some(&track.album.name),
-                            artist: Some(&map_join(&track.artists, |a| &a.name, ", ")),
-                            duration: track.duration.to_std().ok(),
-                            cover_url: utils::get_track_album_image_url(track),
-                        })?;
+    if snapshot.is_playing {
+        controls.set_playback(MediaPlayback::Playing {
+            progress: snapshot.progress,
+        })?;
+    } else {
+        controls.set_playback(MediaPlayback::Paused {
+            progress: snapshot.progress,
+        })?;
+    }
 
-                        *prev_info = track_info;
-                    }
-                }
-                rspotify::model::PlayableItem::Episode(episode) => {
-                    // only update metadata when the episode information is changed
-                    let episode_info = format!("{}/{}", episode.name, episode.show.name);
-                    if episode_info != *prev_info {
-                        controls.set_metadata(MediaMetadata {
-                            title: Some(&episode.name),
-                            album: Some(&episode.show.name),
-                            artist: Some(&episode.show.publisher),
-                            duration: episode.duration.to_std().ok(),
-                            cover_url: utils::get_episode_show_image_url(episode),
-                        })?;
-
-                        *prev_info = episode_info;
-                    }
-                }
-            }
+    if let Some(track) = snapshot.track {
+        let track_info = format!("{}/{}", track.title, track.album_or_show);
+        if track_info != *prev_info {
+            controls.set_metadata(MediaMetadata {
+                title: Some(&track.title),
+                album: Some(&track.album_or_show),
+                artist: Some(&track.artist_or_publisher),
+                duration: track.duration,
+                cover_url: track.cover_url.as_deref(),
+            })?;
+            *prev_info = track_info;
+        }
+    } else if let Some(episode) = snapshot.episode {
+        let episode_info = format!("{}/{}", episode.title, episode.album_or_show);
+        if episode_info != *prev_info {
+            controls.set_metadata(MediaMetadata {
+                title: Some(&episode.title),
+                album: Some(&episode.album_or_show),
+                artist: Some(&episode.artist_or_publisher),
+                duration: episode.duration,
+                cover_url: episode.cover_url.as_deref(),
+            })?;
+            *prev_info = episode_info;
         }
     }
 

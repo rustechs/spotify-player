@@ -46,6 +46,11 @@ const PLAYBACK_TYPES: [&rspotify::model::AdditionalType; 2] = [
 /// Without this, a hung `session.connect` freezes the TUI (and CLI socket).
 const SESSION_RECONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Bound direct `retrieve_current_playback` calls (initialize/update paths) the same way
+/// the client-request handler bounds `ClientRequest` work. Without this, a hung Web API
+/// call outside the handler can stall a worker indefinitely.
+const PLAYBACK_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Default HTTP timeout for the app's direct `reqwest` client (`http_get` helpers).
 /// rspotify's client already defaults to 10s; keep this in the same ballpark.
 const HTTP_CLIENT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -183,14 +188,25 @@ impl AppClient {
                 for attempt in 0u32..5 {
                     tokio::time::sleep(delay).await;
 
-                    match client.retrieve_current_playback(&state, false).await {
-                        Ok(()) => {}
-                        Err(err) => {
+                    match tokio::time::timeout(
+                        PLAYBACK_FETCH_TIMEOUT,
+                        client.retrieve_current_playback(&state, false),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => {
                             tracing::error!("Failed to retrieve current playback: {err:#}");
                             // Keep trying after rate-limit storms; give up only on hard failures.
                             if !is_rate_limit_msg(&err) {
                                 return;
                             }
+                            continue;
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                "Timed out after {PLAYBACK_FETCH_TIMEOUT:?} retrieving current playback during init"
+                            );
                             continue;
                         }
                     }
@@ -807,15 +823,25 @@ impl AppClient {
             let delay = std::time::Duration::from_secs(1);
             for attempt in 0u32..3 {
                 tokio::time::sleep(delay).await;
-                match client.retrieve_current_playback(&state, false).await {
-                    Ok(()) => {}
-                    Err(err) => {
+                match tokio::time::timeout(
+                    PLAYBACK_FETCH_TIMEOUT,
+                    client.retrieve_current_playback(&state, false),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
                         tracing::error!(
                             "Encountered an error when updating the playback state: {err:#}"
                         );
                         if is_rate_limit_msg(&err) {
                             sleep_rate_limit(attempt, None, "update playback").await;
                         }
+                    }
+                    Err(_) => {
+                        tracing::error!(
+                            "Timed out after {PLAYBACK_FETCH_TIMEOUT:?} updating the playback state"
+                        );
                     }
                 }
             }
