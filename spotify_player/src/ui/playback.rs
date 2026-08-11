@@ -11,6 +11,14 @@ use crate::{
 };
 use rspotify::model::Id;
 
+/// Playback fields needed to render the window, cloned under a short `player` read.
+struct ActivePlayback {
+    item: rspotify::model::PlayableItem,
+    buffered_playback: Option<PlaybackMetadata>,
+    progress: chrono::Duration,
+    duration: chrono::Duration,
+}
+
 /// Render a playback window showing information about the current playback, which includes
 /// - track title, artists, album
 /// - playback metadata (playing state, repeat state, shuffle state, volume, device, etc)
@@ -25,43 +33,80 @@ pub fn render_playback_window(
     let (rect, other_rect) = split_rect_for_playback_window(state, rect);
     let rect = construct_and_render_block("Playback", &ui.theme, Borders::ALL, frame, rect);
 
-    let player = state.player.read();
-    if let Some(ref playback) = player.playback {
-        if let Some(item) = &playback.item {
-            // Carve off the visualization rows here, inside the active-playback
-            // branch, so the full rect is used when there is nothing playing.
-            // Keep the area reserved while a track is loaded (including pause) so
-            // the layout does not jump; bars idle at zero when audio is silent.
-            // With visualization enabled the progress bar is always placed below
-            // the spectrogram, regardless of `progress_bar_position`.
-            #[cfg(feature = "streaming")]
-            let (rect, vis_rect, progress_override) = {
+    // Snapshot playback under a short `player` read. Holding the RwLock across cover
+    // encode / viz / data reads lets a waiting writer (playback refresh) block *new*
+    // readers under parking_lot's fair policy — parking every tokio worker on the lock
+    // and freezing the TUI + CLI socket.
+    let (active, waiting_for_first_fetch) = {
+        let player = state.player.read();
+        let waiting_for_first_fetch = player.playback_last_updated_time.is_none();
+        let active = player
+            .playback
+            .as_ref()
+            .and_then(|p| p.item.clone())
+            .and_then(|item| {
+                let duration = match &item {
+                    rspotify::model::PlayableItem::Track(track) => Some(track.duration),
+                    rspotify::model::PlayableItem::Episode(episode) => Some(episode.duration),
+                    rspotify::model::PlayableItem::Unknown(unknown) => {
+                        log::warn!("Unknown playback item: {unknown:?}");
+                        None
+                    }
+                }?;
+                let progress = std::cmp::min(
+                    player.playback_progress().expect("non-empty playback"),
+                    duration,
+                );
+                Some(ActivePlayback {
+                    item,
+                    buffered_playback: player.buffered_playback.clone(),
+                    progress,
+                    duration,
+                })
+            });
+        (active, waiting_for_first_fetch)
+    };
+
+    if let Some(ActivePlayback {
+        item,
+        buffered_playback,
+        progress,
+        duration,
+    }) = active
+    {
+        // Carve off the visualization rows here, inside the active-playback
+        // branch, so the full rect is used when there is nothing playing.
+        // Keep the area reserved while a track is loaded (including pause) so
+        // the layout does not jump; bars idle at zero when audio is silent.
+        // With visualization enabled the progress bar is always placed below
+        // the spectrogram, regardless of `progress_bar_position`.
+        #[cfg(feature = "streaming")]
+        let (rect, vis_rect, progress_override) = {
+            let configs = config::get_config();
+            if configs.app_config.enable_audio_visualization {
+                let chunks = Layout::vertical([
+                    Constraint::Length(playback_format_line_count()),
+                    Constraint::Length(super::streaming::VIS_HEIGHT),
+                    Constraint::Length(1),
+                ])
+                .split(rect);
+                (chunks[0], Some(chunks[1]), Some(chunks[2]))
+            } else {
+                (rect, None, None)
+            }
+        };
+
+        #[cfg(not(feature = "streaming"))]
+        let progress_override: Option<Rect> = None;
+
+        let (metadata_rect, progress_bar_rect) = {
+            // Render the track's cover image if `image` feature is enabled
+            #[cfg(feature = "image")]
+            {
                 let configs = config::get_config();
-                if configs.app_config.enable_audio_visualization {
-                    let chunks = Layout::vertical([
-                        Constraint::Length(playback_format_line_count()),
-                        Constraint::Length(super::streaming::VIS_HEIGHT),
-                        Constraint::Length(1),
-                    ])
-                    .split(rect);
-                    (chunks[0], Some(chunks[1]), Some(chunks[2]))
-                } else {
-                    (rect, None, None)
-                }
-            };
-
-            #[cfg(not(feature = "streaming"))]
-            let progress_override: Option<Rect> = None;
-
-            let (metadata_rect, progress_bar_rect) = {
-                // Render the track's cover image if `image` feature is enabled
-                #[cfg(feature = "image")]
-                {
-                    let configs = config::get_config();
-                    // Split the allocated rectangle into `metadata_rect`, `cover_img_rect` and `progress_bar_rect`
-                    let (metadata_rect, cover_img_rect, progress_bar_rect) = if let Some(progress) =
-                        progress_override
-                    {
+                // Split the allocated rectangle into `metadata_rect`, `cover_img_rect` and `progress_bar_rect`
+                let (metadata_rect, cover_img_rect, progress_bar_rect) =
+                    if let Some(progress) = progress_override {
                         let hor_chunks = split_rect_for_cover_img(rect, &ui.picker);
                         (hor_chunks.1, hor_chunks.0, progress)
                     } else {
@@ -79,84 +124,70 @@ pub fn render_playback_window(
                         }
                     };
 
-                    let url = match item {
-                        rspotify::model::PlayableItem::Track(track) => {
-                            crate::utils::get_track_album_image_url(track).map(String::from)
+                let url = match &item {
+                    rspotify::model::PlayableItem::Track(track) => {
+                        crate::utils::get_track_album_image_url(track).map(String::from)
+                    }
+                    rspotify::model::PlayableItem::Episode(episode) => {
+                        crate::utils::get_episode_show_image_url(episode).map(String::from)
+                    }
+                    rspotify::model::PlayableItem::Unknown(_) => None,
+                };
+                if let Some(url) = url {
+                    let data = state.data.read();
+                    if let Some(img) = data.caches.images.get(&url) {
+                        if ui.last_cover_image_render_info.url != url
+                            || ui.last_cover_image_render_info.render_area != cover_img_rect
+                        {
+                            let state = match crate::ui::cover_image::CoverImage::new(
+                                &ui.picker,
+                                img,
+                                cover_img_rect,
+                            ) {
+                                Ok(cover) => Some(cover),
+                                Err(err) => {
+                                    tracing::error!("Failed to encode cover image: {err:#}");
+                                    None
+                                }
+                            };
+                            ui.last_cover_image_render_info = ImageRenderInfo {
+                                url,
+                                render_area: cover_img_rect,
+                                state,
+                            };
                         }
-                        rspotify::model::PlayableItem::Episode(episode) => {
-                            crate::utils::get_episode_show_image_url(episode).map(String::from)
-                        }
-                        rspotify::model::PlayableItem::Unknown(_) => None,
-                    };
-                    if let Some(url) = url {
-                        let data = state.data.read();
-                        if let Some(img) = data.caches.images.get(&url) {
-                            if ui.last_cover_image_render_info.url != url
-                                || ui.last_cover_image_render_info.render_area != cover_img_rect
-                            {
-                                let state = match crate::ui::cover_image::CoverImage::new(
-                                    &ui.picker,
-                                    img,
-                                    cover_img_rect,
-                                ) {
-                                    Ok(cover) => Some(cover),
-                                    Err(err) => {
-                                        tracing::error!("Failed to encode cover image: {err:#}");
-                                        None
-                                    }
-                                };
-                                ui.last_cover_image_render_info = ImageRenderInfo {
-                                    url,
-                                    render_area: cover_img_rect,
-                                    state,
-                                };
-                            }
-                            let area = ui.last_cover_image_render_info.render_area;
-                            if let Some(cover) = ui.last_cover_image_render_info.state.as_mut() {
-                                cover.render(frame, area);
-                            }
+                        let area = ui.last_cover_image_render_info.render_area;
+                        if let Some(cover) = ui.last_cover_image_render_info.state.as_mut() {
+                            cover.render(frame, area);
                         }
                     }
-                    (metadata_rect, progress_bar_rect)
                 }
-
-                #[cfg(not(feature = "image"))]
-                {
-                    if let Some(progress) = progress_override {
-                        (rect, progress)
-                    } else {
-                        let chunks = split_rect_for_progress_bar(rect);
-                        (chunks.0, chunks.1)
-                    }
-                }
-            };
-
-            if let Some(ref playback) = player.buffered_playback {
-                let playback_text = construct_playback_text(ui, state, item, playback);
-                let playback_desc = Paragraph::new(playback_text);
-                frame.render_widget(playback_desc, metadata_rect);
+                (metadata_rect, progress_bar_rect)
             }
 
-            let duration = match item {
-                rspotify::model::PlayableItem::Track(track) => track.duration,
-                rspotify::model::PlayableItem::Episode(episode) => episode.duration,
-                rspotify::model::PlayableItem::Unknown(item) => {
-                    log::warn!("Unknown playback item: {item:?}");
-                    return other_rect;
+            #[cfg(not(feature = "image"))]
+            {
+                if let Some(progress) = progress_override {
+                    (rect, progress)
+                } else {
+                    let chunks = split_rect_for_progress_bar(rect);
+                    (chunks.0, chunks.1)
                 }
-            };
-
-            let progress = std::cmp::min(
-                player.playback_progress().expect("non-empty playback"),
-                duration,
-            );
-            #[cfg(feature = "streaming")]
-            if let Some(vis_r) = vis_rect {
-                super::streaming::render_audio_visualization(frame, state, &ui.theme, vis_r);
             }
-            render_playback_progress_bar(frame, ui, progress, duration, progress_bar_rect);
-            return other_rect;
+        };
+
+        if let Some(ref buffered) = buffered_playback {
+            let playback_text = construct_playback_text(ui, state, &item, buffered);
+            let playback_desc = Paragraph::new(playback_text);
+            frame.render_widget(playback_desc, metadata_rect);
         }
+
+        #[cfg(feature = "streaming")]
+        if let Some(vis_r) = vis_rect {
+            super::streaming::render_audio_visualization(frame, state, &ui.theme, vis_r);
+        }
+        render_playback_progress_bar(frame, ui, progress, duration, progress_bar_rect);
+        return other_rect;
     }
 
     // Previously rendered image can result in a weird rendering text,
@@ -166,7 +197,7 @@ pub fn render_playback_window(
         ui.last_cover_image_render_info = ImageRenderInfo::default();
     }
 
-    if player.playback_last_updated_time.is_none() {
+    if waiting_for_first_fetch {
         // Still waiting for the first successful playback fetch — show animated loading indicator
         const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let frame_idx = (std::time::SystemTime::now()

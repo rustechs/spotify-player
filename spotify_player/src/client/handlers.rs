@@ -35,6 +35,14 @@ const TRACK_END_FETCH_INTERVAL: Duration = Duration::from_secs(2);
 /// Minimum gap between watcher-driven queue refreshes (missing/mismatched queue).
 const QUEUE_FETCH_INTERVAL: Duration = Duration::from_secs(5);
 
+/// When `enable_streaming = Never`, external Connect clients (desktop/phone) can
+/// change track/device without local librespot events. Event-only refresh (`0`)
+/// then leaves the TUI stuck on a stale song until manual `Ctrl-R`. Use a light
+/// poll as the Connect-mode fallback; set an explicit positive
+/// `playback_refresh_duration_in_ms` to override, or a large value if you truly
+/// want event-only behavior with streaming disabled.
+const CONNECT_MODE_PLAYBACK_REFRESH_FALLBACK: Duration = Duration::from_secs(5);
+
 /// starts the client's request handler
 pub async fn start_client_handler(
     state: &SharedState,
@@ -282,13 +290,28 @@ fn handle_player_event(
     Ok(())
 }
 
+/// Effective playback poll interval for the event watcher.
+///
+/// `playback_refresh_duration_in_ms > 0` wins. Otherwise, Connect/remote-control
+/// mode (`enable_streaming = Never`) falls back to a light poll so external
+/// track changes appear without manual refresh.
+fn effective_playback_refresh_duration(configs: &config::Configs) -> Option<Duration> {
+    let configured_ms = configs.app_config.playback_refresh_duration_in_ms;
+    if configured_ms > 0 {
+        return Some(Duration::from_millis(configured_ms));
+    }
+    if configs.app_config.enable_streaming == config::StreamingType::Never {
+        return Some(CONNECT_MODE_PLAYBACK_REFRESH_FALLBACK);
+    }
+    None
+}
+
 /// Starts event watcher listening to events and making update requests to the client if needed
 pub fn start_player_event_watcher(state: &SharedState, client_pub: &flume::Sender<ClientRequest>) {
     let configs = config::get_config();
 
     let refresh_duration = Duration::from_millis(100);
-    let playback_refresh_duration =
-        Duration::from_millis(configs.app_config.playback_refresh_duration_in_ms);
+    let playback_refresh_duration = effective_playback_refresh_duration(configs);
     // Start elapsed so the first legitimate track-end/queue fetch is not delayed.
     let fetch_epoch = Instant::now()
         .checked_sub(QUEUE_FETCH_INTERVAL)
@@ -301,14 +324,15 @@ pub fn start_player_event_watcher(state: &SharedState, client_pub: &flume::Sende
     };
 
     loop {
-        // periodically refresh the playback state (if enabled in config)
-        if configs.app_config.playback_refresh_duration_in_ms > 0
-            && handler_state.last_playback_refresh_timer.elapsed() >= playback_refresh_duration
-        {
-            client_pub
-                .send(ClientRequest::GetCurrentPlayback)
-                .unwrap_or_default();
-            handler_state.last_playback_refresh_timer = Instant::now();
+        // Periodically refresh playback when configured, or when Connect/Never
+        // mode needs a fallback poll (external clients change tracks silently).
+        if let Some(interval) = playback_refresh_duration {
+            if handler_state.last_playback_refresh_timer.elapsed() >= interval {
+                client_pub
+                    .send(ClientRequest::GetCurrentPlayback)
+                    .unwrap_or_default();
+                handler_state.last_playback_refresh_timer = Instant::now();
+            }
         }
 
         if let Err(err) = handle_player_event(state, client_pub, &mut handler_state) {
