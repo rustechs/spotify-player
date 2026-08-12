@@ -373,7 +373,7 @@ impl Default for AppConfig {
             #[cfg(feature = "image")]
             cover_img_length: 0,
             #[cfg(feature = "image")]
-            cover_img_width: 5,
+            cover_img_width: 6,
             #[cfg(feature = "pixelate")]
             cover_img_pixels: 16,
 

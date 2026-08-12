@@ -84,6 +84,8 @@ pub fn render_playback_window(
         let (rect, vis_rect, progress_override) = {
             let configs = config::get_config();
             if configs.app_config.enable_audio_visualization {
+                // Metadata strip is only as tall as the format text. The cover hangs
+                // into the visualizer's top-right instead of forcing this strip taller.
                 let chunks = Layout::vertical([
                     Constraint::Length(playback_format_line_count()),
                     Constraint::Length(super::streaming::VIS_HEIGHT),
@@ -99,80 +101,42 @@ pub fn render_playback_window(
         #[cfg(not(feature = "streaming"))]
         let progress_override: Option<Rect> = None;
 
+        // Cover is prepared here but rendered after the visualizer so it can paint
+        // over the dead top-right of the spectrogram.
+        #[cfg(feature = "image")]
         let (metadata_rect, progress_bar_rect) = {
-            // Render the track's cover image if `image` feature is enabled
-            #[cfg(feature = "image")]
-            {
-                let configs = config::get_config();
-                // Split the allocated rectangle into `metadata_rect`, `cover_img_rect` and `progress_bar_rect`
-                let (metadata_rect, cover_img_rect, progress_bar_rect) =
-                    if let Some(progress) = progress_override {
-                        let hor_chunks = split_rect_for_cover_img(rect, &ui.picker);
-                        (hor_chunks.1, hor_chunks.0, progress)
-                    } else {
-                        match configs.app_config.progress_bar_position {
-                            config::ProgressBarPosition::Bottom => {
-                                let ver_chunks = split_rect_for_progress_bar(rect); // rect, progress_bar_rect
-                                let hor_chunks = split_rect_for_cover_img(ver_chunks.0, &ui.picker); // cover_img_rect, metadata_rect
-                                (hor_chunks.1, hor_chunks.0, ver_chunks.1)
-                            }
-                            config::ProgressBarPosition::Right => {
-                                let hor_chunks = split_rect_for_cover_img(rect, &ui.picker); // cover_img_rect, rect
-                                let ver_chunks = split_rect_for_progress_bar(hor_chunks.1); // metadata_rect, progress_bar_rect
-                                (ver_chunks.0, hor_chunks.0, ver_chunks.1)
-                            }
-                        }
+            let configs = config::get_config();
+            #[cfg(feature = "streaming")]
+            let (metadata_rect, cover_img_rect, progress_bar_rect) =
+                if let (Some(progress), Some(vis_r)) = (progress_override, vis_rect) {
+                    let combined = Rect {
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height.saturating_add(vis_r.height),
                     };
-
-                let url = match &item {
-                    rspotify::model::PlayableItem::Track(track) => {
-                        crate::utils::get_track_album_image_url(track).map(String::from)
-                    }
-                    rspotify::model::PlayableItem::Episode(episode) => {
-                        crate::utils::get_episode_show_image_url(episode).map(String::from)
-                    }
-                    rspotify::model::PlayableItem::Unknown(_) => None,
-                };
-                if let Some(url) = url {
-                    let data = state.data.read();
-                    if let Some(img) = data.caches.images.get(&url) {
-                        if ui.last_cover_image_render_info.url != url
-                            || ui.last_cover_image_render_info.render_area != cover_img_rect
-                        {
-                            let state = match crate::ui::cover_image::CoverImage::new(
-                                &ui.picker,
-                                img,
-                                cover_img_rect,
-                            ) {
-                                Ok(cover) => Some(cover),
-                                Err(err) => {
-                                    tracing::error!("Failed to encode cover image: {err:#}");
-                                    None
-                                }
-                            };
-                            ui.last_cover_image_render_info = ImageRenderInfo {
-                                url,
-                                render_area: cover_img_rect,
-                                state,
-                            };
-                        }
-                        let area = ui.last_cover_image_render_info.render_area;
-                        if let Some(cover) = ui.last_cover_image_render_info.state.as_mut() {
-                            cover.render(frame, area);
-                        }
-                    }
-                }
-                (metadata_rect, progress_bar_rect)
-            }
-
-            #[cfg(not(feature = "image"))]
-            {
-                if let Some(progress) = progress_override {
-                    (rect, progress)
+                    let (cover, metadata) =
+                        split_cover_over_visualizer(combined, rect.height, &ui.picker);
+                    (metadata, cover, progress)
                 } else {
-                    let chunks = split_rect_for_progress_bar(rect);
-                    (chunks.0, chunks.1)
-                }
+                    split_cover_with_progress_bar(rect, configs, &ui.picker)
+                };
+
+            #[cfg(not(feature = "streaming"))]
+            let (metadata_rect, cover_img_rect, progress_bar_rect) =
+                split_cover_with_progress_bar(rect, configs, &ui.picker);
+
+            prepare_cover_image(state, ui, &item, cover_img_rect);
+            (metadata_rect, progress_bar_rect)
+        };
+
+        #[cfg(not(feature = "image"))]
+        let (metadata_rect, progress_bar_rect) = {
+            if let Some(progress) = progress_override {
+                (rect, progress)
+            } else {
+                let chunks = split_rect_for_progress_bar(rect);
+                (chunks.0, chunks.1)
             }
         };
 
@@ -186,6 +150,16 @@ pub fn render_playback_window(
         if let Some(vis_r) = vis_rect {
             super::streaming::render_audio_visualization(frame, state, &ui.theme, vis_r);
         }
+
+        // Draw the cover last so it occludes the visualizer's top-right corner.
+        #[cfg(feature = "image")]
+        {
+            let area = ui.last_cover_image_render_info.render_area;
+            if let Some(cover) = ui.last_cover_image_render_info.state.as_mut() {
+                cover.render(frame, area);
+            }
+        }
+
         render_playback_progress_bar(frame, ui, progress, duration, progress_bar_rect);
         return other_rect;
     }
@@ -244,34 +218,151 @@ fn split_rect_for_progress_bar(rect: Rect) -> (Rect, Rect) {
     (chunks[0], chunks[1])
 }
 
+/// Split `rect` for cover + metadata + progress using `progress_bar_position`.
+///
+/// Returns `(metadata, cover, progress)`.
+#[cfg(feature = "image")]
+fn split_cover_with_progress_bar(
+    rect: Rect,
+    configs: &config::Configs,
+    picker: &ratatui_image::picker::Picker,
+) -> (Rect, Rect, Rect) {
+    match configs.app_config.progress_bar_position {
+        config::ProgressBarPosition::Bottom => {
+            let (above, progress) = split_rect_for_progress_bar(rect);
+            let (cover, metadata) = split_rect_for_cover_img(above, picker);
+            (metadata, cover, progress)
+        }
+        config::ProgressBarPosition::Right => {
+            let (cover, rest) = split_rect_for_cover_img(rect, picker);
+            let (metadata, progress) = split_rect_for_progress_bar(rest);
+            (metadata, cover, progress)
+        }
+    }
+}
+
+/// Place the cover in the top-right of `combined` (metadata strip + visualizer).
+///
+/// Returns `(cover, metadata)` where metadata is only the left side of the top
+/// `metadata_height` rows — the cover may hang down into the visualizer.
+#[cfg(all(feature = "image", feature = "streaming"))]
+fn split_cover_over_visualizer(
+    combined: Rect,
+    metadata_height: u16,
+    picker: &ratatui_image::picker::Picker,
+) -> (Rect, Rect) {
+    let configs = config::get_config();
+    let cover_rows = (configs.app_config.cover_img_width as u16).min(combined.height);
+    // Reserve 1-col left margin, 1-col gap before the cover, and 1-col right margin.
+    let max_cols = combined.width.saturating_sub(3);
+    let cover_cols = cover_img_length_for_rows(configs, picker, cover_rows)
+        .min(max_cols)
+        .max(1);
+
+    let cover = Rect {
+        x: combined.right().saturating_sub(1 + cover_cols),
+        y: combined.y,
+        width: cover_cols,
+        height: cover_rows,
+    };
+
+    let meta_x = combined.x + 1;
+    let meta_right = cover.x.saturating_sub(1);
+    let metadata = Rect {
+        x: meta_x,
+        y: combined.y,
+        width: meta_right.saturating_sub(meta_x),
+        height: metadata_height.min(combined.height),
+    };
+
+    (cover, metadata)
+}
+
 #[cfg(feature = "image")]
 fn split_rect_for_cover_img(rect: Rect, picker: &ratatui_image::picker::Picker) -> (Rect, Rect) {
     let configs = config::get_config();
+    // Use the height we can actually fill so column sizing matches the rendered box.
+    let cover_rows = (configs.app_config.cover_img_width as u16).min(rect.height);
+    let cover_cols = cover_img_length_for_rows(configs, picker, cover_rows);
+    // Metadata on the left, cover top-right; 1-column margins on the outer edges
+    // and between the two so spacing stays symmetric.
     let hor_chunks = Layout::horizontal([
-        Constraint::Length(cover_img_length(configs, picker)),
+        Constraint::Length(1),
         Constraint::Fill(0), // metadata_rect
+        Constraint::Length(1),
+        Constraint::Length(cover_cols),
+        Constraint::Length(1),
     ])
-    .spacing(1)
     .split(rect);
-    let ver_chunks = Layout::vertical([
-        Constraint::Length(configs.app_config.cover_img_width as u16), // cover_img_rect
-    ])
-    .split(hor_chunks[0]);
+    let ver_chunks = Layout::vertical([Constraint::Length(cover_rows)]).split(hor_chunks[3]);
 
     (ver_chunks[0], hor_chunks[1])
 }
 
-/// Determine the cover image box's width in columns.
+/// Determine the cover image box's width in columns for a given row height.
 #[cfg(feature = "image")]
-fn cover_img_length(configs: &config::Configs, picker: &ratatui_image::picker::Picker) -> u16 {
+fn cover_img_length_for_rows(
+    configs: &config::Configs,
+    picker: &ratatui_image::picker::Picker,
+    rows: u16,
+) -> u16 {
     match configs.app_config.cover_img_length {
         // When `cover_img_length` is `0` (the default), derive it from the terminal's cell aspect ratio
         0 => {
             let font_size = picker.font_size();
-            let rows = configs.app_config.cover_img_width as u16;
-            rows * font_size.height / font_size.width
+            let width = font_size.width.max(1);
+            (rows * font_size.height / width).max(1)
         }
         length => length as u16,
+    }
+}
+
+/// Encode / cache the cover for `cover_img_rect` without drawing it yet.
+#[cfg(feature = "image")]
+fn prepare_cover_image(
+    state: &SharedState,
+    ui: &mut UIStateGuard,
+    item: &rspotify::model::PlayableItem,
+    cover_img_rect: Rect,
+) {
+    let url = match item {
+        rspotify::model::PlayableItem::Track(track) => {
+            crate::utils::get_track_album_image_url(track).map(String::from)
+        }
+        rspotify::model::PlayableItem::Episode(episode) => {
+            crate::utils::get_episode_show_image_url(episode).map(String::from)
+        }
+        rspotify::model::PlayableItem::Unknown(_) => None,
+    };
+    let Some(url) = url else {
+        // Avoid drawing the previous track's cover after the visualizer.
+        ui.last_cover_image_render_info = ImageRenderInfo::default();
+        return;
+    };
+
+    let data = state.data.read();
+    let Some(img) = data.caches.images.get(&url) else {
+        // Image not cached yet — clear so post-viz render does not keep the old cover.
+        ui.last_cover_image_render_info = ImageRenderInfo::default();
+        return;
+    };
+
+    if ui.last_cover_image_render_info.url != url
+        || ui.last_cover_image_render_info.render_area != cover_img_rect
+    {
+        let cover_state =
+            match crate::ui::cover_image::CoverImage::new(&ui.picker, img, cover_img_rect) {
+                Ok(cover) => Some(cover),
+                Err(err) => {
+                    tracing::error!("Failed to encode cover image: {err:#}");
+                    None
+                }
+            };
+        ui.last_cover_image_render_info = ImageRenderInfo {
+            url,
+            render_area: cover_img_rect,
+            state: cover_state,
+        };
     }
 }
 
@@ -501,6 +592,7 @@ fn split_rect_for_playback_window(state: &SharedState, rect: Rect) -> (Rect, Rec
     let configs = config::get_config();
     // When visualization is enabled, size the window to fit metadata, progress, and
     // the chart tightly instead of inheriting slack from `playback_window_height`.
+    // The cover overlaps the visualizer, so it does not add to this height.
     #[cfg(feature = "streaming")]
     let playback_width = if configs.app_config.enable_audio_visualization
         && state.player.read().currently_playing().is_some()
@@ -513,8 +605,17 @@ fn split_rect_for_playback_window(state: &SharedState, rect: Rect) -> (Rect, Rec
     #[cfg(not(feature = "streaming"))]
     let playback_width = configs.app_config.layout.playback_window_height;
 
-    // the playback window's width should not be smaller than the cover image's width + 1
-    #[cfg(feature = "image")]
+    // Without visualization, the playback window must be tall enough for the cover.
+    #[cfg(all(feature = "image", feature = "streaming"))]
+    let playback_width = if configs.app_config.enable_audio_visualization
+        && state.player.read().currently_playing().is_some()
+    {
+        playback_width
+    } else {
+        std::cmp::max(configs.app_config.cover_img_width + 1, playback_width)
+    };
+
+    #[cfg(all(feature = "image", not(feature = "streaming")))]
     let playback_width = std::cmp::max(configs.app_config.cover_img_width + 1, playback_width);
 
     // add lines for top/bottom borders depending on the progress bar's position
