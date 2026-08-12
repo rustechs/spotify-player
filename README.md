@@ -285,9 +285,7 @@ Set `enable_audio_visualization` to `true` in your config to enable this feature
 
 With the `image` feature also enabled, the cover sits in the top-right of the playback window and may overlap the visualizer's top-right corner; metadata stays on the left with 1-column margins.
 
-![Audio Visualization](https://github.com/user-attachments/assets/8c21c1b0-5276-4a9e-b719-e0c2bd555537)
-
-*Screenshot predates dB/Hz axis labels and themed grid; capture a new playback-window image after upgrading to replace this asset.*
+![Audio Visualization](./media/audio-visualization.png)
 
 ### Media Control
 
