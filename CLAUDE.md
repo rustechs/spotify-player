@@ -66,7 +66,7 @@ Event/UI threads never call async functions directly. They send a `ClientRequest
 | `daemon`                                                                                                                                | Daemonize mode (implies `streaming`)                     |
 | `fzf`                                                                                                                                   | Fuzzy search                                             |
 
-Default: `rodio-backend` + `media-control` + `system-audio-visualization` (Linux only; the capture path is a no-op on other platforms). Gate feature-specific code with `#[cfg(feature = "...")]`.
+Default: `rodio-backend` + `media-control` + `system-audio-visualization` (Linux only; the capture path is a no-op on other platforms) + `image`. Gate feature-specific code with `#[cfg(feature = "...")]`.
 
 ## Verifying changes
 

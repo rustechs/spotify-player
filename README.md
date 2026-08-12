@@ -283,6 +283,8 @@ With the `system-audio-visualization` feature (enabled by default in this fork o
 
 Set `enable_audio_visualization` to `true` in your config to enable this feature. See [config docs](./docs/config.md).
 
+With the `image` feature also enabled, the cover sits in the top-right of the playback window and may overlap the visualizer's top-right corner; metadata stays on the left with 1-column margins.
+
 ![Audio Visualization](https://github.com/user-attachments/assets/8c21c1b0-5276-4a9e-b719-e0c2bd555537)
 
 *Screenshot predates dB/Hz axis labels and themed grid; capture a new playback-window image after upgrading to replace this asset.*
@@ -295,10 +297,10 @@ Media control uses [MPRIS DBus](https://wiki.archlinux.org/title/MPRIS) on Linux
 
 ### Image
 
-To enable image rendering, build with the `image` feature (disabled by default):
+Image rendering (album covers in the playback window) is enabled by default via the `image` feature. To build without it:
 
 ```shell
-cargo install spotify_player --features image
+cargo install spotify_player --no-default-features --features rodio-backend,media-control,system-audio-visualization
 ```
 
 Image rendering is powered by [`ratatui-image`](https://github.com/benjajaja/ratatui-image), which auto-detects the terminal's graphics protocol (Kitty, iTerm2, Sixel) on startup. Terminals without any graphics protocol support fall back to [block characters](https://en.wikipedia.org/wiki/Block_Elements).
@@ -306,6 +308,7 @@ Image rendering is powered by [`ratatui-image`](https://github.com/benjajaja/rat
 **Notes**:
 
 - Protocol detection queries the terminal via stdio. In nested terminals (e.g. Neovim's floating terminal), the query does not reach the outer terminal emulator, so the protocol falls back to block characters.
+- With audio visualization enabled, the cover is placed top-right (may overlap the chart's top-right); metadata remains on the left with 1-column margins.
 
 Image rendering examples:
 
