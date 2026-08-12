@@ -22,7 +22,10 @@ use std::sync::Arc;
 pub const VIS_HEIGHT: u16 = 8;
 
 /// Left margin for dB axis labels (`dB` + tick, 3 columns wide).
-const Y_AXIS_WIDTH: u16 = 3;
+///
+/// Metadata text above the chart uses this same inset so it lines up with the
+/// chart's vertical axis.
+pub const Y_AXIS_WIDTH: u16 = 3;
 /// Right margin for the x-axis end cap and `Hz` unit label.
 const X_AXIS_UNIT_WIDTH: u16 = 2;
 

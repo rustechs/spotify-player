@@ -283,7 +283,7 @@ With the `system-audio-visualization` feature (enabled by default in this fork o
 
 Set `enable_audio_visualization` to `true` in your config to enable this feature. See [config docs](./docs/config.md).
 
-With the `image` feature also enabled, the cover sits in the top-right of the playback window and may overlap the visualizer's top-right corner; metadata stays on the left with 1-column margins.
+With the `image` feature also enabled, the cover sits in the top-right of the playback window and may overlap the visualizer's top-right corner; metadata stays on the left, indented to line up with the chart's vertical axis.
 
 ![Audio Visualization](./media/audio-visualization.png)
 
@@ -306,7 +306,7 @@ Image rendering is powered by [`ratatui-image`](https://github.com/benjajaja/rat
 **Notes**:
 
 - Protocol detection queries the terminal via stdio. In nested terminals (e.g. Neovim's floating terminal), the query does not reach the outer terminal emulator, so the protocol falls back to block characters.
-- With audio visualization enabled, the cover is placed top-right (may overlap the chart's top-right); metadata remains on the left with 1-column margins.
+- With audio visualization enabled, the cover is placed top-right (may overlap the chart's top-right); metadata is indented to line up with the chart's vertical axis.
 
 Image rendering examples:
 

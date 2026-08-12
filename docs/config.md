@@ -88,7 +88,7 @@ spotify_player -o device.volume=80 -o theme=dracula
 - `border_type`, `progress_bar_type`, and `progress_bar_position` accept only the values listed in the table above. With `enable_audio_visualization` enabled, `progress_bar_position` is ignored and the progress bar is always rendered below the visualization.
 - `explicit_icon` can be set to any Unicode character or an empty string to disable explicit markers.
 - `cover_img_length = 0` (the default) auto-derives the cover's column count from the terminal's cell aspect ratio. Set a non-zero `cover_img_length` to size the box manually.
-- With both `enable_audio_visualization` and the `image` feature, the cover sits top-right and may overlap the visualizer's top-right corner; metadata stays left with 1-column margins (`cover_img_width` / `cover_img_length` still size the cover).
+- With both `enable_audio_visualization` and the `image` feature, the cover sits top-right and may overlap the visualizer's top-right corner; metadata is indented to line up with the chart's vertical axis (`cover_img_width` / `cover_img_length` still size the cover).
 
 #### Media control
 

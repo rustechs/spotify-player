@@ -253,8 +253,10 @@ fn split_cover_over_visualizer(
 ) -> (Rect, Rect) {
     let configs = config::get_config();
     let cover_rows = (configs.app_config.cover_img_width as u16).min(combined.height);
-    // Reserve 1-col left margin, 1-col gap before the cover, and 1-col right margin.
-    let max_cols = combined.width.saturating_sub(3);
+    // Left inset matches the visualizer's dB-label column so metadata lines up
+    // with the chart's vertical axis; also reserve gap + right margin for cover.
+    let left_inset = super::streaming::Y_AXIS_WIDTH;
+    let max_cols = combined.width.saturating_sub(left_inset + 2);
     let cover_cols = cover_img_length_for_rows(configs, picker, cover_rows)
         .min(max_cols)
         .max(1);
@@ -266,7 +268,7 @@ fn split_cover_over_visualizer(
         height: cover_rows,
     };
 
-    let meta_x = combined.x + 1;
+    let meta_x = combined.x + left_inset;
     let meta_right = cover.x.saturating_sub(1);
     let metadata = Rect {
         x: meta_x,
