@@ -88,7 +88,7 @@ spotify_player -o device.volume=80 -o theme=dracula
 - Repeat, shuffle, volume, and device are drawn on the last inner row of the playback block (order from `playback_metadata_fields`), spread across the full width, with a solid bottom border underneath. `{metadata}` in `playback_format` is ignored so those fields are not duplicated. With `enable_audio_visualization` enabled, `progress_bar_position` is ignored and the progress bar is always rendered below the visualization.
 - `explicit_icon` can be set to any Unicode character or an empty string to disable explicit markers.
 - `cover_img_length = 0` (the default) auto-derives the cover's column count from the terminal's cell aspect ratio. Set a non-zero `cover_img_length` to size the box manually.
-- With both `enable_audio_visualization` and the `image` feature, the cover sits top-right and may overlap the visualizer's top-right corner; metadata is indented one column left of the chart's vertical axis (`cover_img_width` / `cover_img_length` still size the cover).
+- With both `enable_audio_visualization` and the `image` feature, the cover sits top-right and may overlap the visualizer's top-right corner. Track/album/genre text (`playback_format`) is indented one column left of the chart's vertical axis; the repeat/shuffle/volume/device row (`playback_metadata_fields`) is full-width under the progress bar (`cover_img_width` / `cover_img_length` still size the cover).
 
 #### Media control
 

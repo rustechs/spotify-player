@@ -856,4 +856,20 @@ mod tests {
         assert_eq!(vis.bottom(), progress.y);
         assert_eq!(progress.height, 1);
     }
+
+    #[cfg(feature = "streaming")]
+    #[test]
+    fn viz_inner_stack_is_header_vis_progress_status_flush() {
+        let inner = super::Rect::new(1, 1, 80, 14);
+        let (content, status) = super::split_status_row(inner);
+        let (header, vis, progress) = super::split_viz_playback_rows(content, 2);
+        assert_eq!(header.y, inner.y);
+        assert_eq!(vis.y, header.bottom());
+        assert_eq!(progress.y, vis.bottom());
+        assert_eq!(status.y, progress.bottom());
+        assert_eq!(status.bottom(), inner.bottom());
+        assert_eq!(status.height, 1);
+        assert_eq!(progress.height, 1);
+        assert_eq!(header.height, 2);
+    }
 }

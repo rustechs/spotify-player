@@ -126,6 +126,14 @@ pub fn new_api_client() -> Result<WebApiClient> {
     ))
 }
 
+/// Whether `new_session` should drop in-memory TTL caches.
+///
+/// `true` only for a fresh login (`reauth`). Reconnect keeps context/search/
+/// lyrics/genre/image entries that are still valid for this user.
+fn clear_memory_caches_on_new_session(reauth: bool) -> bool {
+    reauth
+}
+
 impl AppClient {
     /// Construct a new client
     pub async fn new() -> Result<Self> {
@@ -318,8 +326,12 @@ impl AppClient {
         }
 
         if let Some(state) = state {
-            // reset the application's caches
-            state.data.write().caches = MemoryCaches::new();
+            // A fresh login starts with empty TTL caches. Reconnect (`g R`, invalid
+            // session recovery) must keep them so the page watcher does not refetch
+            // the current album and 429.
+            if clear_memory_caches_on_new_session(reauth) {
+                state.data.write().caches = MemoryCaches::new();
+            }
             self.initialize_playback(state, was_playing);
         }
 
@@ -2301,8 +2313,8 @@ fn patch_missing_show_fields(value: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::{
-        move_seed_track_to_front, order_transfer_device_ids, process_spotify_api_response,
-        rate_limit_backoff, MAX_RETRY_AFTER,
+        clear_memory_caches_on_new_session, move_seed_track_to_front, order_transfer_device_ids,
+        process_spotify_api_response, rate_limit_backoff, MAX_RETRY_AFTER,
     };
     use crate::state::{Device, Track};
     use rspotify::model::TrackId;
@@ -2444,5 +2456,11 @@ mod tests {
                 .as_secs()
                 <= 60
         );
+    }
+
+    #[test]
+    fn reconnect_keeps_memory_caches() {
+        assert!(!clear_memory_caches_on_new_session(false));
+        assert!(clear_memory_caches_on_new_session(true));
     }
 }

@@ -93,8 +93,19 @@ pub fn init_terminal() -> Result<Terminal> {
 /// Drop leftover stdin bytes (e.g. delayed CSI from the image-protocol query)
 /// so they are not interpreted as the first keypress.
 pub fn drain_pending_terminal_events() {
-    while crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
-        let _ = crossterm::event::read();
+    drain_while_ready(
+        || crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false),
+        || {
+            let _ = crossterm::event::read();
+        },
+    );
+}
+
+/// Consume buffered events until `ready` is false. `poll(ZERO)` is the live
+/// `ready` probe; this helper exists so the drain loop can be unit-tested.
+fn drain_while_ready(mut ready: impl FnMut() -> bool, mut consume: impl FnMut()) {
+    while ready() {
+        consume();
     }
 }
 
@@ -211,5 +222,36 @@ impl Orientation {
             Self::Vertical => Layout::vertical(constraints),
             Self::Horizontal => Layout::horizontal(constraints),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drain_while_ready;
+
+    #[test]
+    fn drain_while_ready_consumes_until_empty() {
+        let mut remaining = 3;
+        let mut consumed = 0;
+        drain_while_ready(
+            || {
+                if remaining > 0 {
+                    remaining -= 1;
+                    true
+                } else {
+                    false
+                }
+            },
+            || consumed += 1,
+        );
+        assert_eq!(consumed, 3);
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn drain_while_ready_is_a_no_op_when_nothing_is_queued() {
+        let mut consumed = 0;
+        drain_while_ready(|| false, || consumed += 1);
+        assert_eq!(consumed, 0);
     }
 }
