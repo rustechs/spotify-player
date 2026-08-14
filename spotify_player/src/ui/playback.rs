@@ -632,7 +632,7 @@ fn render_playback_status_row(
         return;
     }
 
-    let style = ui.theme.playback_metadata();
+    let style = ui.theme.playback_album();
     let text_width: usize = fields.iter().map(|s| s.chars().count()).sum();
     let leftover = (rect.width as usize).saturating_sub(text_width);
     let (left, gaps, right) = status_row_spacing(fields.len(), leftover);

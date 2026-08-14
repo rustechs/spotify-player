@@ -134,6 +134,15 @@ fn clear_memory_caches_on_new_session(reauth: bool) -> bool {
     reauth
 }
 
+fn next_repeat_state(current: rspotify::model::RepeatState) -> rspotify::model::RepeatState {
+    use rspotify::model::RepeatState::{Context, Off, Track};
+    match current {
+        Context => Track,
+        Track => Off,
+        Off => Context,
+    }
+}
+
 impl AppClient {
     /// Construct a new client
     pub async fn new() -> Result<Self> {
@@ -469,11 +478,7 @@ impl AppClient {
                 self.seek_track(position_ms, device_id).await?;
             }
             PlayerRequest::Repeat => {
-                let next_repeat_state = match playback.repeat_state {
-                    rspotify::model::RepeatState::Off => rspotify::model::RepeatState::Track,
-                    rspotify::model::RepeatState::Track => rspotify::model::RepeatState::Context,
-                    rspotify::model::RepeatState::Context => rspotify::model::RepeatState::Off,
-                };
+                let next_repeat_state = next_repeat_state(playback.repeat_state);
 
                 self.repeat(next_repeat_state, device_id).await?;
 
@@ -2462,5 +2467,13 @@ mod tests {
     fn reconnect_keeps_memory_caches() {
         assert!(!clear_memory_caches_on_new_session(false));
         assert!(clear_memory_caches_on_new_session(true));
+    }
+
+    #[test]
+    fn next_repeat_state_is_context_then_track_then_off() {
+        use rspotify::model::RepeatState::{Context, Off, Track};
+        assert_eq!(super::next_repeat_state(Context), Track);
+        assert_eq!(super::next_repeat_state(Track), Off);
+        assert_eq!(super::next_repeat_state(Off), Context);
     }
 }
