@@ -428,7 +428,7 @@ List of supported commands:
 | `PreviousTrack`                 | previous track                                                                                     | `p`                |
 | `ResumePause`                   | resume/pause based on the current playback                                                         | `space`            |
 | `PlayRandom`                    | play a random track in the current context                                                         | `.`                |
-| `Repeat`                        | cycle the repeat mode                                                                              | `r`, `R`           |
+| `Repeat`                        | cycle the repeat mode (context → track → off)                                                      | `r`, `R`           |
 | `Shuffle`                       | toggle the shuffle mode                                                                            | `s`, `C-s`         |
 | `VolumeChange`                  | change playback volume by an offset (default shortcuts use 5%)                                     | `+`, `-`           |
 | `Mute`                          | toggle playback volume between 0% and previous level                                               | `_`                |
