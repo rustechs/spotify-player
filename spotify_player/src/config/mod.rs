@@ -154,6 +154,11 @@ pub struct AppConfig {
 
     pub enable_relative_line_number: bool,
 
+    /// In-TUI toast overlay for mutation results (not desktop `notify`).
+    pub enable_toast: bool,
+    /// Auto-dismiss timeout for success toasts. Error toasts stay until `esc`.
+    pub toast_success_timeout_secs: u64,
+
     /// Start the application with playback paused instead of resuming the
     /// previous session. Requires streaming. When the integrated client
     /// connects on startup, Spotify may restore and auto-resume the last
@@ -421,6 +426,9 @@ impl Default for AppConfig {
             custom_queue: true,
 
             enable_relative_line_number: false,
+
+            enable_toast: true,
+            toast_success_timeout_secs: 3,
 
             #[cfg(feature = "streaming")]
             pause_on_startup: false,

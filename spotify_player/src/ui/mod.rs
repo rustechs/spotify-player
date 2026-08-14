@@ -32,6 +32,7 @@ mod popup;
 pub mod single_line_input;
 #[cfg(feature = "streaming")]
 pub mod streaming;
+mod toast;
 pub mod utils;
 
 /// Run the application UI
@@ -58,6 +59,8 @@ pub fn run(state: &SharedState, mut terminal: Terminal) -> Result<()> {
                     ui.last_cover_image_render_info = ImageRenderInfo::default();
                 }
             }
+
+            ui.toasts.expire_due(std::time::Instant::now());
 
             if let Err(err) = terminal.draw(|frame| {
                 // set the background and foreground colors for the application
@@ -159,17 +162,19 @@ fn clean_up(mut terminal: Terminal) -> Result<()> {
 /// Render the application
 fn render_application(frame: &mut Frame, state: &SharedState, ui: &mut UIStateGuard, rect: Rect) {
     // rendering order: playback window -> shortcut help popup -> other popups -> main layout
+    // -> toast overlay (clipped to leftover content, never on the playback window)
 
     // render playback window before other popups and windows to ensure nothing is rendered on top
     // of the playback window, which is to avoid "duplicated images" issue
     // See: https://github.com/aome510/spotify-player/issues/498
-    let rect = playback::render_playback_window(frame, state, ui, rect);
+    let leftover = playback::render_playback_window(frame, state, ui, rect);
 
-    let rect = popup::render_shortcut_help_popup(frame, ui, rect);
+    let rect = popup::render_shortcut_help_popup(frame, ui, leftover);
 
     let (rect, is_active) = popup::render_popup(frame, state, ui, rect);
 
     render_main_layout(is_active, frame, state, ui, rect);
+    toast::render_toasts(frame, ui, leftover);
 }
 
 /// Render the application's main layout

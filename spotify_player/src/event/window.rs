@@ -1,4 +1,5 @@
 use super::page::handle_navigation_command;
+#[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::{
     command::{

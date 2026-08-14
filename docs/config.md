@@ -76,6 +76,8 @@ spotify_player -o device.volume=80 -o theme=dracula
 | `custom_queue`                    | Enable app-managed queue for custom playback integration (requires `streaming` feature).             | `true`                                                                 |
 | `pause_on_startup`                | Start with playback paused instead of resuming the previous session (requires `streaming` feature).  | `false`                                                                |
 | `enable_relative_line_number`     | Enable Vim-style relative line numbers for lists and popups.                                         | `false`                                                                |
+| `enable_toast`                    | Show in-TUI toasts for likes, queue, playlist edits, skip next/previous, copy-link, and clipboard-open. Desktop `notify` is unchanged. | `true` |
+| `toast_success_timeout_secs`      | Auto-dismiss timeout for success toasts. Error toasts stay until `esc` (when no popup is open).     | `3`                                                                    |
 | `device`                          | Device configuration (see below).                                                                    | See below                                                              |
 
 ### Notes
@@ -216,6 +218,8 @@ The `component_style` table customizes UI component appearance. All fields are o
 | `like`                           | Style for the like indicator                              |
 | `lyrics_played`                  | Style for played lyrics lines                             |
 | `lyrics_playing`                 | Style for the currently playing lyrics line               |
+| `toast_success`                  | Style for success toast borders and text                  |
+| `toast_error`                    | Style for error toast borders and text                    |
 
 Each style accepts optional fields:
 
@@ -258,6 +262,8 @@ secondary_row = {}
 like = {}
 lyrics_played = { modifiers = ["Dim"] }
 lyrics_playing = { fg = "Green", modifiers = ["Bold"] }
+toast_success = { fg = "Green", modifiers = ["Bold"] }
+toast_error = { fg = "Red", modifiers = ["Bold"] }
 ```
 
 #### Accepted Colors

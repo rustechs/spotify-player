@@ -14,12 +14,10 @@ pub type UIStateGuard<'a> = parking_lot::MutexGuard<'a, UIState>;
 
 mod page;
 mod popup;
-#[allow(dead_code)] // Phase 0 helpers; wired to UIState after the Phase 0 gate
 mod toast;
 
 pub use page::*;
 pub use popup::*;
-#[allow(unused_imports)]
 pub use toast::*;
 
 #[cfg(feature = "image")]
@@ -51,6 +49,7 @@ pub struct UIState {
 
     pub history: Vec<PageState>,
     pub popup: Option<PopupState>,
+    pub toasts: ToastQueue,
 
     /// The rectangle representing the playback progress bar,
     /// which is mainly used to handle mouse click events (for seeking command)
@@ -92,6 +91,26 @@ impl UIState {
         self.history.push(page);
     }
 
+    pub fn close_popup_or_dismiss_toast(&mut self) {
+        close_popup_or_dismiss_toast(&mut self.popup, &mut self.toasts);
+    }
+
+    pub fn push_success_toast(&mut self, message: impl Into<String>) {
+        let configs = config::get_config();
+        if !configs.app_config.enable_toast {
+            return;
+        }
+        let timeout = std::time::Duration::from_secs(configs.app_config.toast_success_timeout_secs);
+        self.toasts.push(Toast::success(message, timeout));
+    }
+
+    pub fn push_error_toast(&mut self, message: impl Into<String>) {
+        if !config::get_config().app_config.enable_toast {
+            return;
+        }
+        self.toasts.push(Toast::error(message));
+    }
+
     /// Return whether there exists a focused popup.
     ///
     /// Currently, only search popup is not focused when it's opened.
@@ -131,6 +150,7 @@ impl Default for UIState {
                 state: LibraryPageUIState::new(),
             }],
             popup: None,
+            toasts: ToastQueue::default(),
 
             playback_progress_bar_rect: Rect::default(),
 
@@ -143,5 +163,23 @@ impl Default for UIState {
             #[cfg(feature = "image")]
             picker: Picker::halfblocks(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_page_does_not_clear_toasts() {
+        let mut ui = UIState::default();
+        ui.toasts.push(Toast::error("sticky"));
+        ui.new_page(PageState::Queue { scroll_offset: 0 });
+        assert_eq!(ui.toasts.len(), 1);
+        assert_eq!(
+            ui.toasts.current().map(|t| t.message.as_str()),
+            Some("sticky")
+        );
+        assert!(ui.popup.is_none());
     }
 }

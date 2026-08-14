@@ -312,7 +312,7 @@ impl Command {
             Self::SeekForward { duration } => { return format!("seek forward by {}s", duration.unwrap_or(5)) },
             Self::SeekBackward { duration } => { return format!("seek backward by {}s", duration.unwrap_or(5)) },
             Self::Quit => "quit the application",
-            Self::ClosePopup => "close a popup",
+            Self::ClosePopup => "close a popup or dismiss the current toast",
             #[cfg(feature = "streaming")]
             Self::RestartIntegratedClient => "restart the integrated client",
             Self::SelectNextOrScrollDown => "select the next item in a list/table or scroll down (supports vim-style count: 5j)",

@@ -20,10 +20,9 @@ use crate::{
 };
 
 use crate::utils::map_join;
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use crossterm::event::KeyCode;
 
-use clipboard::{execute_copy_command, get_clipboard_content};
 use ratatui::widgets::ListState;
 
 mod clipboard;
@@ -242,7 +241,7 @@ pub fn handle_action_in_context(
             }
             Action::CopyLink => {
                 let track_url = format!("https://open.spotify.com/track/{}", track.id.id());
-                execute_copy_command(track_url)?;
+                copy_link(ui, track_url);
                 ui.popup = None;
                 Ok(true)
             }
@@ -344,7 +343,7 @@ pub fn handle_action_in_context(
             }
             Action::CopyLink => {
                 let album_url = format!("https://open.spotify.com/album/{}", album.id.id());
-                execute_copy_command(album_url)?;
+                copy_link(ui, album_url);
                 ui.popup = None;
                 Ok(true)
             }
@@ -368,7 +367,7 @@ pub fn handle_action_in_context(
             }
             Action::CopyLink => {
                 let artist_url = format!("https://open.spotify.com/artist/{}", artist.id.id());
-                execute_copy_command(artist_url)?;
+                copy_link(ui, artist_url);
                 ui.popup = None;
                 Ok(true)
             }
@@ -391,7 +390,7 @@ pub fn handle_action_in_context(
             Action::CopyLink => {
                 let playlist_url =
                     format!("https://open.spotify.com/playlist/{}", playlist.id.id());
-                execute_copy_command(playlist_url)?;
+                copy_link(ui, playlist_url);
                 ui.popup = None;
                 Ok(true)
             }
@@ -407,7 +406,7 @@ pub fn handle_action_in_context(
         ActionContext::Show(show) => match action {
             Action::CopyLink => {
                 let show_url = format!("https://open.spotify.com/show/{}", show.id.id());
-                execute_copy_command(show_url)?;
+                copy_link(ui, show_url);
                 ui.popup = None;
                 Ok(true)
             }
@@ -443,7 +442,7 @@ pub fn handle_action_in_context(
             }
             Action::CopyLink => {
                 let episode_url = format!("https://open.spotify.com/episode/{}", episode.id.id());
-                execute_copy_command(episode_url)?;
+                copy_link(ui, episode_url);
                 ui.popup = None;
                 Ok(true)
             }
@@ -744,46 +743,56 @@ fn handle_global_command(
                 ui.popup = None;
             }
         }
-        Command::OpenSpotifyLinkFromClipboard => {
-            let content = get_clipboard_content().context("get clipboard's content")?;
-            let re = regex::Regex::new(
-                r"https://open.spotify.com/(?P<type>.*?)/(?P<id>[[:alnum:]]*).*",
-            )?;
-            if let Some(cap) = re.captures(&content) {
-                let typ = cap.name("type").expect("valid capture").as_str();
-                let id = cap.name("id").expect("valid capture").as_str();
-                match typ {
-                    // for track link, play the song
-                    "track" => {
-                        let id = TrackId::from_id(id)?.into_static();
-
-                        // Clear Tracks context when playing from clipboard link
-                        state.player.write().currently_playing_tracks_id = None;
-
-                        client_pub.send(ClientRequest::Player(PlayerRequest::StartPlayback(
-                            Playback::URIs(vec![id.into()], None),
-                            None,
-                        )))?;
+        Command::OpenSpotifyLinkFromClipboard => match clipboard::get_clipboard_content() {
+            Ok(content) => {
+                let re = regex::Regex::new(
+                    r"https://open.spotify.com/(?P<type>.*?)/(?P<id>[[:alnum:]]*).*",
+                )?;
+                if let Some(cap) = re.captures(&content) {
+                    let typ = cap.name("type").expect("valid capture").as_str();
+                    let id = cap.name("id").expect("valid capture").as_str();
+                    match typ {
+                        "track" => {
+                            let id = TrackId::from_id(id)?.into_static();
+                            state.player.write().currently_playing_tracks_id = None;
+                            client_pub.send(ClientRequest::Player(
+                                PlayerRequest::StartPlayback(
+                                    Playback::URIs(vec![id.into()], None),
+                                    None,
+                                ),
+                            ))?;
+                            ui.push_success_toast("Opened Spotify link");
+                        }
+                        "playlist" => {
+                            let id = PlaylistId::from_id(id)?.into_static();
+                            open_context_page(ui, client_pub, ContextId::Playlist(id))?;
+                            ui.push_success_toast("Opened Spotify link");
+                        }
+                        "artist" => {
+                            let id = ArtistId::from_id(id)?.into_static();
+                            open_context_page(ui, client_pub, ContextId::Artist(id))?;
+                            ui.push_success_toast("Opened Spotify link");
+                        }
+                        "album" => {
+                            let id = AlbumId::from_id(id)?.into_static();
+                            open_context_page(ui, client_pub, ContextId::Album(id))?;
+                            ui.push_success_toast("Opened Spotify link");
+                        }
+                        e => {
+                            tracing::warn!("unsupported Spotify type {e}!");
+                            ui.push_error_toast(format!("Unsupported Spotify type {e}"));
+                        }
                     }
-                    // for playlist/artist/album link, go to the corresponding context page
-                    "playlist" => {
-                        let id = PlaylistId::from_id(id)?.into_static();
-                        open_context_page(ui, client_pub, ContextId::Playlist(id))?;
-                    }
-                    "artist" => {
-                        let id = ArtistId::from_id(id)?.into_static();
-                        open_context_page(ui, client_pub, ContextId::Artist(id))?;
-                    }
-                    "album" => {
-                        let id = AlbumId::from_id(id)?.into_static();
-                        open_context_page(ui, client_pub, ContextId::Album(id))?;
-                    }
-                    e => anyhow::bail!("unsupported Spotify type {e}!"),
+                } else {
+                    tracing::warn!("clipboard's content ({content}) is not a valid Spotify link!");
+                    ui.push_error_toast("Clipboard is not a valid Spotify link");
                 }
-            } else {
-                tracing::warn!("clipboard's content ({content}) is not a valid Spotify link!");
             }
-        }
+            Err(err) => {
+                tracing::error!("Failed to get clipboard's content: {err:#}");
+                ui.push_error_toast(format!("Failed to read clipboard: {err:#}"));
+            }
+        },
         Command::LyricsPage => {
             if let Some(rspotify::model::PlayableItem::Track(track)) =
                 state.player.read().currently_playing()
@@ -870,9 +879,19 @@ fn handle_global_command(
             }
         }
         Command::ClosePopup => {
-            ui.popup = None;
+            ui.close_popup_or_dismiss_toast();
         }
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+fn copy_link(ui: &mut UIStateGuard, url: String) {
+    match clipboard::execute_copy_command(url) {
+        Ok(()) => ui.push_success_toast("Copied link"),
+        Err(err) => {
+            tracing::error!("Failed to copy link: {err:#}");
+            ui.push_error_toast(format!("Failed to copy link: {err:#}"));
+        }
+    }
 }

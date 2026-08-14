@@ -17,6 +17,7 @@
   - [Media Control](#media-control)
   - [Image](#image)
   - [Notify](#notify)
+  - [Toasts](#toasts)
   - [Mouse support](#mouse-support)
   - [Daemon](#daemon)
   - [Fuzzy search](#fuzzy-search)
@@ -352,6 +353,10 @@ cargo install spotify_player --features notify
 
 **Note**: Notification support is limited on macOS and Windows compared to Linux.
 
+### Toasts
+
+The TUI shows a short overlay in the lower-right of the main content area (never on the playback window) after likes, queue adds, playlist edits, skip next/previous, copy-link, and opening a Spotify link from the clipboard. Success toasts disappear after `toast_success_timeout_secs` (default 3). Error toasts stay until `esc` when no popup is open. Set `enable_toast = false` to disable. Desktop `notify` for track changes is separate.
+
 ### Mouse support
 
 Mouse support: You can seek to a position in the playback by left-clicking the progress bar.
@@ -436,7 +441,7 @@ List of supported commands:
 | `SeekForward`                   | seek forward by a duration in seconds (defaults to `seek_duration_secs`)                           | `>`                |
 | `SeekBackward`                  | seek backward by a duration in seconds (defaults to `seek_duration_secs`)                          | `<`                |
 | `Quit`                          | quit the application                                                                               | `C-c`, `q`         |
-| `ClosePopup`                    | close a popup                                                                                      | `esc`              |
+| `ClosePopup`                    | close a popup, or dismiss the current toast if none is open                                        | `esc`              |
 | `SelectNextOrScrollDown`        | select the next item in a list/table or scroll down (supports vim-style count: 5j)                 | `j`, `C-n`, `down` |
 | `SelectPreviousOrScrollUp`      | select the previous item in a list/table or scroll up (supports vim-style count: 10k)              | `k`, `C-p`, `up`   |
 | `PageSelectNextOrScrollDown`    | select the next page item in a list/table or scroll a page down (supports vim-style count: 3C-f)   | `page_down`, `C-f` |

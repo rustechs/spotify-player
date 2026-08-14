@@ -16,9 +16,9 @@
 **Execution mode:** manual
 **Phase 0 gate:** human
 **Maximum Phase 0 rounds:** 3
-**Authorized phases:** phase-0
-**Context strategy:** current context (`feat/toast-overlay`)
-**Scope:** In: non-modal toast queue on `UIState`, render in main-content lower-right, enqueue from mutating `ClientRequest` results plus clipboard/copy-link, config/theme/docs/tests. Out: desktop `notify` changes, playback-poll/Get*/search toasts, `PlayerRequest` toasts, Cargo feature flag, daemon/CLI rendering.
+**Authorized phases:** phase-0, U2, U3, U4, U5, U6
+**Context strategy:** current context (`feat/toast-overlay-wire`)
+**Scope:** In: non-modal toast queue on `UIState`, render in main-content lower-right, enqueue from mutating `ClientRequest` results plus clipboard/copy-link, **plus `PlayerRequest::NextTrack` / `PreviousTrack`** (user override 2026-08-14: skip next/prev must toast). Config/theme/docs/tests. Out: desktop `notify` changes, playback-poll/Get*/search toasts, other `PlayerRequest`s (seek/volume/repeat/shuffle/resume), Cargo feature flag, daemon/CLI rendering.
 
 ## 1. Observable outcome and invariants
 
@@ -86,7 +86,7 @@ In the interactive TUI, a mutating action (queue/library/playlist/like/follow/cr
 | Render order | `ui/mod.rs` `render_application`; `ui/playback.rs` `render_playback_window` | Playback first; leftover rect; popups then main layout | After `render_main_layout`, overlay toasts on the **same leftover rect** passed into main layout (not `frame.area()`) | extend `ui/mod.rs` + new `ui/toast.rs` |
 | Theme styles | `config/theme.rs` `ComponentStyle` + `docs/config.md` Component Styles | Optional fields + `Theme::like()` accessors | Add `toast_success` / `toast_error`; defaults green / red + bold | extend |
 | App config | `config/mod.rs` `AppConfig`; `enable_notify` pattern | serde defaults in `Default` impl | `enable_toast: bool` default true; `toast_success_timeout_secs: u64` default 3 | extend |
-| Client mutations | `client/request.rs`, `client/mod.rs` `handle_request`, `client/handlers.rs` | Success: log duration; fail/timeout: `tracing::error!` only | After mutating handle: success toast; on Err/timeout: error toast with `{err:#}` / timeout text; skip if `!enable_toast` or `is_daemon` | extend |
+| Client mutations | `client/request.rs`, `client/mod.rs` `handle_request`, `client/handlers.rs` | Success: log duration; fail/timeout: `tracing::error!` only | After mutating handle: success toast; on Err/timeout: error toast `Failed: {err:#}` / timeout text; skip if `!enable_toast` or `is_daemon` | extend |
 | Copy / clipboard | `event/mod.rs` `Action::CopyLink`; `event/clipboard.rs`; `OpenSpotifyLinkFromClipboard` | `execute_copy_command`; invalid link `tracing::warn!` | Success/fail toasts on those paths | extend |
 | Event dismiss | `event/mod.rs` `Command::ClosePopup`; `event/popup.rs` search/create vs list | Search/PlaylistCreate fall through to global `ui.popup = None`; list popups handle `ClosePopup` themselves | Replace **only** the global `ClosePopup` arm with `UIState::close_popup_or_dismiss_toast` (popup Some → clear popup, leave toasts; None → dismiss current toast). Do not hook the page/`popup.is_none()` branch | extend |
 | Tests | `state/queue.rs` module tests; `ui/mod.rs` `drain_while_ready` | Inline `#[cfg(test)]` | Toast queue + area + close-or-dismiss tests in `state/ui/toast.rs` (and thin event helper test) | create |
@@ -101,15 +101,15 @@ In the interactive TUI, a mutating action (queue/library/playlist/like/follow/cr
 | U1 | `ToastQueue`: kind, message, `expires_at`, FIFO, peek, cap 10 drop-newest, `expire_due` | Interview q4–q6, q13 | `spotify_player/src/state/ui/toast.rs`, export from `state/ui/mod.rs` | P0 types | `toast_queue_drops_newest_at_cap` does not compile / fail | `cargo test -p spotify_player toast_queue` | S |
 | U2 | Config + theme keys + defaults | Interview q11–q12 | `config/mod.rs`, `config/theme.rs`, `examples/app.toml` | — | serde roundtrip test or compile fail on new fields | `cargo test` + clippy | S |
 | U3 | Wire `UIState.toasts`; call `expire_due(Instant::now())` in `ui::run` before draw; render overlay lower-right of the leftover content rect (the `rect` after playback split, not `frame.area()`) with peek sliver | Interview q3, q5, q8 | `state/ui/mod.rs`, `ui/mod.rs` `run` + `render_application`, `ui/toast.rs` | U1, U2 | `toast_area_stays_inside_content` fails until helper exists | unit tests + lint | M |
-| U4 | Enqueue from mutating client results + copy/clipboard; skip Get*/Player/daemon/disabled | Interview q2, q9 | `client/request.rs` `is_toastable` (`RestartIntegratedClient` behind `#[cfg(feature = "streaming")]`), `client/handlers.rs`, `event/mod.rs` CopyLink + clipboard-open | U1, U2 | Table test `is_toastable` fails on wrong variants | `cargo test is_toastable` + lint | M |
+| U4 | Enqueue from mutating client results + copy/clipboard + skip next/prev; skip Get*/other Player/daemon/disabled | Interview q2, q9; user override next/prev | `client/request.rs` `is_toastable`, `client/handlers.rs`, `event/mod.rs` CopyLink + clipboard-open | U1, U2 | Table test `is_toastable` fails on wrong variants | `cargo test is_toastable` + lint | M |
 | U5 | Global `ClosePopup` arm: popup present → clear popup only; else dismiss toast | Interview q10 | `event/mod.rs` `handle_global_command` ClosePopup arm only; `state/ui/mod.rs` helper | U1 | `close_popup_or_dismiss_toast` tests fail (Search still-open case required) | those tests + lint | S |
 | U6 | README, `docs/config.md` (options + component styles), ClosePopup command note | Interview q12; `CLAUDE.md` docs | `README.md`, `docs/config.md` | U2 | Doc review (no automated doc gate) | human read of tables | S |
 
-> **Phase N status — pending.**
+> **Phase N status — in progress.** User report 2026-08-14: like / queue / next / previous showed no toast because Phase 0 helpers were not wired. U2–U6 plus next/prev toastable authorized by that report.
 
-`ClientRequest` toastable (true): `AddPlayableToQueue`, `AddAlbumToQueue`, `AddPlayableToPlaylist`, `DeleteTrackFromPlaylist`, `ReorderPlaylistItems`, `AddToLibrary`, `DeleteFromLibrary`, `CreatePlaylist`. False: all `Get*`, `Search`, `GetLyrics`, `Player(_)`, `RestartIntegratedClient`. Clipboard/copy-link are event-thread toasts, not `ClientRequest`.
+`ClientRequest` toastable (true): `AddPlayableToQueue`, `AddAlbumToQueue`, `AddPlayableToPlaylist`, `DeleteTrackFromPlaylist`, `ReorderPlaylistItems`, `AddToLibrary`, `DeleteFromLibrary`, `CreatePlaylist`, `Player(NextTrack)`, `Player(PreviousTrack)`. False: all `Get*`, `Search`, `GetLyrics`, other `Player(_)`, `RestartIntegratedClient`. Clipboard/copy-link are event-thread toasts, not `ClientRequest`.
 
-Success copy: short past-tense (“Added to queue”, “Copied link”, “Created playlist”). Error copy: `Failed to …: {err:#}`.
+Success copy: short past-tense (“Added to queue”, “Copied link”, “Created playlist”). Error copy: `Failed: {err:#}`.
 
 **U4 handler wiring:** `start_client_handler` moves `request` into `handle_request`. Clone the request (or snapshot `is_toastable` + success/error strings) **before** the timeout call. On `Ok(())` enqueue success if toastable; on `Err` / timeout enqueue error toast **and keep** the existing `tracing::error!` lines. Skip enqueue when `!enable_toast` or `state.is_daemon`.
 

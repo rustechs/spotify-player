@@ -1,3 +1,4 @@
+#[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::{
     command::construct_artist_actions, state::ConfirmableAction, utils::filtered_items_from_query,
