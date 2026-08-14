@@ -214,13 +214,7 @@ fn handle_page_change_event(
 
                     match id {
                         Some(id) => {
-                            *page_state = Some(match id {
-                                ContextId::Album(_) => ContextPageUIState::new_album(),
-                                ContextId::Artist(_) => ContextPageUIState::new_artist(),
-                                ContextId::Playlist(_) => ContextPageUIState::new_playlist(),
-                                ContextId::Tracks(_) => ContextPageUIState::new_tracks(),
-                                ContextId::Show(_) => ContextPageUIState::new_show(),
-                            });
+                            *page_state = Some(ContextPageUIState::from_id(id));
                         }
                         None => {
                             *page_state = None;

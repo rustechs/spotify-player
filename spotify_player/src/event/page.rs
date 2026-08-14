@@ -161,7 +161,7 @@ fn handle_command_for_library_page(
     match focus_state {
         LibraryFocusState::Playlists => {
             let data = state.data.read();
-            Ok(window::handle_command_for_playlist_list_window(
+            window::handle_command_for_playlist_list_window(
                 command,
                 &ui.search_filtered_items(&data.user_data.folder_playlists_items(folder_id))
                     .into_iter()
@@ -169,7 +169,8 @@ fn handle_command_for_library_page(
                     .collect::<Vec<_>>(),
                 &data,
                 ui,
-            ))
+                client_pub,
+            )
         }
         LibraryFocusState::SavedAlbums => {
             // Use a read lock for the function call
@@ -185,12 +186,13 @@ fn handle_command_for_library_page(
         LibraryFocusState::FollowedArtists => {
             // Handle artist-specific commands
             let data = state.data.read();
-            Ok(window::handle_command_for_artist_list_window(
+            window::handle_command_for_artist_list_window(
                 command,
                 &ui.search_filtered_items(&data.user_data.followed_artists),
                 &data,
                 ui,
-            ))
+                client_pub,
+            )
         }
     }
 }
@@ -262,8 +264,8 @@ fn handle_key_sequence_for_search_page(
                 .unwrap_or_default();
 
             match found_keymap {
-                CommandOrAction::Command(command) => Ok(
-                    window::handle_command_for_artist_list_window(command, &artists, &data, ui),
+                CommandOrAction::Command(command) => window::handle_command_for_artist_list_window(
+                    command, &artists, &data, ui, client_pub,
                 ),
                 CommandOrAction::Action(action, ActionTarget::SelectedItem) => {
                     window::handle_action_for_selected_item(action, &artists, &data, ui, client_pub)
@@ -299,12 +301,13 @@ fn handle_key_sequence_for_search_page(
 
             match found_keymap {
                 CommandOrAction::Command(command) => {
-                    Ok(window::handle_command_for_playlist_list_window(
+                    window::handle_command_for_playlist_list_window(
                         command,
                         &playlist_refs,
                         &data,
                         ui,
-                    ))
+                        client_pub,
+                    )
                 }
                 CommandOrAction::Action(action, ActionTarget::SelectedItem) => {
                     window::handle_action_for_selected_item(
@@ -324,8 +327,8 @@ fn handle_key_sequence_for_search_page(
                 .unwrap_or_default();
 
             match found_keymap {
-                CommandOrAction::Command(command) => Ok(
-                    window::handle_command_for_show_list_window(command, &shows, &data, ui),
+                CommandOrAction::Command(command) => window::handle_command_for_show_list_window(
+                    command, &shows, &data, ui, client_pub,
                 ),
                 CommandOrAction::Action(action, ActionTarget::SelectedItem) => {
                     window::handle_action_for_selected_item(action, &shows, &data, ui, client_pub)
@@ -516,11 +519,7 @@ fn handle_command_for_browse_page(
                     let context_id = ContextId::Playlist(
                         ui.search_filtered_items(playlists)[selected].id.clone(),
                     );
-                    ui.new_page(PageState::Context {
-                        id: None,
-                        context_page_type: ContextPageType::Browsing(context_id),
-                        state: None,
-                    });
+                    open_context_page(ui, client_pub, context_id)?;
                 }
             },
             _ => anyhow::bail!("expect a browse page state"),

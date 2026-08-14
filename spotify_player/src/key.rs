@@ -182,10 +182,16 @@ impl From<KeyEvent> for Key {
             modifiers ^= KeyModifiers::SHIFT;
         }
 
+        // Some terminals report Return as CR/LF instead of KeyCode::Enter.
+        let code = match event.code {
+            KeyCode::Char('\n' | '\r') => KeyCode::Enter,
+            code => code,
+        };
+
         match modifiers {
-            KeyModifiers::NONE => Key::None(event.code),
-            KeyModifiers::ALT => Key::Alt(event.code),
-            KeyModifiers::CONTROL => Key::Ctrl(event.code),
+            KeyModifiers::NONE => Key::None(code),
+            KeyModifiers::ALT => Key::Alt(code),
+            KeyModifiers::CONTROL => Key::Ctrl(code),
             _ => Key::Unknown,
         }
     }
@@ -217,5 +223,48 @@ impl<'de> serde::de::Deserialize<'de> for KeySequence {
                 "failed to parse key sequence: invalid key sequence {s}"
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyEventKind, KeyEventState};
+
+    fn key_event(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    #[test]
+    fn cr_and_lf_map_to_enter() {
+        assert_eq!(
+            Key::from(key_event(KeyCode::Enter)),
+            Key::None(KeyCode::Enter)
+        );
+        assert_eq!(
+            Key::from(key_event(KeyCode::Char('\r'))),
+            Key::None(KeyCode::Enter)
+        );
+        assert_eq!(
+            Key::from(key_event(KeyCode::Char('\n'))),
+            Key::None(KeyCode::Enter)
+        );
+    }
+
+    #[test]
+    fn letter_r_is_not_enter() {
+        assert_eq!(
+            Key::from(key_event(KeyCode::Char('r'))),
+            Key::None(KeyCode::Char('r'))
+        );
+        assert_eq!(
+            Key::from(key_event(KeyCode::Char('R'))),
+            Key::None(KeyCode::Char('R'))
+        );
     }
 }

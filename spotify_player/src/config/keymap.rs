@@ -107,6 +107,11 @@ impl Default for KeymapConfig {
                     command: Command::Repeat,
                 },
                 Keymap {
+                    // Caps Lock / Shift+r must still cycle repeat, not restart the client.
+                    key_sequence: "R".into(),
+                    command: Command::Repeat,
+                },
+                Keymap {
                     key_sequence: "/".into(),
                     command: Command::Search,
                 },
@@ -144,7 +149,7 @@ impl Default for KeymapConfig {
                 },
                 #[cfg(feature = "streaming")]
                 Keymap {
-                    key_sequence: "R".into(),
+                    key_sequence: "g R".into(),
                     command: Command::RestartIntegratedClient,
                 },
                 Keymap {

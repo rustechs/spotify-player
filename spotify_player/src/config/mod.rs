@@ -327,7 +327,7 @@ impl Default for AppConfig {
             tracks_playback_limit: 50,
 
             playback_format: String::from(
-                "{status} {track} • {artists} {liked}\n{album} • {genres}\n{metadata}",
+                "{status} {track} • {artists} {liked}\n{album} • {genres}",
             ),
             playback_metadata_fields: vec![
                 "repeat".to_string(),

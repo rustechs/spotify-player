@@ -277,13 +277,13 @@ cargo install spotify_player --no-default-features
 
 ### Audio Visualization
 
-Real-time audio visualization is displayed in the playback window as a frequency-band bar chart (128 log-scale bands from bass (left) to treble (right)) with dB and Hz axis labels, a themed grid, and the progress bar directly below the chart while music is streamed locally via the integrated [librespot](https://github.com/librespot-org/librespot) player.
+Real-time audio visualization is displayed in the playback window as a frequency-band bar chart (128 log-scale bands from bass (left) to treble (right)) with dB and Hz axis labels, a themed grid, the progress bar directly below the chart, and repeat/shuffle/volume/device spread across a full-width row under the bar while music is streamed locally via the integrated [librespot](https://github.com/librespot-org/librespot) player.
 
 With the `system-audio-visualization` feature (enabled by default in this fork on Linux), set `enable_system_audio_visualization` to `true` to also drive the bars from the PipeWire/Pulse default-sink monitor when playback is on an external Spotify Connect device (for example desktop Spotify playing local/lossless files). While a track is loaded, the visualization area stays reserved (including pause, where bars idle at zero); it is hidden only when there is no current track.
 
 Set `enable_audio_visualization` to `true` in your config to enable this feature. See [config docs](./docs/config.md).
 
-With the `image` feature also enabled, the cover sits in the top-right of the playback window and may overlap the visualizer's top-right corner; metadata stays on the left, indented to line up with the chart's vertical axis.
+With the `image` feature also enabled, the cover sits in the top-right of the playback window and may overlap the visualizer's top-right corner; metadata stays on the left, indented one column left of the chart's vertical axis.
 
 ![Audio Visualization](./media/audio-visualization.png)
 
@@ -306,7 +306,7 @@ Image rendering is powered by [`ratatui-image`](https://github.com/benjajaja/rat
 **Notes**:
 
 - Protocol detection queries the terminal via stdio. In nested terminals (e.g. Neovim's floating terminal), the query does not reach the outer terminal emulator, so the protocol falls back to block characters.
-- With audio visualization enabled, the cover is placed top-right (may overlap the chart's top-right); metadata is indented to line up with the chart's vertical axis.
+- With audio visualization enabled, the cover is placed top-right (may overlap the chart's top-right); metadata is indented one column left of the chart's vertical axis.
 
 Image rendering examples:
 
@@ -428,7 +428,7 @@ List of supported commands:
 | `PreviousTrack`                 | previous track                                                                                     | `p`                |
 | `ResumePause`                   | resume/pause based on the current playback                                                         | `space`            |
 | `PlayRandom`                    | play a random track in the current context                                                         | `.`                |
-| `Repeat`                        | cycle the repeat mode                                                                              | `r`                |
+| `Repeat`                        | cycle the repeat mode                                                                              | `r`, `R`           |
 | `Shuffle`                       | toggle the shuffle mode                                                                            | `s`, `C-s`         |
 | `VolumeChange`                  | change playback volume by an offset (default shortcuts use 5%)                                     | `+`, `-`           |
 | `Mute`                          | toggle playback volume between 0% and previous level                                               | `_`                |
@@ -445,7 +445,7 @@ List of supported commands:
 | `SelectLastOrScrollToBottom`    | select the last item in a list/table or scroll to the bottom                                       | `G`, `end`         |
 | `ChooseSelected`                | choose the selected item                                                                           | `enter`            |
 | `RefreshPlayback`               | manually refresh the current playback                                                              | `C-r`              |
-| `RestartIntegratedClient`       | restart the integrated client (`streaming` feature only)                                           | `R`                |
+| `RestartIntegratedClient`       | restart the integrated client (`streaming` feature only)                                           | `g R`              |
 | `ShowActionsOnSelectedItem`     | open a popup showing actions on a selected item                                                    | `g a`, `C-space`   |
 | `ShowActionsOnCurrentTrack`     | open a popup showing actions on the current track                                                  | `a`                |
 | `ShowActionsOnCurrentContext`   | open a popup showing actions on the current context                                                | `A`                |

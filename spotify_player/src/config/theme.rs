@@ -260,7 +260,7 @@ impl Theme {
             .as_ref()
             .unwrap_or(
                 &Style::default()
-                    .fg(StyleColor::BrightBlack)
+                    .fg(StyleColor::Green)
                     .modifiers([StyleModifier::Italic]),
             )
             .style(&self.palette)
@@ -270,7 +270,7 @@ impl Theme {
         self.component_style
             .playback_metadata
             .as_ref()
-            .unwrap_or(&Style::default().fg(StyleColor::BrightBlack))
+            .unwrap_or(&Style::default().fg(StyleColor::Green))
             .style(&self.palette)
     }
 
