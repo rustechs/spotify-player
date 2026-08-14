@@ -105,7 +105,7 @@ pub fn init_playback_subcommand() -> Command {
         .subcommand(Command::new("next").about("Skip to the next track"))
         .subcommand(Command::new("previous").about("Skip to the previous track"))
         .subcommand(Command::new("shuffle").about("Toggle the shuffle mode"))
-        .subcommand(Command::new("repeat").about("Cycle the repeat mode"))
+        .subcommand(Command::new("repeat").about("Cycle the repeat mode (context → track → off)"))
         .subcommand(
             Command::new("volume")
                 .about("Set the volume percentage")
