@@ -592,10 +592,7 @@ fn construct_playback_text(
     playback_text
 }
 
-fn playback_status_fields(
-    playback: &PlaybackMetadata,
-    theme: &config::Theme,
-) -> Vec<(String, Style)> {
+fn playback_status_field_texts(playback: &PlaybackMetadata) -> Vec<String> {
     let configs = config::get_config();
     let repeat_value = <&'static str>::from(playback.repeat_state);
     let volume_value = if let Some(volume) = playback.mute_state {
@@ -603,18 +600,16 @@ fn playback_status_fields(
     } else {
         format!("{}%", playback.volume.unwrap_or_default())
     };
-    let metadata = theme.playback_metadata();
-    let album = theme.playback_album();
 
     configs
         .app_config
         .playback_metadata_fields
         .iter()
         .filter_map(|field| match field.as_str() {
-            "repeat" => Some((format!("repeat: {repeat_value}"), album)),
-            "shuffle" => Some((format!("shuffle: {}", playback.shuffle_state), metadata)),
-            "volume" => Some((format!("volume: {volume_value}"), metadata)),
-            "device" => Some((format!("device: {}", playback.device_name), metadata)),
+            "repeat" => Some(format!("repeat: {repeat_value}")),
+            "shuffle" => Some(format!("shuffle: {}", playback.shuffle_state)),
+            "volume" => Some(format!("volume: {volume_value}")),
+            "device" => Some(format!("device: {}", playback.device_name)),
             _ => None,
         })
         .collect()
@@ -632,12 +627,13 @@ fn render_playback_status_row(
         return;
     }
 
-    let fields = playback_status_fields(playback, &ui.theme);
+    let fields = playback_status_field_texts(playback);
     if fields.is_empty() {
         return;
     }
 
-    let text_width: usize = fields.iter().map(|(s, _)| s.chars().count()).sum();
+    let style = ui.theme.playback_album();
+    let text_width: usize = fields.iter().map(|s| s.chars().count()).sum();
     let leftover = (rect.width as usize).saturating_sub(text_width);
     let (left, gaps, right) = status_row_spacing(fields.len(), leftover);
 
@@ -645,8 +641,8 @@ fn render_playback_status_row(
     if left > 0 {
         spans.push(Span::raw(" ".repeat(left)));
     }
-    for (i, (field, style)) in fields.iter().enumerate() {
-        spans.push(Span::styled(field.clone(), *style));
+    for (i, field) in fields.iter().enumerate() {
+        spans.push(Span::styled(field.clone(), style));
         if i < gaps.len() {
             spans.push(Span::raw(" ".repeat(gaps[i])));
         }

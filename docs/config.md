@@ -202,9 +202,9 @@ The `component_style` table customizes UI component appearance. All fields are o
 | `playback_status`                | Style for the playback status indicator                   |
 | `playback_track`                 | Style for the currently playing track name                |
 | `playback_artists`               | Style for the artist(s) of the current track              |
-| `playback_album`                 | Style for the album name and the `repeat:` field on the playback status row |
+| `playback_album`                 | Style for the album name and the playback status row (`repeat` / `shuffle` / `volume` / `device`) |
 | `playback_genres`                | Style for the genres of the current track                 |
-| `playback_metadata`              | Style for shuffle/volume/device on the playback status row |
+| `playback_metadata`              | Style for the playback loading indicator                  |
 | `playback_progress_bar`          | Style for the filled portion of the playback progress bar |
 | `playback_progress_bar_unfilled` | Style for the unfilled portion (only for `Line` type)     |
 | `current_playing`                | Style for the currently playing item in lists             |
