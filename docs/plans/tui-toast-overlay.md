@@ -105,7 +105,7 @@ In the interactive TUI, a mutating action (queue/library/playlist/like/follow/cr
 | U5 | Global `ClosePopup` arm: popup present → clear popup only; else dismiss toast | Interview q10 | `event/mod.rs` `handle_global_command` ClosePopup arm only; `state/ui/mod.rs` helper | U1 | `close_popup_or_dismiss_toast` tests fail (Search still-open case required) | those tests + lint | S |
 | U6 | README, `docs/config.md` (options + component styles), ClosePopup command note | Interview q12; `CLAUDE.md` docs | `README.md`, `docs/config.md` | U2 | Doc review (no automated doc gate) | human read of tables | S |
 
-> **Phase N status — in progress.** User report 2026-08-14: like / queue / next / previous showed no toast because Phase 0 helpers were not wired. U2–U6 plus next/prev toastable authorized by that report.
+> **Phase N status — implementation complete.** U2–U6 plus next/prev toastable are wired. Remaining: human visual gates (peek, cover art, theme) and merge.
 
 `ClientRequest` toastable (true): `AddPlayableToQueue`, `AddAlbumToQueue`, `AddPlayableToPlaylist`, `DeleteTrackFromPlaylist`, `ReorderPlaylistItems`, `AddToLibrary`, `DeleteFromLibrary`, `CreatePlaylist`, `Player(NextTrack)`, `Player(PreviousTrack)`. False: all `Get*`, `Search`, `GetLyrics`, other `Player(_)`, `RestartIntegratedClient`. Clipboard/copy-link are event-thread toasts, not `ClientRequest`.
 
@@ -178,7 +178,8 @@ Level 5 (pure functions + in-process state) for queue, clip, toastable, dismiss.
 
 | Scaffold | Purpose | Maintained value | Cleanup checkpoint | Proposed disposition |
 |---|---|---|---|---|
-| `#[allow(dead_code)]` on `mod toast` and `ClientRequest::is_toastable` | Phase 0 helpers unused until U3/U4 | Low | Remove allows when wired | delete |
+| `#[allow(dead_code)]` on `mod toast` and `ClientRequest::is_toastable` | Phase 0 helpers unused until U3/U4 | None | Removed when wired | deleted |
+| `#[allow(clippy::wildcard_imports)]` on `event/{page,popup,window}.rs` | Workspace pedantic denies `use super::*` when `event/mod.rs` changes | Low | Keep; rewriting the globs is out of toast scope | keep |
 
 ## 7. Fallbacks and replan triggers
 

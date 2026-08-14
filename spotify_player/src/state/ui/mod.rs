@@ -96,16 +96,31 @@ impl UIState {
     }
 
     pub fn push_success_toast(&mut self, message: impl Into<String>) {
-        let configs = config::get_config();
-        if !configs.app_config.enable_toast {
-            return;
-        }
-        let timeout = std::time::Duration::from_secs(configs.app_config.toast_success_timeout_secs);
-        self.toasts.push(Toast::success(message, timeout));
+        self.push_success_toast_with_config(&config::get_config().app_config, message);
     }
 
     pub fn push_error_toast(&mut self, message: impl Into<String>) {
-        if !config::get_config().app_config.enable_toast {
+        self.push_error_toast_with_config(&config::get_config().app_config, message);
+    }
+
+    fn push_success_toast_with_config(
+        &mut self,
+        app_config: &config::AppConfig,
+        message: impl Into<String>,
+    ) {
+        if !should_enqueue_toast(app_config.enable_toast, false) {
+            return;
+        }
+        let timeout = std::time::Duration::from_secs(app_config.toast_success_timeout_secs);
+        self.toasts.push(Toast::success(message, timeout));
+    }
+
+    fn push_error_toast_with_config(
+        &mut self,
+        app_config: &config::AppConfig,
+        message: impl Into<String>,
+    ) {
+        if !should_enqueue_toast(app_config.enable_toast, false) {
             return;
         }
         self.toasts.push(Toast::error(message));
@@ -169,6 +184,27 @@ impl Default for UIState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toast_queue_respects_enable_flag() {
+        let defaults = config::AppConfig::default();
+        assert!(defaults.enable_toast);
+        assert_eq!(defaults.toast_success_timeout_secs, 3);
+
+        let mut disabled = config::AppConfig::default();
+        disabled.enable_toast = false;
+
+        let mut ui = UIState::default();
+        ui.push_success_toast_with_config(&disabled, "ok");
+        ui.push_error_toast_with_config(&disabled, "err");
+        assert!(
+            ui.toasts.is_empty(),
+            "enable_toast=false must not enqueue success or error toasts"
+        );
+
+        assert!(!should_enqueue_toast(false, false));
+        assert!(should_enqueue_toast(true, false));
+    }
 
     #[test]
     fn new_page_does_not_clear_toasts() {

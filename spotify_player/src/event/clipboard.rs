@@ -2,7 +2,7 @@ use std::{io::Write, sync::OnceLock};
 
 use anyhow::Result;
 
-use crate::config::Command;
+use crate::{config::Command, state::UIStateGuard};
 
 static CLIPBOARD_PROVIDER: OnceLock<Box<dyn ClipboardProvider>> = OnceLock::new();
 
@@ -132,4 +132,14 @@ pub fn execute_copy_command(text: String) -> Result<()> {
     CLIPBOARD_PROVIDER
         .get_or_init(|| get_clipboard_provider())
         .set_contents(text)
+}
+
+pub(super) fn copy_link(ui: &mut UIStateGuard, url: String) {
+    match execute_copy_command(url) {
+        Ok(()) => ui.push_success_toast("Copied link"),
+        Err(err) => {
+            tracing::error!("Failed to copy link: {err:#}");
+            ui.push_error_toast(format!("Failed to copy link: {err:#}"));
+        }
+    }
 }

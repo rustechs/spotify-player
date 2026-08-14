@@ -98,6 +98,11 @@ impl ToastQueue {
     }
 }
 
+/// Whether a toast should be stored. Daemon and `enable_toast = false` skip enqueue.
+pub(crate) fn should_enqueue_toast(enable_toast: bool, is_daemon: bool) -> bool {
+    enable_toast && !is_daemon
+}
+
 /// If a popup is open, close it and leave the toast queue alone.
 /// Otherwise dismiss the current toast.
 pub fn close_popup_or_dismiss_toast<P>(popup: &mut Option<P>, toasts: &mut ToastQueue) {

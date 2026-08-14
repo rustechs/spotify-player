@@ -1,5 +1,6 @@
 use super::page::handle_navigation_command;
 #[allow(clippy::wildcard_imports)]
+// `use super::*` is denied by workspace pedantic; explicit imports churn on every parent item
 use super::*;
 use crate::{
     command::{

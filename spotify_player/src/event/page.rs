@@ -4,6 +4,7 @@ use command::CommandOrAction;
 use crate::command::{construct_album_actions, construct_playlist_actions, construct_show_actions};
 
 #[allow(clippy::wildcard_imports)]
+// `use super::*` is denied by workspace pedantic; explicit imports churn on every parent item
 use super::*;
 
 pub fn handle_key_sequence_for_page(

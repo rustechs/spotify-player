@@ -241,7 +241,7 @@ pub fn handle_action_in_context(
             }
             Action::CopyLink => {
                 let track_url = format!("https://open.spotify.com/track/{}", track.id.id());
-                copy_link(ui, track_url);
+                clipboard::copy_link(ui, track_url);
                 ui.popup = None;
                 Ok(true)
             }
@@ -343,7 +343,7 @@ pub fn handle_action_in_context(
             }
             Action::CopyLink => {
                 let album_url = format!("https://open.spotify.com/album/{}", album.id.id());
-                copy_link(ui, album_url);
+                clipboard::copy_link(ui, album_url);
                 ui.popup = None;
                 Ok(true)
             }
@@ -367,7 +367,7 @@ pub fn handle_action_in_context(
             }
             Action::CopyLink => {
                 let artist_url = format!("https://open.spotify.com/artist/{}", artist.id.id());
-                copy_link(ui, artist_url);
+                clipboard::copy_link(ui, artist_url);
                 ui.popup = None;
                 Ok(true)
             }
@@ -390,7 +390,7 @@ pub fn handle_action_in_context(
             Action::CopyLink => {
                 let playlist_url =
                     format!("https://open.spotify.com/playlist/{}", playlist.id.id());
-                copy_link(ui, playlist_url);
+                clipboard::copy_link(ui, playlist_url);
                 ui.popup = None;
                 Ok(true)
             }
@@ -406,7 +406,7 @@ pub fn handle_action_in_context(
         ActionContext::Show(show) => match action {
             Action::CopyLink => {
                 let show_url = format!("https://open.spotify.com/show/{}", show.id.id());
-                copy_link(ui, show_url);
+                clipboard::copy_link(ui, show_url);
                 ui.popup = None;
                 Ok(true)
             }
@@ -442,7 +442,7 @@ pub fn handle_action_in_context(
             }
             Action::CopyLink => {
                 let episode_url = format!("https://open.spotify.com/episode/{}", episode.id.id());
-                copy_link(ui, episode_url);
+                clipboard::copy_link(ui, episode_url);
                 ui.popup = None;
                 Ok(true)
             }
@@ -884,14 +884,4 @@ fn handle_global_command(
         _ => return Ok(false),
     }
     Ok(true)
-}
-
-fn copy_link(ui: &mut UIStateGuard, url: String) {
-    match clipboard::execute_copy_command(url) {
-        Ok(()) => ui.push_success_toast("Copied link"),
-        Err(err) => {
-            tracing::error!("Failed to copy link: {err:#}");
-            ui.push_error_toast(format!("Failed to copy link: {err:#}"));
-        }
-    }
 }

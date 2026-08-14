@@ -106,7 +106,22 @@ impl ClientRequest {
             Self::CreatePlaylist { .. } => Some("Created playlist"),
             Self::Player(PlayerRequest::NextTrack) => Some("Skipped to next"),
             Self::Player(PlayerRequest::PreviousTrack) => Some("Skipped to previous"),
-            _ => None,
+            Self::GetCurrentUser
+            | Self::GetDevices
+            | Self::GetBrowseCategories
+            | Self::GetBrowseCategoryPlaylists(_)
+            | Self::GetUserPlaylists
+            | Self::GetUserSavedAlbums
+            | Self::GetUserSavedShows
+            | Self::GetUserFollowedArtists
+            | Self::GetContext(_)
+            | Self::GetCurrentPlayback
+            | Self::Search(_)
+            | Self::Player(_)
+            | Self::GetCurrentUserQueue
+            | Self::GetLyrics { .. } => None,
+            #[cfg(feature = "streaming")]
+            Self::RestartIntegratedClient => None,
         }
     }
 }
