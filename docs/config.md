@@ -36,8 +36,8 @@ spotify_player -o device.volume=80 -o theme=dracula
 | `client_port`                     | Port for the application's client to handle CLI commands.                                            | `8080`                                                                 |
 | `log_folder`                      | Path to store log files.                                                                             | `None`                                                                 |
 | `tracks_playback_limit`           | Maximum number of tracks in a playback session.                                                      | `50`                                                                   |
-| `playback_format`                 | Format string for the playback window.                                                               | `{status} {track} • {artists} {liked}\n{album} • {genres}\n{metadata}` |
-| `playback_metadata_fields`        | Ordered list of metadata fields displayed in the playback UI `{metadata}` placeholder.               | `["repeat", "shuffle", "volume", "device"]`                            |
+| `playback_format`                 | Format string for the playback window. `{metadata}` is ignored here; those fields render below the progress bar. | `{status} {track} • {artists} {liked}\n{album} • {genres}` |
+| `playback_metadata_fields`        | Ordered list of fields shown on the last inner row of the playback block, spread across the full width. | `["repeat", "shuffle", "volume", "device"]`                            |
 | `notify_format`                   | Notification format (if `notify` feature enabled).                                                   | `{ summary = "{track} • {artists}", body = "{album}" }`                |
 | `notify_timeout_in_secs`          | Notification timeout in seconds (if `notify` feature enabled).                                       | `0`                                                                    |
 | `notify_transient`                | Send transient notifications (Linux only, if `notify` feature enabled).                              | `false`                                                                |
@@ -85,10 +85,10 @@ spotify_player -o device.volume=80 -o theme=dracula
 - Setting a positive `playback_refresh_duration_in_ms` increases API usage and may trigger rate limits. By default it is `0` (refresh playback only on events or commands). When `enable_streaming = "Never"`, a `0` value still falls back to a light 5s poll so external Connect track/device changes appear without manual `Ctrl-R`.
 - `enable_streaming` accepts `Always`, `Never`, or `DaemonOnly`. For backward compatibility, `true`/`false` are also accepted.
 - When `enable_streaming = "Never"`, the app will not invent a synthetic integrated Connect device (which previously caused HTTP 404 transfer loops). Set `preferred_device` to your desktop client's name (e.g. `"estelle"`) so startup transfers target that device.
-- `border_type`, `progress_bar_type`, and `progress_bar_position` accept only the values listed in the table above. With `enable_audio_visualization` enabled, `progress_bar_position` is ignored and the progress bar is always rendered below the visualization.
+- Repeat, shuffle, volume, and device are drawn on the last inner row of the playback block (order from `playback_metadata_fields`), spread across the full width, with a solid bottom border underneath. `{metadata}` in `playback_format` is ignored so those fields are not duplicated. With `enable_audio_visualization` enabled, `progress_bar_position` is ignored and the progress bar is always rendered below the visualization.
 - `explicit_icon` can be set to any Unicode character or an empty string to disable explicit markers.
 - `cover_img_length = 0` (the default) auto-derives the cover's column count from the terminal's cell aspect ratio. Set a non-zero `cover_img_length` to size the box manually.
-- With both `enable_audio_visualization` and the `image` feature, the cover sits top-right and may overlap the visualizer's top-right corner; metadata is indented to line up with the chart's vertical axis (`cover_img_width` / `cover_img_length` still size the cover).
+- With both `enable_audio_visualization` and the `image` feature, the cover sits top-right and may overlap the visualizer's top-right corner; metadata is indented one column left of the chart's vertical axis (`cover_img_width` / `cover_img_length` still size the cover).
 
 #### Media control
 
@@ -245,8 +245,8 @@ playback_status = { fg = "Cyan", modifiers = ["Bold"] }
 playback_track = { fg = "Cyan", modifiers = ["Bold"] }
 playback_artists = { fg = "Cyan", modifiers = ["Bold"] }
 playback_album = { fg = "Yellow" }
-playback_genres = { fg = "BrightBlack", modifiers = ["Italic"] }
-playback_metadata = { fg = "BrightBlack" }
+playback_genres = { fg = "Green", modifiers = ["Italic"] }
+playback_metadata = { fg = "Green" }
 playback_progress_bar = { bg = "BrightBlack", fg = "Green" }
 playback_progress_bar_unfilled = { bg = "BrightBlack" }
 current_playing = { fg = "Green", modifiers = ["Bold"] }

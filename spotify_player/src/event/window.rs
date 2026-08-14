@@ -175,12 +175,13 @@ pub fn handle_command_for_focused_context_window(
                         ui,
                         client_pub,
                     ),
-                    ArtistFocusState::RelatedArtists => Ok(handle_command_for_artist_list_window(
+                    ArtistFocusState::RelatedArtists => handle_command_for_artist_list_window(
                         command,
                         &ui.search_filtered_items(related_artists),
                         &data,
                         ui,
-                    )),
+                        client_pub,
+                    ),
                     ArtistFocusState::TopTracks => handle_command_for_track_table_window(
                         command, client_pub, None, top_tracks, &data, ui, state,
                     ),
@@ -437,24 +438,21 @@ pub fn handle_command_for_artist_list_window(
     artists: &[&Artist],
     data: &DataReadGuard,
     ui: &mut UIStateGuard,
-) -> bool {
+    client_pub: &flume::Sender<ClientRequest>,
+) -> Result<bool> {
     let id = ui.current_page_mut().selected().unwrap_or_default();
     if id >= artists.len() {
-        return false;
+        return Ok(false);
     }
 
     let count = ui.count_prefix;
     if handle_navigation_command(command, ui.current_page_mut(), id, artists.len(), count) {
-        return true;
+        return Ok(true);
     }
     match command {
         Command::ChooseSelected => {
             let context_id = ContextId::Artist(artists[id].id.clone());
-            ui.new_page(PageState::Context {
-                id: None,
-                context_page_type: ContextPageType::Browsing(context_id),
-                state: None,
-            });
+            open_context_page(ui, client_pub, context_id)?;
         }
         Command::ShowActionsOnSelectedItem => {
             let actions = construct_artist_actions(artists[id], data);
@@ -463,9 +461,9 @@ pub fn handle_command_for_artist_list_window(
                 ListState::default(),
             ));
         }
-        _ => return false,
+        _ => return Ok(false),
     }
-    true
+    Ok(true)
 }
 
 pub fn handle_command_for_album_list_window(
@@ -487,11 +485,7 @@ pub fn handle_command_for_album_list_window(
     match command {
         Command::ChooseSelected => {
             let context_id = ContextId::Album(albums[id].id.clone());
-            ui.new_page(PageState::Context {
-                id: None,
-                context_page_type: ContextPageType::Browsing(context_id),
-                state: None,
-            });
+            open_context_page(ui, client_pub, context_id)?;
         }
         Command::ShowActionsOnSelectedItem => {
             let actions = construct_album_actions(albums[id], data);
@@ -513,15 +507,16 @@ pub fn handle_command_for_playlist_list_window(
     playlists: &[&PlaylistFolderItem],
     data: &DataReadGuard,
     ui: &mut UIStateGuard,
-) -> bool {
+    client_pub: &flume::Sender<ClientRequest>,
+) -> Result<bool> {
     let id = ui.current_page_mut().selected().unwrap_or_default();
     if id >= playlists.len() {
-        return false;
+        return Ok(false);
     }
 
     let count = ui.count_prefix;
     if handle_navigation_command(command, ui.current_page_mut(), id, playlists.len(), count) {
-        return true;
+        return Ok(true);
     }
     match command {
         Command::ChooseSelected => {
@@ -535,16 +530,12 @@ pub fn handle_command_for_playlist_list_window(
                             state.focus = LibraryFocusState::Playlists;
                             state.playlist_folder_id = f.target_id;
                         }
-                        _ => return false,
+                        _ => return Ok(false),
                     }
                 }
                 PlaylistFolderItem::Playlist(p) => {
                     let context_id = ContextId::Playlist(p.id.clone());
-                    ui.new_page(PageState::Context {
-                        id: None,
-                        context_page_type: ContextPageType::Browsing(context_id),
-                        state: None,
-                    });
+                    open_context_page(ui, client_pub, context_id)?;
                 }
             }
         }
@@ -557,9 +548,9 @@ pub fn handle_command_for_playlist_list_window(
                 ));
             }
         }
-        _ => return false,
+        _ => return Ok(false),
     }
-    true
+    Ok(true)
 }
 
 pub fn handle_command_for_show_list_window(
@@ -567,24 +558,21 @@ pub fn handle_command_for_show_list_window(
     shows: &[&Show],
     data: &DataReadGuard,
     ui: &mut UIStateGuard,
-) -> bool {
+    client_pub: &flume::Sender<ClientRequest>,
+) -> Result<bool> {
     let id = ui.current_page_mut().selected().unwrap_or_default();
     if id >= shows.len() {
-        return false;
+        return Ok(false);
     }
 
     let count = ui.count_prefix;
     if handle_navigation_command(command, ui.current_page_mut(), id, shows.len(), count) {
-        return true;
+        return Ok(true);
     }
     match command {
         Command::ChooseSelected => {
             let context_id = ContextId::Show(shows[id].id.clone());
-            ui.new_page(PageState::Context {
-                id: None,
-                context_page_type: ContextPageType::Browsing(context_id),
-                state: None,
-            });
+            open_context_page(ui, client_pub, context_id)?;
         }
         Command::ShowActionsOnSelectedItem => {
             let actions = construct_show_actions(shows[id], data);
@@ -593,9 +581,9 @@ pub fn handle_command_for_show_list_window(
                 ListState::default(),
             ));
         }
-        _ => return false,
+        _ => return Ok(false),
     }
-    true
+    Ok(true)
 }
 
 pub fn handle_command_for_episode_list_window(

@@ -33,6 +33,7 @@ mod window;
 
 /// Start a terminal event handler (key pressed, mouse clicked, etc)
 pub fn start_event_handler(state: &SharedState, client_pub: &flume::Sender<ClientRequest>) {
+    crate::ui::drain_pending_terminal_events();
     while let Ok(event) = crossterm::event::read() {
         let _enter = tracing::info_span!("terminal_event", event = ?event).entered();
         if let Err(err) = match event {
@@ -57,6 +58,18 @@ pub fn start_event_handler(state: &SharedState, client_pub: &flume::Sender<Clien
             tracing::error!("Failed to handle terminal event: {err:#}");
         }
     }
+}
+
+/// Open a browsing context page with its id and UI state already set so
+/// Enter (`ChooseSelected`) is not dropped while waiting for the player watcher.
+pub fn open_context_page(
+    ui: &mut UIStateGuard,
+    client_pub: &flume::Sender<ClientRequest>,
+    context_id: ContextId,
+) -> Result<()> {
+    client_pub.send(ClientRequest::GetContext(context_id.clone()))?;
+    ui.new_page(PageState::browsing(context_id));
+    Ok(())
 }
 
 // Handle a terminal mouse event
@@ -163,7 +176,14 @@ fn handle_key_event(
 
     // if handled, clear the key sequence and count prefix
     // otherwise, the current key sequence can be a prefix of a command's shortcut
-    if handled {
+    if handled
+        || keymap_config
+            .find_command_or_action_from_key_sequence(&key_sequence)
+            .is_some()
+    {
+        // Also clear when a complete command matched but wasn't applied (e.g.
+        // ChooseSelected while a context page was still loading). Leaving
+        // Enter in the buffer made the next key have to reset the sequence.
         ui.input_key_sequence.keys = vec![];
         ui.count_prefix = None;
     } else {
@@ -206,17 +226,13 @@ pub fn handle_action_in_context(
                     let context_id = ContextId::Album(
                         AlbumId::from_uri(&parse_uri(&album.id.uri()))?.into_static(),
                     );
-                    ui.new_page(PageState::Context {
-                        id: None,
-                        context_page_type: ContextPageType::Browsing(context_id),
-                        state: None,
-                    });
+                    open_context_page(ui, client_pub, context_id)?;
                     return Ok(true);
                 }
                 Ok(false)
             }
             Action::GoToArtist => {
-                handle_go_to_artist(track.artists, ui);
+                handle_go_to_artist(track.artists, ui, client_pub)?;
                 Ok(true)
             }
             Action::AddToQueue => {
@@ -303,7 +319,7 @@ pub fn handle_action_in_context(
         },
         ActionContext::Album(album) => match action {
             Action::GoToArtist => {
-                handle_go_to_artist(album.artists, ui);
+                handle_go_to_artist(album.artists, ui, client_pub)?;
                 Ok(true)
             }
             Action::GoToRadio => {
@@ -415,11 +431,7 @@ pub fn handle_action_in_context(
                     let context_id = ContextId::Show(
                         ShowId::from_uri(&parse_uri(&show.id.uri()))?.into_static(),
                     );
-                    ui.new_page(PageState::Context {
-                        id: None,
-                        context_page_type: ContextPageType::Browsing(context_id),
-                        state: None,
-                    });
+                    open_context_page(ui, client_pub, context_id)?;
                     return Ok(true);
                 }
                 Ok(false)
@@ -475,23 +487,18 @@ fn handle_go_to_radio(
     client_pub: &flume::Sender<ClientRequest>,
 ) -> anyhow::Result<()> {
     let radio_id = TracksId::new(format!("radio:{seed_uri}"), format!("{seed_name} Radio"));
-    ui.new_page(PageState::Context {
-        id: None,
-        context_page_type: ContextPageType::Browsing(ContextId::Tracks(radio_id.clone())),
-        state: None,
-    });
-    client_pub.send(ClientRequest::GetContext(ContextId::Tracks(radio_id)))?;
+    open_context_page(ui, client_pub, ContextId::Tracks(radio_id))?;
     Ok(())
 }
 
-fn handle_go_to_artist(artists: Vec<Artist>, ui: &mut UIStateGuard) {
+fn handle_go_to_artist(
+    artists: Vec<Artist>,
+    ui: &mut UIStateGuard,
+    client_pub: &flume::Sender<ClientRequest>,
+) -> Result<()> {
     if artists.len() == 1 {
         let context_id = ContextId::Artist(artists[0].id.clone());
-        ui.new_page(PageState::Context {
-            id: None,
-            context_page_type: ContextPageType::Browsing(context_id),
-            state: None,
-        });
+        open_context_page(ui, client_pub, context_id)?;
     } else {
         ui.popup = Some(PopupState::ArtistList(
             ArtistPopupAction::Browse,
@@ -499,6 +506,7 @@ fn handle_go_to_artist(artists: Vec<Artist>, ui: &mut UIStateGuard) {
             ListState::default(),
         ));
     }
+    Ok(())
 }
 
 fn handle_show_actions_on_artist(
@@ -690,40 +698,25 @@ fn handle_global_command(
             ui.popup = Some(PopupState::UserSavedAlbumList(ListState::default()));
         }
         Command::TopTrackPage => {
-            ui.new_page(PageState::Context {
-                id: None,
-                context_page_type: ContextPageType::Browsing(ContextId::Tracks(
-                    USER_TOP_TRACKS_ID.to_owned(),
-                )),
-                state: None,
-            });
-            client_pub.send(ClientRequest::GetContext(ContextId::Tracks(
-                USER_TOP_TRACKS_ID.to_owned(),
-            )))?;
+            open_context_page(
+                ui,
+                client_pub,
+                ContextId::Tracks(USER_TOP_TRACKS_ID.to_owned()),
+            )?;
         }
         Command::RecentlyPlayedTrackPage => {
-            ui.new_page(PageState::Context {
-                id: None,
-                context_page_type: ContextPageType::Browsing(ContextId::Tracks(
-                    USER_RECENTLY_PLAYED_TRACKS_ID.to_owned(),
-                )),
-                state: None,
-            });
-            client_pub.send(ClientRequest::GetContext(ContextId::Tracks(
-                USER_RECENTLY_PLAYED_TRACKS_ID.to_owned(),
-            )))?;
+            open_context_page(
+                ui,
+                client_pub,
+                ContextId::Tracks(USER_RECENTLY_PLAYED_TRACKS_ID.to_owned()),
+            )?;
         }
         Command::LikedTrackPage => {
-            ui.new_page(PageState::Context {
-                id: None,
-                context_page_type: ContextPageType::Browsing(ContextId::Tracks(
-                    USER_LIKED_TRACKS_ID.to_owned(),
-                )),
-                state: None,
-            });
-            client_pub.send(ClientRequest::GetContext(ContextId::Tracks(
-                USER_LIKED_TRACKS_ID.to_owned(),
-            )))?;
+            open_context_page(
+                ui,
+                client_pub,
+                ContextId::Tracks(USER_LIKED_TRACKS_ID.to_owned()),
+            )?;
         }
         Command::LibraryPage => {
             ui.new_page(PageState::Library {
@@ -775,27 +768,15 @@ fn handle_global_command(
                     // for playlist/artist/album link, go to the corresponding context page
                     "playlist" => {
                         let id = PlaylistId::from_id(id)?.into_static();
-                        ui.new_page(PageState::Context {
-                            id: None,
-                            context_page_type: ContextPageType::Browsing(ContextId::Playlist(id)),
-                            state: None,
-                        });
+                        open_context_page(ui, client_pub, ContextId::Playlist(id))?;
                     }
                     "artist" => {
                         let id = ArtistId::from_id(id)?.into_static();
-                        ui.new_page(PageState::Context {
-                            id: None,
-                            context_page_type: ContextPageType::Browsing(ContextId::Artist(id)),
-                            state: None,
-                        });
+                        open_context_page(ui, client_pub, ContextId::Artist(id))?;
                     }
                     "album" => {
                         let id = AlbumId::from_id(id)?.into_static();
-                        ui.new_page(PageState::Context {
-                            id: None,
-                            context_page_type: ContextPageType::Browsing(ContextId::Album(id)),
-                            state: None,
-                        });
+                        open_context_page(ui, client_pub, ContextId::Album(id))?;
                     }
                     e => anyhow::bail!("unsupported Spotify type {e}!"),
                 }

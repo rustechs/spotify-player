@@ -143,6 +143,18 @@ pub enum MutableWindowState<'a> {
 }
 
 impl PageState {
+    /// Browse a playlist, album, artist, show, or tracks collection.
+    ///
+    /// `id` and window state are set immediately so commands like Enter work
+    /// without waiting for the player watcher to copy the browsing id in.
+    pub fn browsing(context_id: ContextId) -> Self {
+        Self::Context {
+            id: Some(context_id.clone()),
+            state: Some(ContextPageUIState::from_id(&context_id)),
+            context_page_type: ContextPageType::Browsing(context_id),
+        }
+    }
+
     /// The type of the page.
     pub fn page_type(&self) -> PageType {
         match self {
@@ -321,6 +333,16 @@ impl ContextPageUIState {
     pub fn new_show() -> Self {
         Self::Show {
             episode_table: TableState::default(),
+        }
+    }
+
+    pub fn from_id(id: &ContextId) -> Self {
+        match id {
+            ContextId::Album(_) => Self::new_album(),
+            ContextId::Artist(_) => Self::new_artist(),
+            ContextId::Playlist(_) => Self::new_playlist(),
+            ContextId::Tracks(_) => Self::new_tracks(),
+            ContextId::Show(_) => Self::new_show(),
         }
     }
 }

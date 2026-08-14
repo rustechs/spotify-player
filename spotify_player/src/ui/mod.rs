@@ -86,7 +86,16 @@ pub fn init_terminal() -> Result<Terminal> {
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
     terminal.clear()?;
+    drain_pending_terminal_events();
     Ok(terminal)
+}
+
+/// Drop leftover stdin bytes (e.g. delayed CSI from the image-protocol query)
+/// so they are not interpreted as the first keypress.
+pub fn drain_pending_terminal_events() {
+    while crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+        let _ = crossterm::event::read();
+    }
 }
 
 #[cfg(feature = "image")]
@@ -100,6 +109,7 @@ pub fn init_image_picker(state: &SharedState) -> Result<()> {
             ratatui_image::picker::Picker::halfblocks()
         }
     };
+    drain_pending_terminal_events();
     crossterm::terminal::disable_raw_mode()?;
 
     // ratatui_image might detect the wrong protocol for iTerm2, so override it to the native iTerm2 protocol if detected

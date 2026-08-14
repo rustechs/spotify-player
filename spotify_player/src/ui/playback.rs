@@ -21,18 +21,15 @@ struct ActivePlayback {
 
 /// Render a playback window showing information about the current playback, which includes
 /// - track title, artists, album
-/// - playback metadata (playing state, repeat state, shuffle state, volume, device, etc)
 /// - cover image (if `image` feature is enabled)
 /// - playback progress bar
+/// - playback status (repeat, shuffle, volume, device) below the progress bar
 pub fn render_playback_window(
     frame: &mut Frame,
     state: &SharedState,
     ui: &mut UIStateGuard,
     rect: Rect,
 ) -> Rect {
-    let (rect, other_rect) = split_rect_for_playback_window(state, rect);
-    let rect = construct_and_render_block("Playback", &ui.theme, Borders::ALL, frame, rect);
-
     // Snapshot playback under a short `player` read. Holding the RwLock across cover
     // encode / viz / data reads lets a waiting writer (playback refresh) block *new*
     // readers under parking_lot's fair policy — parking every tokio worker on the lock
@@ -67,6 +64,9 @@ pub fn render_playback_window(
         (active, waiting_for_first_fetch)
     };
 
+    let (outer, other_rect) = split_rect_for_playback_window(state, rect);
+    let inner = construct_and_render_block("Playback", &ui.theme, Borders::ALL, frame, outer);
+
     if let Some(ActivePlayback {
         item,
         buffered_playback,
@@ -79,27 +79,25 @@ pub fn render_playback_window(
         // Keep the area reserved while a track is loaded (including pause) so
         // the layout does not jump; bars idle at zero when audio is silent.
         // With visualization enabled the progress bar is always placed below
-        // the spectrogram, regardless of `progress_bar_position`.
+        // the spectrogram, regardless of `progress_bar_position`. Repeat /
+        // shuffle / volume / device occupy the last inner row so the block
+        // keeps a solid bottom border.
+        let (content, status_rect) = split_status_row(inner);
+
         #[cfg(feature = "streaming")]
         let (rect, vis_rect, progress_override) = {
             let configs = config::get_config();
             if configs.app_config.enable_audio_visualization {
-                // Metadata strip is only as tall as the format text. The cover hangs
-                // into the visualizer's top-right instead of forcing this strip taller.
-                let chunks = Layout::vertical([
-                    Constraint::Length(playback_format_line_count()),
-                    Constraint::Length(super::streaming::VIS_HEIGHT),
-                    Constraint::Length(1),
-                ])
-                .split(rect);
-                (chunks[0], Some(chunks[1]), Some(chunks[2]))
+                let (header, vis, progress) =
+                    split_viz_playback_rows(content, playback_format_line_count());
+                (header, Some(vis), Some(progress))
             } else {
-                (rect, None, None)
+                (content, None, None)
             }
         };
 
         #[cfg(not(feature = "streaming"))]
-        let progress_override: Option<Rect> = None;
+        let (rect, progress_override): (Rect, Option<Rect>) = (content, None);
 
         // Cover is prepared here but rendered after the visualizer so it can paint
         // over the dead top-right of the spectrogram.
@@ -135,8 +133,7 @@ pub fn render_playback_window(
             if let Some(progress) = progress_override {
                 (rect, progress)
             } else {
-                let chunks = split_rect_for_progress_bar(rect);
-                (chunks.0, chunks.1)
+                split_rect_for_progress_bar(rect)
             }
         };
 
@@ -161,6 +158,9 @@ pub fn render_playback_window(
         }
 
         render_playback_progress_bar(frame, ui, progress, duration, progress_bar_rect);
+        if let Some(ref buffered) = buffered_playback {
+            render_playback_status_row(frame, ui, buffered, status_rect);
+        }
         return other_rect;
     }
 
@@ -185,7 +185,7 @@ pub fn render_playback_window(
             Constraint::Length(1),
             Constraint::Fill(1),
         ])
-        .split(rect);
+        .split(inner);
         frame.render_widget(
             Paragraph::new(format!("{} Loading...", SPINNER_FRAMES[frame_idx]))
                 .style(ui.theme.playback_metadata())
@@ -199,18 +199,94 @@ pub fn render_playback_window(
                  Make sure there is a running Spotify device and try to connect to one using the `SwitchDevice` command."
             )
             .wrap(Wrap { trim: true }),
-            rect,
+            inner,
         );
     }
 
     other_rect
 }
 
-/// Line count implied by `playback_format` (one plus the number of `\n` separators).
+/// `{metadata}` is rendered on its own row below the progress bar, so drop it
+/// (and any blank lines that leaves) from the header format string.
+fn playback_header_format() -> String {
+    collapse_format_newlines(
+        &config::get_config()
+            .app_config
+            .playback_format
+            .replace("{metadata}", ""),
+    )
+}
+
+fn collapse_format_newlines(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_nl = false;
+    for c in s.chars() {
+        if c == '\n' {
+            if prev_nl {
+                continue;
+            }
+            prev_nl = true;
+            out.push(c);
+        } else {
+            prev_nl = false;
+            out.push(c);
+        }
+    }
+    out.trim_matches('\n').to_string()
+}
+
+/// Line count of the header format (one plus the number of `\n` separators).
 #[cfg(feature = "streaming")]
 fn playback_format_line_count() -> u16 {
-    let format_str = &config::get_config().app_config.playback_format;
-    format_str.bytes().filter(|&b| b == b'\n').count() as u16 + 1
+    let format_str = playback_header_format();
+    if format_str.is_empty() {
+        0
+    } else {
+        format_str.bytes().filter(|&b| b == b'\n').count() as u16 + 1
+    }
+}
+
+/// Split off the last inner row for repeat/shuffle/volume/device so the block
+/// can keep a solid bottom border underneath.
+fn split_status_row(rect: Rect) -> (Rect, Rect) {
+    let status = Rect {
+        x: rect.x,
+        y: rect.bottom().saturating_sub(1),
+        width: rect.width,
+        height: 1.min(rect.height),
+    };
+    let content = Rect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height.saturating_sub(status.height),
+    };
+    (content, status)
+}
+
+/// Split the visualization playback inner area: header, chart, progress flush
+/// to the bottom (immediately above the status row).
+#[cfg(feature = "streaming")]
+fn split_viz_playback_rows(rect: Rect, header_h: u16) -> (Rect, Rect, Rect) {
+    let progress = Rect {
+        x: rect.x,
+        y: rect.bottom().saturating_sub(1),
+        width: rect.width,
+        height: 1.min(rect.height),
+    };
+    let header = Rect {
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: header_h.min(progress.y.saturating_sub(rect.y)),
+    };
+    let vis = Rect {
+        x: rect.x,
+        y: header.bottom(),
+        width: rect.width,
+        height: progress.y.saturating_sub(header.bottom()),
+    };
+    (header, vis, progress)
 }
 
 fn split_rect_for_progress_bar(rect: Rect) -> (Rect, Rect) {
@@ -253,9 +329,9 @@ fn split_cover_over_visualizer(
 ) -> (Rect, Rect) {
     let configs = config::get_config();
     let cover_rows = (configs.app_config.cover_img_width as u16).min(combined.height);
-    // Left inset matches the visualizer's dB-label column so metadata lines up
-    // with the chart's vertical axis; also reserve gap + right margin for cover.
-    let left_inset = super::streaming::Y_AXIS_WIDTH;
+    // One column left of the chart's vertical axis (the axis sits at
+    // `Y_AXIS_WIDTH`); also reserve gap + right margin for cover.
+    let left_inset = super::streaming::Y_AXIS_WIDTH.saturating_sub(1);
     let max_cols = combined.width.saturating_sub(left_inset + 2);
     let cover_cols = cover_img_length_for_rows(configs, picker, cover_rows)
         .min(max_cols)
@@ -377,7 +453,7 @@ fn construct_playback_text(
     // Construct a "styled" text (`playback_text`) from playback's data
     // based on a user-configurable format string (app_config.playback_format)
     let configs = config::get_config();
-    let format_str = &configs.app_config.playback_format;
+    let format_str = playback_header_format();
     let data = state.data.read();
 
     let mut playback_text = Text::default();
@@ -387,7 +463,7 @@ fn construct_playback_text(
     let re = regex::Regex::new(r"\{.*?\}|\n").unwrap();
 
     let mut ptr = 0;
-    for m in re.find_iter(format_str) {
+    for m in re.find_iter(&format_str) {
         let s = m.start();
         let e = m.end();
         if ptr < s {
@@ -501,30 +577,6 @@ fn construct_playback_text(
                     continue;
                 }
             },
-            "{metadata}" => {
-                let repeat_value = <&'static str>::from(playback.repeat_state).to_string();
-
-                let volume_value = if let Some(volume) = playback.mute_state {
-                    format!("{volume}% (muted)")
-                } else {
-                    format!("{}%", playback.volume.unwrap_or_default())
-                };
-
-                let mut parts = vec![];
-
-                for field in &configs.app_config.playback_metadata_fields {
-                    match field.as_str() {
-                        "repeat" => parts.push(format!("repeat: {repeat_value}")),
-                        "shuffle" => parts.push(format!("shuffle: {}", playback.shuffle_state)),
-                        "volume" => parts.push(format!("volume: {volume_value}")),
-                        "device" => parts.push(format!("device: {}", playback.device_name)),
-                        _ => {}
-                    }
-                }
-
-                let metadata_str = parts.join(" | ");
-                (metadata_str, ui.theme.playback_metadata())
-            }
             _ => continue,
         };
 
@@ -538,6 +590,88 @@ fn construct_playback_text(
     }
 
     playback_text
+}
+
+fn playback_status_field_texts(playback: &PlaybackMetadata) -> Vec<String> {
+    let configs = config::get_config();
+    let repeat_value = <&'static str>::from(playback.repeat_state);
+    let volume_value = if let Some(volume) = playback.mute_state {
+        format!("{volume}% (muted)")
+    } else {
+        format!("{}%", playback.volume.unwrap_or_default())
+    };
+
+    configs
+        .app_config
+        .playback_metadata_fields
+        .iter()
+        .filter_map(|field| match field.as_str() {
+            "repeat" => Some(format!("repeat: {repeat_value}")),
+            "shuffle" => Some(format!("shuffle: {}", playback.shuffle_state)),
+            "volume" => Some(format!("volume: {volume_value}")),
+            "device" => Some(format!("device: {}", playback.device_name)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Repeat/shuffle/volume/device spread across the last inner row, with side
+/// padding equal to half the gap between fields.
+fn render_playback_status_row(
+    frame: &mut Frame,
+    ui: &UIStateGuard,
+    playback: &PlaybackMetadata,
+    rect: Rect,
+) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+
+    let fields = playback_status_field_texts(playback);
+    if fields.is_empty() {
+        return;
+    }
+
+    let style = ui.theme.playback_metadata();
+    let text_width: usize = fields.iter().map(|s| s.chars().count()).sum();
+    let leftover = (rect.width as usize).saturating_sub(text_width);
+    let (left, gaps, right) = status_row_spacing(fields.len(), leftover);
+
+    let mut spans = Vec::with_capacity(fields.len() * 2 + 2);
+    if left > 0 {
+        spans.push(Span::raw(" ".repeat(left)));
+    }
+    for (i, field) in fields.iter().enumerate() {
+        spans.push(Span::styled(field.clone(), style));
+        if i < gaps.len() {
+            spans.push(Span::raw(" ".repeat(gaps[i])));
+        }
+    }
+    if right > 0 {
+        spans.push(Span::raw(" ".repeat(right)));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), rect);
+}
+
+/// CSS-style `space-around`: leftover columns are split into `2n` half-gaps so
+/// each side pad is half the space between neighboring fields.
+fn status_row_spacing(field_count: usize, leftover: usize) -> (usize, Vec<usize>, usize) {
+    match field_count {
+        0 => (0, Vec::new(), leftover),
+        1 => {
+            let left = leftover / 2;
+            (left, Vec::new(), leftover - left)
+        }
+        n => {
+            let half = leftover / (2 * n);
+            let extra = leftover % (2 * n);
+            let mut gaps = vec![2 * half; n - 1];
+            for i in 0..extra {
+                gaps[i % (n - 1)] += 1;
+            }
+            (half, gaps, half)
+        }
+    }
 }
 
 fn render_playback_progress_bar(
@@ -592,14 +726,15 @@ fn render_playback_progress_bar(
 #[allow(unused_variables)]
 fn split_rect_for_playback_window(state: &SharedState, rect: Rect) -> (Rect, Rect) {
     let configs = config::get_config();
-    // When visualization is enabled, size the window to fit metadata, progress, and
-    // the chart tightly instead of inheriting slack from `playback_window_height`.
-    // The cover overlaps the visualizer, so it does not add to this height.
+
+    // When visualization is enabled, size the window to fit metadata, progress,
+    // status, and the chart tightly. The cover overlaps the visualizer, so it
+    // does not add height.
     #[cfg(feature = "streaming")]
     let playback_width = if configs.app_config.enable_audio_visualization
         && state.player.read().currently_playing().is_some()
     {
-        playback_format_line_count() as usize + super::streaming::VIS_HEIGHT as usize + 1
+        playback_format_line_count() as usize + super::streaming::VIS_HEIGHT as usize + 2
     } else {
         configs.app_config.layout.playback_window_height
     };
@@ -655,5 +790,70 @@ fn split_rect_for_playback_window(state: &SharedState, rect: Rect) -> (Rect, Rec
 
             (chunks[1], chunks[0])
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collapse_format_newlines, status_row_spacing};
+
+    #[test]
+    fn collapse_format_newlines_strips_trailing_blank_line() {
+        let s =
+            collapse_format_newlines("{status} {track} • {artists} {liked}\n{album} • {genres}\n");
+        assert_eq!(
+            s,
+            "{status} {track} • {artists} {liked}\n{album} • {genres}"
+        );
+    }
+
+    #[test]
+    fn collapse_format_newlines_collapses_double_newlines() {
+        let s = collapse_format_newlines("{track}\n\n{album}");
+        assert_eq!(s, "{track}\n{album}");
+    }
+
+    #[test]
+    fn status_row_spacing_sides_are_half_the_gap() {
+        let (left, gaps, right) = status_row_spacing(4, 40);
+        assert_eq!((left, right), (5, 5));
+        assert_eq!(gaps, vec![10, 10, 10]);
+    }
+
+    #[test]
+    fn status_row_spacing_uses_all_leftover() {
+        let (left, gaps, right) = status_row_spacing(4, 41);
+        assert_eq!(left + right + gaps.iter().sum::<usize>(), 41);
+        assert_eq!((left, right), (5, 5));
+        assert!(gaps.iter().all(|&g| g == 10 || g == 11));
+        assert!(gaps.iter().any(|&g| g == 11));
+    }
+
+    #[test]
+    fn status_row_spacing_centers_a_single_field() {
+        let (left, gaps, right) = status_row_spacing(1, 9);
+        assert!(gaps.is_empty());
+        assert_eq!((left, right), (4, 5));
+    }
+
+    #[test]
+    fn split_status_row_takes_the_last_inner_row() {
+        let rect = super::Rect::new(0, 0, 80, 12);
+        let (content, status) = super::split_status_row(rect);
+        assert_eq!(status.y, 11);
+        assert_eq!(status.height, 1);
+        assert_eq!(content.height, 11);
+        assert_eq!(content.bottom(), status.y);
+    }
+
+    #[cfg(feature = "streaming")]
+    #[test]
+    fn split_viz_playback_rows_progress_flush_with_bottom() {
+        let rect = super::Rect::new(0, 0, 80, 12);
+        let (header, vis, progress) = super::split_viz_playback_rows(rect, 2);
+        assert_eq!(header.height, 2);
+        assert_eq!(progress.bottom(), rect.bottom());
+        assert_eq!(vis.bottom(), progress.y);
+        assert_eq!(progress.height, 1);
     }
 }

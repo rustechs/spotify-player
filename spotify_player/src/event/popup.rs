@@ -65,6 +65,7 @@ pub fn handle_key_sequence_for_popup(
         }
         PopupState::ArtistList(_, artists, _) => {
             let n_items = artists.len();
+            let client_pub = client_pub.clone();
 
             handle_command_for_list_popup(
                 command,
@@ -79,11 +80,7 @@ pub fn handle_key_sequence_for_popup(
                     match action {
                         ArtistPopupAction::Browse => {
                             let context_id = ContextId::Artist(artists[id].id.clone());
-                            ui.new_page(PageState::Context {
-                                id: None,
-                                context_page_type: ContextPageType::Browsing(context_id),
-                                state: None,
-                            });
+                            open_context_page(ui, &client_pub, context_id)?;
                         }
                         ArtistPopupAction::ShowActions => {
                             let actions = {
@@ -113,6 +110,7 @@ pub fn handle_key_sequence_for_popup(
                 let data = state.data.read();
                 let items = data.user_data.folder_playlists_items(*folder_id);
                 let filtered_items = filtered_items_from_query(&search_query, &items);
+                let client_pub = client_pub.clone();
 
                 handle_command_for_list_popup(
                     command,
@@ -135,11 +133,7 @@ pub fn handle_key_sequence_for_popup(
                                     PlaylistId::from_uri(&crate::utils::parse_uri(&p.id.uri()))?
                                         .into_static(),
                                 );
-                                ui.new_page(PageState::Context {
-                                    id: None,
-                                    context_page_type: ContextPageType::Browsing(context_id),
-                                    state: None,
-                                });
+                                open_context_page(ui, &client_pub, context_id)?;
                             }
                         }
                         Ok(())
@@ -245,6 +239,7 @@ pub fn handle_key_sequence_for_popup(
             handle_command_for_context_browsing_list_popup(
                 command,
                 ui,
+                client_pub,
                 &artist_uris,
                 &rspotify::model::Type::Artist,
             )
@@ -262,6 +257,7 @@ pub fn handle_key_sequence_for_popup(
             handle_command_for_context_browsing_list_popup(
                 command,
                 ui,
+                client_pub,
                 &album_uris,
                 &rspotify::model::Type::Album,
             )
@@ -410,9 +406,11 @@ fn handle_key_sequence_for_search_popup(
 fn handle_command_for_context_browsing_list_popup(
     command: Command,
     ui: &mut UIStateGuard,
+    client_pub: &flume::Sender<ClientRequest>,
     uris: &[String],
     context_type: &rspotify::model::Type,
 ) -> Result<bool> {
+    let client_pub = client_pub.clone();
     handle_command_for_list_popup(
         command,
         ui,
@@ -435,11 +433,7 @@ fn handle_command_for_context_browsing_list_popup(
                 }
             };
 
-            ui.new_page(PageState::Context {
-                id: None,
-                context_page_type: ContextPageType::Browsing(context_id),
-                state: None,
-            });
+            open_context_page(ui, &client_pub, context_id)?;
 
             Ok(())
         },
