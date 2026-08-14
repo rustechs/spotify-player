@@ -14,9 +14,13 @@ pub type UIStateGuard<'a> = parking_lot::MutexGuard<'a, UIState>;
 
 mod page;
 mod popup;
+#[allow(dead_code)] // Phase 0 helpers; wired to UIState after the Phase 0 gate
+mod toast;
 
 pub use page::*;
 pub use popup::*;
+#[allow(unused_imports)]
+pub use toast::*;
 
 #[cfg(feature = "image")]
 #[derive(Default)]

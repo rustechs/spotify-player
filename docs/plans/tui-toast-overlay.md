@@ -1,12 +1,12 @@
 # Implementation Plan: In-TUI toast overlay for mutation results
 
-**Status:** Draft
-**Approval authority:** human review (Interview Output 2026-08-14, depth B)
-**Activation authority:** human; `Authorized phases` must be set before `implement-plan`. This document's merge does not authorize implementation, deploy, or tracker mutations.
+**Status:** Active
+**Approval authority:** human (chat 2026-08-14: "approved and activate /implement-plan")
+**Activation authority:** human (same message). Interactive `implement-plan` default: Phase 0 only until a later message authorizes later units. Merge/deploy/tracker still unauthorized.
 **ADR(s):** none — this repository has no `docs/decision/` ADR process; durable choices are the Interview Output recorded in the planning session (purpose, overlay vs `PopupState`, FIFO+peek, sticky errors, placement, triggers, `esc`, config, overflow).
 **Epic / execution unit:** none
 **Linear project:** none (non-epic; no named project policy in this repo)
-**Primary Linear issue:** pending creation via `gen-tickets` after the plan is Active — do not create tickets from this Draft
+**Primary Linear issue:** pending `gen-tickets` after Active — not created in this Phase 0 PR
 **Material cutover:** no — additive TUI overlay and optional config keys with defaults; no production data store, traffic split, or enablement ritual
 **Cutover plan dependency:** none
 **Routine deployment phase:** none — merge into the repo's default branch is the ship for this CLI app; no post-merge environment action
@@ -16,8 +16,8 @@
 **Execution mode:** manual
 **Phase 0 gate:** human
 **Maximum Phase 0 rounds:** 3
-**Authorized phases:** (unset until activation)
-**Context strategy:** current context (`feat/toast-notifications`)
+**Authorized phases:** phase-0
+**Context strategy:** current context (`feat/toast-overlay`)
 **Scope:** In: non-modal toast queue on `UIState`, render in main-content lower-right, enqueue from mutating `ClientRequest` results plus clipboard/copy-link, config/theme/docs/tests. Out: desktop `notify` changes, playback-poll/Get*/search toasts, `PlayerRequest` toasts, Cargo feature flag, daemon/CLI rendering.
 
 ## 1. Observable outcome and invariants
@@ -57,20 +57,26 @@ In the interactive TUI, a mutating action (queue/library/playlist/like/follow/cr
 
 | Assumption | Critical sub-claims | Evidence gathered | Outcome | Coverage & proxy risk | Validation confidence | Remaining work |
 |---|---|---|---|---|---|---|
-| Leftover-rect clip | Toast never uses full `frame.area()`; playback outer reserved | Untested (pre-implementation). Static: `ui/mod.rs` `render_application` draws playback first then shrinks `rect`; `playback.rs` `split_rect_for_playback_window` | Untested | Static layout only | Low | Prove in Phase 0 of `implement-plan` via `toast_area` tests + read of split helper |
-| Toastable match | Exhaustive; Player/Get* excluded | `client/request.rs` variant list inventoried in this plan | Untested | Inventory is a proxy until the match exists | Medium | Prove with exhaustive match + table test |
-| UI-loop expiry | 32ms poll enough; no extra thread | `ui/mod.rs` sleep `app_refresh_duration_in_ms` | Untested | Assumes clock monotonic in tests | Medium | Prove with fake `Instant` in queue tests |
-| ClosePopup path | Search/PlaylistCreate fall through to global ClosePopup; list popups consume it | Reviewer B round 1: search/create do not handle `ClosePopup`; global arm clears popup | Partial | Dispatch re-read; tests absent | Medium | Prove `close_popup_or_dismiss_toast` including Search still-open case |
-| Drop-newest | Visible toast stable | Interview Q13 (b) | Untested | Policy locked; code absent | Medium | Prove push/overflow tests |
+| Leftover-rect clip | `toast_area` never returns a rect outside `content`; playback is a vertical partition of `frame` via `split_rect_for_playback_window` (`playback.rs:727–793`); `render_application` uses leftover `rect` for popups+main | `cargo test toast_area_stays_inside_content` — 1 passed (2026-08-14, features rodio/media-control/system-audio-visualization/image/notify/fzf). Read: leftover is `chunks[1]` (Top) or `chunks[0]` (Bottom), complement of playback height. | Supported | Did **not** invoke `split_rect_for_playback_window` (needs `Configs` OnceLock + `SharedState`). Image protocols drawing outside the playback block remain a human `#498` gate. | High for clip helper; Medium that implementers pass leftover `rect` not `frame.area()` | None for helper. U3 must pass leftover rect. Human cover-art check remains. |
+| Toastable match | Exhaustive match; Get*/Player/Search/Lyrics/Restart false; eight mutations true | `ClientRequest::is_toastable` in `client/request.rs` (not `toast.rs`: `state`→`client` would cycle). `cargo test client_request_is_toastable` — 1 passed with default features; 1 passed `--no-default-features` (no `RestartIntegratedClient` arm). `cargo clippy --no-default-features -- -D warnings` and with CI features — exit 0 (exhaustive). | Supported | Table constructs one value per variant except `RestartIntegratedClient` only under `streaming`. | High | None. Remove `#[allow(dead_code)]` in U4 when handlers call it. |
+| UI-loop expiry | Success `expires_at` pops; sticky error does not; 32ms UI poll is enough to notice | `toast_queue_expire_due` — 1 passed. `AppConfig` default `app_refresh_duration_in_ms: 32` (`config/mod.rs:353`). `ui::run` still does not call `expire_due` (not wired). | Partial | Fake `Instant` in unit tests, not the real draw loop. 32ms vs 3s timeout is arithmetic, not measured in TUI. | High for queue policy; Medium until U3 hooks `ui::run` | U3: call `expire_due` before draw. |
+| ClosePopup path | Search/create fall through to global arm; helper: popup Some → clear popup, keep toasts; None → dismiss current | Re-read `handle_key_sequence_for_search_popup` (chars/backspace only; else page handler). Global `ClosePopup` still `ui.popup = None` (`event/mod.rs:872`). `close_popup_or_dismiss_toast_search_still_open` + `_dismisses_when_no_popup` — 2 passed. Generic `Option<P>`, not `PopupState`. | Partial | Policy proven; event dispatch not yet calling the helper. Search simulated as `Some("search")`. | High for policy; Medium until U5 replaces the global arm | U5 wire. Keep helper on `UIState` or call existing fn. |
+| Drop-newest | Cap 10; 11th refused; front (visible) unchanged; drop counted | `toast_queue_drops_newest_at_cap` — 1 passed (`dropped_newest == 1`, current `"visible"`). `tracing::warn!` on drop (not asserted). | Supported | Warn line not captured in test. | High | None |
 
-**Round summary:** Planning-time static reads support the approach; no runtime evidence yet. Phase 0 of implementation must fill this inventory before production enqueue/render.
+**Round summary:** Isolated `ToastQueue`, `toast_area`, `close_popup_or_dismiss_toast`, and `ClientRequest::is_toastable` are proven by unit tests and clippy exhaustive match. They are **not** wired to `UIState`, `ui::run`, handlers, or `esc`. Cover-art overlap is still a human gate. `is_toastable` lives on `ClientRequest` to avoid a `state`↔`client` import cycle.
+
+**Leads tried:** putting `is_toastable` in `state/ui/toast.rs` — rejected (cycle). **Omitted:** calling `split_rect_for_playback_window` in tests (config OnceLock). **Scaffold:** `#[allow(dead_code)]` on `mod toast` and `is_toastable` until U3/U4; delete allows when wired.
+
+**Plan changes implied:** U1 is promotion of these types (do not rewrite). U4 uses `ClientRequest::is_toastable`. `toast_area` places the peek sliver **above** the body in the lower-right stack.
+
+**Coverage baseline:** unavailable (no repo coverage metric).
 
 ##### Review
 
 **Gate:** human
 **Verdict:** pending
 
-> **Phase 0 status — pending.**
+> **Phase 0 status — pending human review.** Isolated helpers exist; do not implement U2–U6 until this gate is approved and `Authorized phases` includes those units.
 
 ## 3. Existing patterns and ownership
 
@@ -127,7 +133,7 @@ Success copy: short past-tense (“Added to queue”, “Copied link”, “Crea
 | FIFO + peek of next | unit `state/ui/toast.rs` | `cargo test toast_queue_peek -- --exact` fail (module missing / assert) | same after U1 | enqueue 2, `current` first, `peek` second |
 | Success expires, error does not | unit | `cargo test toast_queue_expire_due` fail | same | fake `now` past `expires_at` |
 | Cap 10 drop newest | unit | `cargo test toast_queue_drops_newest_at_cap` fail | same | 11th rejected; len 10; front unchanged |
-| `enable_toast` false skips push | unit | `cargo test toast_queue_respects_enable_flag` fail | same | helper no-ops |
+| `enable_toast` false skips push | unit (U2/U4) | `cargo test toast_queue_respects_enable_flag` fail | same | Phase 0 omitted a tautological stub; implement with config in U2 |
 | Toast rect inside content | unit `ui/toast.rs` or `state/ui/toast.rs` | `cargo test toast_area_stays_inside_content` fail | same | several content sizes including tiny |
 | `is_toastable` exhaustive | unit `client/request.rs` | `cargo test client_request_is_toastable` fail | same | one assert per variant |
 | ClosePopup vs popup | unit on `UIState` helper | `cargo test close_popup_or_dismiss_toast` fail | same | Search/ActionList still open → toast unchanged; no popup → toast dismissed |
@@ -172,7 +178,7 @@ Level 5 (pure functions + in-process state) for queue, clip, toastable, dismiss.
 
 | Scaffold | Purpose | Maintained value | Cleanup checkpoint | Proposed disposition |
 |---|---|---|---|---|
-| None planned | — | — | — | — |
+| `#[allow(dead_code)]` on `mod toast` and `ClientRequest::is_toastable` | Phase 0 helpers unused until U3/U4 | Low | Remove allows when wired | delete |
 
 ## 7. Fallbacks and replan triggers
 
@@ -211,7 +217,7 @@ Level 5 (pure functions + in-process state) for queue, clip, toastable, dismiss.
 
 | Child/subtask | Outcome and phase coverage | Dependency/gate | Branch/environment | Authority required |
 |---|---|---|---|---|
-| `phase-0-toast-helpers`: Prove clip, toastable, expiry, overflow, close-or-dismiss | P0 | plan Active | `feat/toast-notifications` | implement-plan after activation |
+| `phase-0-toast-helpers`: Prove clip, toastable, expiry, overflow, close-or-dismiss | P0 | plan Active | `feat/toast-overlay` | implement-plan after activation |
 | `toast-queue-overlay`: Queue + render + config/theme | U1–U3 | P0 pass | same | same |
 | `toast-enqueue-dismiss-docs`: Client/event enqueue, esc, docs | U4–U6 | U1–U3 | same | same |
 
