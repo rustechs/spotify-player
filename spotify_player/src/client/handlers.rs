@@ -53,45 +53,56 @@ pub async fn start_client_handler(
         let state = state.clone();
         let client = client.clone();
         let span = tracing::info_span!("client_request", request = ?request);
+        let toast_request = request.clone();
 
         // Player mutations read and write `buffered_playback`; run them serially so
         // rapid repeat/shuffle/etc. keys cannot race on stale state.
         // Bound the wait so a single hung Player API call cannot stall the loop forever.
         if matches!(&request, ClientRequest::Player(_)) {
-            match tokio::time::timeout(
+            let outcome = tokio::time::timeout(
                 CLIENT_REQUEST_TIMEOUT,
                 client.handle_request(&state, request).instrument(span),
             )
-            .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => tracing::error!("Failed to handle client request: {err:#}"),
-                Err(_) => tracing::error!(
-                    "Timed out after {CLIENT_REQUEST_TIMEOUT:?} handling Player client request"
-                ),
-            }
+            .await;
+            enqueue_request_toast(&state, &toast_request, outcome);
         } else {
             tokio::task::spawn(
                 async move {
-                    match tokio::time::timeout(
+                    let outcome = tokio::time::timeout(
                         CLIENT_REQUEST_TIMEOUT,
                         client.handle_request(&state, request),
                     )
-                    .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(err)) => {
-                            tracing::error!("Failed to handle client request: {err:#}");
-                        }
-                        Err(_) => {
-                            tracing::error!(
-                                "Timed out after {CLIENT_REQUEST_TIMEOUT:?} handling client request"
-                            );
-                        }
-                    }
+                    .await;
+                    enqueue_request_toast(&state, &toast_request, outcome);
                 }
                 .instrument(span),
             );
+        }
+    }
+}
+
+fn enqueue_request_toast(
+    state: &SharedState,
+    request: &ClientRequest,
+    outcome: Result<anyhow::Result<()>, tokio::time::error::Elapsed>,
+) {
+    match outcome {
+        Ok(Ok(())) => {
+            if let Some(message) = request.toast_success_message() {
+                state.push_success_toast(message);
+            }
+        }
+        Ok(Err(err)) => {
+            tracing::error!("Failed to handle client request: {err:#}");
+            if request.is_toastable() {
+                state.push_error_toast(format!("Failed: {err:#}"));
+            }
+        }
+        Err(_) => {
+            tracing::error!("Timed out after {CLIENT_REQUEST_TIMEOUT:?} handling client request");
+            if request.is_toastable() {
+                state.push_error_toast(format!("Timed out after {CLIENT_REQUEST_TIMEOUT:?}"));
+            }
         }
     }
 }

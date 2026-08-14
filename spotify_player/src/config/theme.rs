@@ -81,6 +81,8 @@ struct ComponentStyle {
     like: Option<Style>,
     lyrics_played: Option<Style>,
     lyrics_playing: Option<Style>,
+    toast_success: Option<Style>,
+    toast_error: Option<Style>,
 }
 
 #[derive(Default, Clone, Debug, Deserialize)]
@@ -369,6 +371,30 @@ impl Theme {
             .unwrap_or(
                 &Style::default()
                     .fg(StyleColor::Green)
+                    .modifiers([StyleModifier::Bold]),
+            )
+            .style(&self.palette)
+    }
+
+    pub fn toast_success(&self) -> style::Style {
+        self.component_style
+            .toast_success
+            .as_ref()
+            .unwrap_or(
+                &Style::default()
+                    .fg(StyleColor::Green)
+                    .modifiers([StyleModifier::Bold]),
+            )
+            .style(&self.palette)
+    }
+
+    pub fn toast_error(&self) -> style::Style {
+        self.component_style
+            .toast_error
+            .as_ref()
+            .unwrap_or(
+                &Style::default()
+                    .fg(StyleColor::Red)
                     .modifiers([StyleModifier::Bold]),
             )
             .style(&self.palette)

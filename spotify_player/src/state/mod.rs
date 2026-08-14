@@ -67,6 +67,20 @@ impl State {
         }
     }
 
+    pub fn push_success_toast(&self, message: impl Into<String>) {
+        if self.is_daemon {
+            return;
+        }
+        self.ui.lock().push_success_toast(message);
+    }
+
+    pub fn push_error_toast(&self, message: impl Into<String>) {
+        if self.is_daemon {
+            return;
+        }
+        self.ui.lock().push_error_toast(message);
+    }
+
     #[cfg(feature = "streaming")]
     pub fn is_streaming_enabled(&self) -> bool {
         let configs = config::get_config();

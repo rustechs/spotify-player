@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ratatui::layout::Rect;
 
@@ -22,6 +22,24 @@ pub struct Toast {
     pub message: String,
     /// `None` means sticky (errors). Success toasts set an expiry.
     pub expires_at: Option<Instant>,
+}
+
+impl Toast {
+    pub fn success(message: impl Into<String>, timeout: Duration) -> Self {
+        Self {
+            kind: ToastKind::Success,
+            message: message.into(),
+            expires_at: Some(Instant::now() + timeout),
+        }
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            kind: ToastKind::Error,
+            message: message.into(),
+            expires_at: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -78,6 +96,11 @@ impl ToastQueue {
     pub fn dismiss_current(&mut self) {
         self.items.pop_front();
     }
+}
+
+/// Whether a toast should be stored. Daemon and `enable_toast = false` skip enqueue.
+pub(crate) fn should_enqueue_toast(enable_toast: bool, is_daemon: bool) -> bool {
+    enable_toast && !is_daemon
 }
 
 /// If a popup is open, close it and leave the toast queue alone.

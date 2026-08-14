@@ -62,8 +62,7 @@ pub enum ClientRequest {
 }
 
 impl ClientRequest {
-    /// Mutating library/queue/playlist actions that should enqueue a TUI toast.
-    #[allow(dead_code)] // Phase 0: used by tests; handlers enqueue after the Phase 0 gate
+    /// Mutating library/queue/playlist actions, plus skip next/previous.
     pub fn is_toastable(&self) -> bool {
         match self {
             Self::AddPlayableToQueue(_)
@@ -73,7 +72,8 @@ impl ClientRequest {
             | Self::ReorderPlaylistItems { .. }
             | Self::AddToLibrary(_)
             | Self::DeleteFromLibrary(_)
-            | Self::CreatePlaylist { .. } => true,
+            | Self::CreatePlaylist { .. }
+            | Self::Player(PlayerRequest::NextTrack | PlayerRequest::PreviousTrack) => true,
             Self::GetCurrentUser
             | Self::GetDevices
             | Self::GetBrowseCategories
@@ -90,6 +90,38 @@ impl ClientRequest {
             | Self::GetLyrics { .. } => false,
             #[cfg(feature = "streaming")]
             Self::RestartIntegratedClient => false,
+        }
+    }
+
+    pub fn toast_success_message(&self) -> Option<&'static str> {
+        match self {
+            Self::AddPlayableToQueue(_) | Self::AddAlbumToQueue(_) => Some("Added to queue"),
+            Self::AddPlayableToPlaylist(_, _) => Some("Added to playlist"),
+            Self::DeleteTrackFromPlaylist(_, _) => Some("Removed from playlist"),
+            Self::ReorderPlaylistItems { .. } => Some("Reordered playlist"),
+            Self::AddToLibrary(Item::Track(_)) => Some("Liked"),
+            Self::AddToLibrary(_) => Some("Added to library"),
+            Self::DeleteFromLibrary(ItemId::Track(_)) => Some("Unliked"),
+            Self::DeleteFromLibrary(_) => Some("Removed from library"),
+            Self::CreatePlaylist { .. } => Some("Created playlist"),
+            Self::Player(PlayerRequest::NextTrack) => Some("Skipped to next"),
+            Self::Player(PlayerRequest::PreviousTrack) => Some("Skipped to previous"),
+            Self::GetCurrentUser
+            | Self::GetDevices
+            | Self::GetBrowseCategories
+            | Self::GetBrowseCategoryPlaylists(_)
+            | Self::GetUserPlaylists
+            | Self::GetUserSavedAlbums
+            | Self::GetUserSavedShows
+            | Self::GetUserFollowedArtists
+            | Self::GetContext(_)
+            | Self::GetCurrentPlayback
+            | Self::Search(_)
+            | Self::Player(_)
+            | Self::GetCurrentUserQueue
+            | Self::GetLyrics { .. } => None,
+            #[cfg(feature = "streaming")]
+            Self::RestartIntegratedClient => None,
         }
     }
 }
@@ -149,6 +181,8 @@ mod tests {
                 collab: false,
                 desc: String::new(),
             },
+            ClientRequest::Player(PlayerRequest::NextTrack),
+            ClientRequest::Player(PlayerRequest::PreviousTrack),
         ];
         for req in &toastable {
             assert!(req.is_toastable(), "expected toastable: {req:?}");
@@ -184,5 +218,18 @@ mod tests {
 
         #[cfg(feature = "streaming")]
         assert!(!ClientRequest::RestartIntegratedClient.is_toastable());
+
+        assert_eq!(
+            ClientRequest::Player(PlayerRequest::NextTrack).toast_success_message(),
+            Some("Skipped to next")
+        );
+        assert_eq!(
+            ClientRequest::Player(PlayerRequest::PreviousTrack).toast_success_message(),
+            Some("Skipped to previous")
+        );
+        assert_eq!(
+            ClientRequest::AddPlayableToQueue(playable).toast_success_message(),
+            Some("Added to queue")
+        );
     }
 }
