@@ -283,7 +283,7 @@ With the `system-audio-visualization` feature (enabled by default in this fork o
 
 Set `enable_audio_visualization` to `true` in your config to enable this feature. See [config docs](./docs/config.md).
 
-With the `image` feature also enabled, the cover sits in the top-right of the playback window and may overlap the visualizer's top-right corner; metadata stays on the left, indented one column left of the chart's vertical axis.
+With the `image` feature also enabled, the cover sits in the top-right of the playback window and may overlap the visualizer's top-right corner. Track/album/genre text stays on the left, indented one column left of the chart's vertical axis; repeat/shuffle/volume/device stay on a full-width row under the progress bar.
 
 ![Audio Visualization](./media/audio-visualization.png)
 
