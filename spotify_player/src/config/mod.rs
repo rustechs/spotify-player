@@ -246,7 +246,8 @@ pub struct DeviceConfig {
 /// Linux helpers for waking the official Spotify desktop Connect endpoint.
 pub struct DesktopSpotifyConfig {
     /// When true, start Spotify if needed and MPRIS-nudge it during playback init
-    /// (and via `spotify_player wake-desktop`) so Connect lists the device.
+    /// (and via `spotify_player wake-desktop`) when `preferred_device` is missing
+    /// from Connect (or when no devices are listed if `preferred_device` is unset).
     pub enable: bool,
     /// Executable used to launch the desktop client (`spotify`, absolute path, etc.).
     pub command: String,
@@ -259,8 +260,15 @@ pub struct DesktopSpotifyConfig {
     /// played is tried, then bare `Play`.
     pub nudge_uri: Option<String>,
     /// Pause immediately after the wake nudge so Connect can see the device
-    /// without leaving audio playing.
+    /// without leaving audio playing. Defaults to `false` so the nudged
+    /// playback remains audible.
     pub pause_after_nudge: bool,
+    /// Hide the official client to the system tray after this helper launches it.
+    /// Linux Spotify ignores its `--minimized` flag; with Spotify's own
+    /// "Minimize to the tray" setting (`ui.minimize_to_tray`), closing the
+    /// window parks it in the tray via `xdotool`. Falls back to taskbar
+    /// minimize when that pref is off.
+    pub start_minimized: bool,
     /// How long to wait for MPRIS after launching Spotify.
     pub ready_timeout_secs: u64,
 }
@@ -488,7 +496,8 @@ impl Default for DesktopSpotifyConfig {
             args: Vec::new(),
             mpris_dest: "org.mpris.MediaPlayer2.spotify".to_string(),
             nudge_uri: None,
-            pause_after_nudge: true,
+            pause_after_nudge: false,
+            start_minimized: true,
             ready_timeout_secs: 45,
         }
     }

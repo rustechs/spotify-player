@@ -240,7 +240,7 @@ After changing the client ID, re-run `spotify_player authenticate` to refresh th
 
 Control Spotify remotely with [Spotify Connect](https://support.spotify.com/us/article/spotify-connect/). Press **D** to list devices, then **enter** to connect.
 
-On Linux, when `enable_streaming = "Never"` and you control the official desktop client via `preferred_device`, that app is often missing from Connect until local playback starts. Enable `[desktop_spotify]` in `app.toml` so startup launches Spotify if needed and MPRIS-nudges it (or run `spotify_player wake-desktop`). See [docs/config.md](./docs/config.md#desktop-spotify-wake-linux).
+On Linux, when `enable_streaming = "Never"` and you control the official desktop client via `preferred_device`, that app is often missing from Connect until local playback starts. Enable `[desktop_spotify]` in `app.toml` so startup visibly reports, launches, optionally hides to the system tray, and MPRIS-nudges Spotify whenever the preferred device is absent (even if another speaker such as Amazon Everywhere is active), then transfers to the woken client once Connect lists it. Or run `spotify_player wake-desktop`. See [docs/config.md](./docs/config.md#desktop-spotify-wake-linux).
 
 ### Streaming
 

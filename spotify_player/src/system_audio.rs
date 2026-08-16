@@ -12,7 +12,7 @@ use crate::{
     vis::{BandProcessor, VisBands},
 };
 use anyhow::{anyhow, Context, Result};
-use libpulse_binding::{sample, stream};
+use libpulse_binding::{def::BufferAttr, sample, stream};
 use libpulse_simple_binding::Simple;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -24,6 +24,9 @@ const CHANNELS: u8 = 2;
 const BYTES_PER_SAMPLE: usize = 4; // f32
 /// Stereo float frames per `Simple::read` call (~10 ms at 48 kHz).
 const READ_FRAMES: usize = 480;
+/// Bytes per read fragment. Pulse defaults `fragsize` to ~2s when left unset,
+/// which leaves the visualizer draining buffered silence after playback starts.
+const CAPTURE_FRAGSIZE: u32 = (READ_FRAMES * CHANNELS as usize * BYTES_PER_SAMPLE) as u32;
 const RETRY_DELAY: Duration = Duration::from_millis(500);
 const IDLE_POLL: Duration = Duration::from_millis(100);
 
@@ -145,6 +148,17 @@ fn open_capture(source: &str) -> Result<Simple> {
         return Err(anyhow!("invalid Pulse sample spec"));
     }
 
+    // Keep the record fragment near one read (~10 ms). The Pulse default is on
+    // the order of two seconds, which shows up as a dead gap after the intro
+    // decay while old silence is still being drained from the capture buffer.
+    let attr = BufferAttr {
+        maxlength: u32::MAX,
+        tlength: u32::MAX,
+        prebuf: u32::MAX,
+        minreq: u32::MAX,
+        fragsize: CAPTURE_FRAGSIZE,
+    };
+
     Simple::new(
         None,
         "spotify-player",
@@ -153,7 +167,7 @@ fn open_capture(source: &str) -> Result<Simple> {
         "System audio visualization",
         &spec,
         None,
-        None,
+        Some(&attr),
     )
     .map_err(|e| anyhow!("Pulse Simple::new: {e}"))
 }

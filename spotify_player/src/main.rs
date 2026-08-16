@@ -113,6 +113,19 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
         }
     }
 
+    // Start local-only helpers before authentication/session setup. Both Spotify
+    // desktop startup and Pulse capture can warm up while network work proceeds.
+    #[cfg(target_os = "linux")]
+    {
+        let desktop = config::get_config().app_config.desktop_spotify.clone();
+        if let Err(err) = desktop_spotify::launch_early_if_needed(&desktop) {
+            tracing::warn!("Failed to start Spotify desktop early: {err:#}");
+        }
+    }
+
+    #[cfg(all(feature = "system-audio-visualization", target_os = "linux"))]
+    system_audio::start(state);
+
     // create a Spotify API client
     let client = client::AppClient::new()
         .await
@@ -170,9 +183,6 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
                 client::start_player_event_watcher(&state, &client_pub);
             }
         })?;
-
-    #[cfg(all(feature = "system-audio-visualization", target_os = "linux"))]
-    system_audio::start(state);
 
     if !state.is_daemon {
         #[cfg(feature = "image")]

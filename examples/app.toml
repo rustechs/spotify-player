@@ -49,7 +49,8 @@ autoplay = false
 # args = []
 # mpris_dest = "org.mpris.MediaPlayer2.spotify"
 # nudge_uri = "spotify:track:4iV5W9uYEdYUVa79Axb7Rh"
-# pause_after_nudge = true
+# pause_after_nudge = false
+# start_minimized = true
 # ready_timeout_secs = 45
 
 [layout]

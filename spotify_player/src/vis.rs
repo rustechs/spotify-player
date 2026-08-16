@@ -88,12 +88,18 @@ impl VisBands {
     ///
     /// The UI blends this with live FFT data so bars appear immediately with the
     /// axes, then fall using the same render-side decay as music response.
+    ///
+    /// Also resets the peak envelope so a stale peak from the previous item
+    /// cannot keep fresh bars near the floor for several seconds.
     pub fn arm_intro_for_item(&mut self, item_key: &str) {
         if self.intro_item_key.as_deref() == Some(item_key) {
             return;
         }
         self.intro_item_key = Some(item_key.to_string());
         self.intro_started_at = Some(Instant::now());
+        self.values.fill(0.0);
+        self.peak_envelope = 1e-6;
+        self.updated_at = Instant::now();
     }
 
     /// Clear intro state when no track is loaded.
