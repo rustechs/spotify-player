@@ -3,6 +3,8 @@ mod cli;
 mod client;
 mod command;
 mod config;
+#[cfg(target_os = "linux")]
+mod desktop_spotify;
 mod event;
 mod key;
 mod log_layer;

@@ -218,6 +218,34 @@ pub fn handle_cli_subcommand(cmd: &str, args: &ArgMatches) -> Result<()> {
             print_features();
             std::process::exit(0);
         }
+        "wake-desktop" => {
+            #[cfg(target_os = "linux")]
+            {
+                let desktop = configs.app_config.desktop_spotify.clone();
+                if !desktop.enable {
+                    eprintln!(
+                        "desktop_spotify.enable is false; set [desktop_spotify] enable = true in app.toml"
+                    );
+                    std::process::exit(1);
+                }
+                let rt = tokio::runtime::Runtime::new()?;
+                // CLI wake has no authenticated client for recently-played fallback.
+                let nudge_uri =
+                    crate::desktop_spotify::resolve_nudge_uri(desktop.nudge_uri.as_deref(), None);
+                rt.block_on(crate::desktop_spotify::ensure_awake(
+                    &desktop,
+                    nudge_uri.as_deref(),
+                ))
+                .context("wake desktop Spotify")?;
+                println!("Desktop Spotify woke (MPRIS nudged).");
+                std::process::exit(0);
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                eprintln!("wake-desktop is only supported on Linux");
+                std::process::exit(1);
+            }
+        }
         _ => {}
     }
 

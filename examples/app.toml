@@ -42,6 +42,16 @@ audio_cache = false
 normalization = false
 autoplay = false
 
+# Linux: launch/nudge official desktop Spotify when Connect cannot see it yet
+# [desktop_spotify]
+# enable = true
+# command = "spotify"
+# args = []
+# mpris_dest = "org.mpris.MediaPlayer2.spotify"
+# nudge_uri = "spotify:track:4iV5W9uYEdYUVa79Axb7Rh"
+# pause_after_nudge = true
+# ready_timeout_secs = 45
+
 [layout]
 library = { playlist_percent = 40, album_percent = 40 }
 playback_window_position = "Top"

@@ -9,6 +9,12 @@ pub fn init_connect_subcommand() -> Command {
     add_id_or_name_group(Command::new("connect").about("Connect to a Spotify device"))
 }
 
+pub fn init_wake_desktop_command() -> Command {
+    Command::new("wake-desktop").about(
+        "Launch the official Spotify desktop app if needed and MPRIS-nudge it so Connect can see it (Linux)",
+    )
+}
+
 pub fn init_get_subcommand() -> Command {
     Command::new("get")
         .about("Get Spotify data")
