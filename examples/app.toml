@@ -42,7 +42,7 @@ audio_cache = false
 normalization = false
 autoplay = false
 
-# Linux: launch/nudge official desktop Spotify when Connect cannot see it yet
+# Linux: launch/nudge official desktop Spotify when preferred is missing or idle/paused in the tray
 # [desktop_spotify]
 # enable = true
 # command = "spotify"

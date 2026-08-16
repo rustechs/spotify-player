@@ -280,7 +280,30 @@ impl AppClient {
                         let should_wake = if desktop_prelaunched {
                             true
                         } else {
-                            match desktop_wake_needed(&client).await {
+                            let (preferred_actively_playing, other_actively_playing) = {
+                                let preferred = config::get_config()
+                                    .app_config
+                                    .preferred_device
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty());
+                                match state.player.read().playback.as_ref() {
+                                    Some(p) if p.is_playing => {
+                                        let on_preferred = preferred.is_some_and(|name| {
+                                            p.device.name.eq_ignore_ascii_case(name)
+                                        });
+                                        (on_preferred, !on_preferred)
+                                    }
+                                    _ => (false, false),
+                                }
+                            };
+                            match desktop_wake_needed(
+                                &client,
+                                preferred_actively_playing,
+                                other_actively_playing,
+                            )
+                            .await
+                            {
                                 Ok(needed) => needed,
                                 Err(err) => {
                                     tracing::warn!(
@@ -293,8 +316,13 @@ impl AppClient {
                         if should_wake {
                             let outcome = wake_desktop_spotify_if_enabled(&client, &state).await;
                             woke_desktop = outcome.is_some();
-                            minimize_after_transfer =
-                                outcome.is_some_and(|o| o.launched && o.minimized);
+                            // Re-hide after Connect transfer even when we only nudged an
+                            // already-running tray instance (transfer can map the window).
+                            minimize_after_transfer = outcome.is_some()
+                                && config::get_config()
+                                    .app_config
+                                    .desktop_spotify
+                                    .start_minimized;
                             if woke_desktop {
                                 woke_for_preferred = config::get_config()
                                     .app_config
@@ -2371,7 +2399,7 @@ async fn wake_desktop_spotify_if_enabled(
             "Preferred device unavailable — starting Spotify desktop automatically…",
         );
     } else {
-        state.push_success_toast("Preferred device unavailable — waking Spotify desktop…");
+        state.push_success_toast("Waking Spotify desktop…");
     }
 
     let recent_uri = match client.current_user_recently_played_tracks().await {
@@ -2409,10 +2437,16 @@ async fn wake_desktop_spotify_if_enabled(
 /// Whether playback init should launch/nudge the official desktop Spotify client.
 ///
 /// - With `preferred_device`: wake when that name is absent from Connect (even if
-///   other devices like smart speakers are listed).
+///   other devices like smart speakers are listed), **or** when it is listed but
+///   not actively playing (typical idle/paused tray/autostart client). Do not nudge
+///   merely to steal from another device that is already playing while preferred is listed.
 /// - Without `preferred_device`: wake only when the transferable device list is empty.
 #[cfg(target_os = "linux")]
-async fn desktop_wake_needed(client: &AppClient) -> Result<bool> {
+async fn desktop_wake_needed(
+    client: &AppClient,
+    preferred_actively_playing: bool,
+    other_actively_playing: bool,
+) -> Result<bool> {
     let configs = config::get_config();
     if !configs.app_config.desktop_spotify.enable {
         return Ok(false);
@@ -2431,16 +2465,46 @@ async fn desktop_wake_needed(client: &AppClient) -> Result<bool> {
             .iter()
             .filter_map(|d| Some((d.id.as_deref()?, d.name.as_str())));
         let present = preferred_device_id(pairs, name).is_some();
-        if !present {
-            tracing::info!(
-                "Preferred Connect device `{name}` not listed; will wake desktop Spotify"
-            );
+        let needed =
+            should_wake_for_preferred(present, preferred_actively_playing, other_actively_playing);
+        if needed {
+            if present {
+                tracing::info!(
+                    "Preferred Connect device `{name}` is listed but idle; will nudge desktop Spotify"
+                );
+            } else {
+                tracing::info!(
+                    "Preferred Connect device `{name}` not listed; will wake desktop Spotify"
+                );
+            }
         }
-        Ok(!present)
+        Ok(needed)
     } else {
         let ids = client.find_available_device_ids().await?;
         Ok(ids.is_empty())
     }
+}
+
+/// Decide whether a preferred desktop Connect endpoint still needs an MPRIS wake.
+///
+/// Autostart often leaves the official client in the tray with the preferred name
+/// already registered and paused. Skipping the nudge then leaves Connect/TUI stuck
+/// until the user hits play in the GUI.
+#[cfg(any(test, target_os = "linux"))]
+fn should_wake_for_preferred(
+    preferred_present: bool,
+    preferred_actively_playing: bool,
+    other_actively_playing: bool,
+) -> bool {
+    if !preferred_present {
+        return true;
+    }
+    if preferred_actively_playing {
+        return false;
+    }
+    // Listed but not playing on preferred. Nudge idle/paused tray clients, but do
+    // not steal when another speaker already owns active audio.
+    !other_actively_playing
 }
 
 /// Find the Connect id of `preferred` among `devices`, given as `(id, name)` pairs.
@@ -2612,7 +2676,8 @@ mod tests {
     use super::{
         clear_memory_caches_on_new_session, device_ids_after_wake, move_seed_track_to_front,
         order_transfer_device_ids, preferred_device_id, process_spotify_api_response,
-        rate_limit_backoff, should_select_device, DeviceIdsAfterWake, MAX_RETRY_AFTER,
+        rate_limit_backoff, should_select_device, should_wake_for_preferred, DeviceIdsAfterWake,
+        MAX_RETRY_AFTER,
     };
     use crate::state::{Device, Track};
     use rspotify::model::TrackId;
@@ -2727,6 +2792,19 @@ mod tests {
         assert!(!should_select_device(true, false));
         assert!(should_select_device(true, true));
         assert!(should_select_device(false, false));
+    }
+
+    #[test]
+    fn idle_preferred_device_still_needs_mpris_nudge() {
+        // Missing from Connect → always wake (even if another speaker is playing).
+        assert!(should_wake_for_preferred(false, false, false));
+        assert!(should_wake_for_preferred(false, false, true));
+        // Listed + actively playing on preferred → leave alone.
+        assert!(!should_wake_for_preferred(true, true, false));
+        // Listed + paused/idle → nudge the tray client.
+        assert!(should_wake_for_preferred(true, false, false));
+        // Listed while another device is actively playing → do not steal.
+        assert!(!should_wake_for_preferred(true, false, true));
     }
 
     #[test]

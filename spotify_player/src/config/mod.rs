@@ -135,8 +135,8 @@ pub struct AppConfig {
     /// Especially useful with `enable_streaming = "Never"`.
     pub preferred_device: Option<String>,
 
-    /// Linux: launch/nudge the official desktop Spotify client so Connect can
-    /// see it (often invisible until local playback starts).
+    /// Linux: launch/nudge the official desktop Spotify client when preferred is
+    /// missing from Connect or listed but idle/paused (e.g. tray after autostart).
     pub desktop_spotify: DesktopSpotifyConfig,
 
     pub device: DeviceConfig,
@@ -247,7 +247,8 @@ pub struct DeviceConfig {
 pub struct DesktopSpotifyConfig {
     /// When true, start Spotify if needed and MPRIS-nudge it during playback init
     /// (and via `spotify_player wake-desktop`) when `preferred_device` is missing
-    /// from Connect (or when no devices are listed if `preferred_device` is unset).
+    /// from Connect or listed but not actively playing (or when no devices are
+    /// listed if `preferred_device` is unset).
     pub enable: bool,
     /// Executable used to launch the desktop client (`spotify`, absolute path, etc.).
     pub command: String,
@@ -263,11 +264,11 @@ pub struct DesktopSpotifyConfig {
     /// without leaving audio playing. Defaults to `false` so the nudged
     /// playback remains audible.
     pub pause_after_nudge: bool,
-    /// Hide the official client to the system tray after this helper launches it.
-    /// Linux Spotify ignores its `--minimized` flag; with Spotify's own
-    /// "Minimize to the tray" setting (`ui.minimize_to_tray`), closing the
-    /// window parks it in the tray via `xdotool`. Falls back to taskbar
-    /// minimize when that pref is off.
+    /// Hide the official client to the system tray after launch or nudge (and
+    /// again after Connect transfer if the window remaps). Linux Spotify ignores
+    /// its `--minimized` flag; with Spotify's own "Minimize to the tray" setting
+    /// (`ui.minimize_to_tray`), closing the window parks it in the tray via
+    /// `xdotool`. Falls back to taskbar minimize when that pref is off.
     pub start_minimized: bool,
     /// How long to wait for MPRIS after launching Spotify.
     pub ready_timeout_secs: u64,

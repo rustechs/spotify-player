@@ -1,10 +1,11 @@
 //! Launch and MPRIS-nudge the official Spotify desktop client (Linux).
 //!
 //! Spotify Connect often omits the desktop app from `/v1/me/player/devices`
-//! until it has joined a playback session. With `enable_streaming = "Never"`,
-//! that leaves `spotify_player` unable to transfer until the user hits play in
-//! the GUI. This module starts the client if needed and wakes it via MPRIS
-//! (`Play` / `OpenUri`) so Connect can see it.
+//! until it has joined a playback session — or lists an idle/paused tray client
+//! after autostart that still cannot accept control until nudged. With
+//! `enable_streaming = "Never"`, that leaves `spotify_player` unable to transfer
+//! until the user hits play in the GUI. This module starts the client if needed
+//! and wakes it via MPRIS (`Play` / `OpenUri`) so Connect can use it.
 
 use std::{
     fs,
@@ -118,8 +119,10 @@ pub async fn ensure_awake(
     }
 
     nudge(dest, nudge_uri, config.pause_after_nudge)?;
-    let minimized = if launched && config.start_minimized {
+    let minimized = if config.start_minimized {
         // Prefer tray hide once MPRIS (and usually the tray icon) is up.
+        // Also run when we only nudged an already-running instance — Connect
+        // transfer / OpenUri can map a window that was parked in the tray.
         hide_window().await
     } else {
         false
