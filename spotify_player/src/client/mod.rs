@@ -246,6 +246,13 @@ impl AppClient {
                             "No transferable Spotify Connect device found (attempt {})",
                             attempt + 1
                         );
+
+                        #[cfg(target_os = "linux")]
+                        if attempt == 0 {
+                            wake_desktop_spotify_if_enabled(&client).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                        }
+
                         continue;
                     }
 
@@ -2234,6 +2241,32 @@ fn parse_retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
         .ok()?
         .parse()
         .ok()
+}
+
+#[cfg(target_os = "linux")]
+async fn wake_desktop_spotify_if_enabled(client: &AppClient) {
+    let desktop = config::get_config().app_config.desktop_spotify.clone();
+    if !desktop.enable {
+        return;
+    }
+
+    let recent_uri = match client.current_user_recently_played_tracks().await {
+        Ok(tracks) => tracks.first().map(|t| t.id.uri()),
+        Err(err) => {
+            tracing::warn!("Failed to fetch recently played for desktop wake URI: {err:#}");
+            None
+        }
+    };
+
+    let nudge_uri = crate::desktop_spotify::resolve_nudge_uri(
+        desktop.nudge_uri.as_deref(),
+        recent_uri.as_deref(),
+    );
+
+    match crate::desktop_spotify::ensure_awake(&desktop, nudge_uri.as_deref()).await {
+        Ok(()) => tracing::info!("Desktop Spotify wake completed"),
+        Err(err) => tracing::warn!("Desktop Spotify wake failed: {err:#}"),
+    }
 }
 
 /// Order Connect device IDs for transfer attempts.

@@ -240,6 +240,8 @@ After changing the client ID, re-run `spotify_player authenticate` to refresh th
 
 Control Spotify remotely with [Spotify Connect](https://support.spotify.com/us/article/spotify-connect/). Press **D** to list devices, then **enter** to connect.
 
+On Linux, when `enable_streaming = "Never"` and you control the official desktop client via `preferred_device`, that app is often missing from Connect until local playback starts. Enable `[desktop_spotify]` in `app.toml` so startup launches Spotify if needed and MPRIS-nudges it (or run `spotify_player wake-desktop`). See [docs/config.md](./docs/config.md#desktop-spotify-wake-linux).
+
 ### Streaming
 
 Stream music directly from the terminal. The streaming feature is enabled by default and uses the `rodio-backend` audio backend unless otherwise specified.
@@ -393,6 +395,7 @@ To enable [fuzzy search](https://en.wikipedia.org/wiki/Approximate_string_matchi
 - `playback`: Interact with the playback (start a playback, play-pause, next, etc)
 - `search`: Search spotify
 - `connect`: Connect to a Spotify device
+- `wake-desktop`: Launch/nudge the official Spotify desktop app so Connect can see it (Linux; requires `[desktop_spotify] enable = true`)
 - `like`: Like currently playing track
 - `authenticate`: Authenticate the application
 - `playlist`: Playlist editing (new, delete, import, fork, etc)

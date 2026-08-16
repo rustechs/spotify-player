@@ -8,6 +8,7 @@
   - [Player event hook command](#player-event-hook-command)
   - [Client id command](#client-id-command)
   - [Device configurations](#device-configurations)
+  - [Desktop Spotify wake (Linux)](#desktop-spotify-wake-linux)
   - [Layout configurations](#layout-configurations)
 - [Themes](#themes)
   - [Use script to add theme](#use-script-to-add-theme)
@@ -56,6 +57,7 @@ spotify_player -o device.volume=80 -o theme=dracula
 | `enable_notify`                   | Enable notifications (requires `notify` feature).                                                    | `true`                                                                 |
 | `enable_cover_image_cache`        | Cache album cover images.                                                                            | `true`                                                                 |
 | `preferred_device`                | Prefer transferring playback to a Connect device with this name when none is active (useful with `enable_streaming = "Never"`). | unset |
+| `desktop_spotify`                 | Linux: launch/nudge the official desktop Spotify client so Connect lists it (see below). | disabled |
 | `notify_streaming_only`           | Send notifications only when streaming is active (requires `streaming` and `notify` features).       | `false`                                                                |
 | `play_icon`                       | Icon for playing state.                                                                              | `▶`                                                                    |
 | `pause_icon`                      | Icon for paused state.                                                                               | `▌▌`                                                                   |
@@ -87,6 +89,7 @@ spotify_player -o device.volume=80 -o theme=dracula
 - Setting a positive `playback_refresh_duration_in_ms` increases API usage and may trigger rate limits. By default it is `0` (refresh playback only on events or commands). When `enable_streaming = "Never"`, a `0` value still falls back to a light 5s poll so external Connect track/device changes appear without manual `Ctrl-R`.
 - `enable_streaming` accepts `Always`, `Never`, or `DaemonOnly`. For backward compatibility, `true`/`false` are also accepted.
 - When `enable_streaming = "Never"`, the app will not invent a synthetic integrated Connect device (which previously caused HTTP 404 transfer loops). Set `preferred_device` to your desktop client's name (e.g. `"estelle"`) so startup transfers target that device.
+- On Linux, the official desktop Spotify app often stays invisible to Connect until local playback starts. Enable `[desktop_spotify]` (`enable = true`) to launch Spotify if needed and MPRIS-nudge it during playback init (or run `spotify_player wake-desktop`). Optional `nudge_uri` forces `OpenUri`; otherwise recently played is used, then bare `Play`. `pause_after_nudge` (default true) pauses after the wake so audio does not keep playing.
 - Repeat, shuffle, volume, and device are drawn on the last inner row of the playback block (order from `playback_metadata_fields`), spread across the full width, with a solid bottom border underneath. `{metadata}` in `playback_format` is ignored so those fields are not duplicated. With `enable_audio_visualization` enabled, `progress_bar_position` is ignored and the progress bar is always rendered below the visualization.
 - `explicit_icon` can be set to any Unicode character or an empty string to disable explicit markers.
 - `cover_img_length = 0` (the default) auto-derives the cover's column count from the terminal's cell aspect ratio. Set a non-zero `cover_img_length` to size the box manually.
@@ -155,6 +158,20 @@ Device options are configured in the `[device]` section:
 | `autoplay`      | Enable autoplay of similar songs.        | `false`          |
 
 See the [Librespot wiki](https://github.com/librespot-org/librespot/wiki/Options) for more details on these options.
+
+### Desktop Spotify wake (Linux)
+
+Options in the `[desktop_spotify]` section launch and/or MPRIS-nudge the official desktop client when Connect cannot see it yet (common with `enable_streaming = "Never"` + `preferred_device`):
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `enable` | Run wake during playback init when no Connect device is found; also required for `spotify_player wake-desktop`. | `false` |
+| `command` | Desktop client executable. | `spotify` |
+| `args` | Extra launch arguments. | `[]` |
+| `mpris_dest` | MPRIS D-Bus name. | `org.mpris.MediaPlayer2.spotify` |
+| `nudge_uri` | Optional `OpenUri` target (`spotify:…` or open.spotify.com URL). If unset, recently played is used at TUI startup, else bare `Play`. | unset |
+| `pause_after_nudge` | Pause after the wake so Connect registers the device without leaving audio playing. | `true` |
+| `ready_timeout_secs` | Max wait for MPRIS after launch. | `45` |
 
 ### Layout configuration
 

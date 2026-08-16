@@ -172,6 +172,7 @@ pub fn init_cli() -> anyhow::Result<clap::Command> {
         .subcommand(commands::init_get_subcommand())
         .subcommand(commands::init_playback_subcommand())
         .subcommand(commands::init_connect_subcommand())
+        .subcommand(commands::init_wake_desktop_command())
         .subcommand(commands::init_like_command())
         .subcommand(commands::init_authenticate_command())
         .subcommand(commands::init_playlist_subcommand())

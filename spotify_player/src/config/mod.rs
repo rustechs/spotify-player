@@ -135,6 +135,10 @@ pub struct AppConfig {
     /// Especially useful with `enable_streaming = "Never"`.
     pub preferred_device: Option<String>,
 
+    /// Linux: launch/nudge the official desktop Spotify client so Connect can
+    /// see it (often invisible until local playback starts).
+    pub desktop_spotify: DesktopSpotifyConfig,
+
     pub device: DeviceConfig,
 
     #[cfg(all(feature = "streaming", feature = "notify"))]
@@ -235,6 +239,30 @@ pub struct DeviceConfig {
     pub audio_cache: bool,
     pub normalization: bool,
     pub autoplay: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, ConfigParse, Clone)]
+#[serde(default)]
+/// Linux helpers for waking the official Spotify desktop Connect endpoint.
+pub struct DesktopSpotifyConfig {
+    /// When true, start Spotify if needed and MPRIS-nudge it during playback init
+    /// (and via `spotify_player wake-desktop`) so Connect lists the device.
+    pub enable: bool,
+    /// Executable used to launch the desktop client (`spotify`, absolute path, etc.).
+    pub command: String,
+    /// Extra args passed to `command` on launch.
+    pub args: Vec<String>,
+    /// MPRIS D-Bus well-known name for the desktop client.
+    pub mpris_dest: String,
+    /// Optional URI for `OpenUri` when there is no loaded context
+    /// (`spotify:track:…` or `https://open.spotify.com/…`). If unset, recently
+    /// played is tried, then bare `Play`.
+    pub nudge_uri: Option<String>,
+    /// Pause immediately after the wake nudge so Connect can see the device
+    /// without leaving audio playing.
+    pub pause_after_nudge: bool,
+    /// How long to wait for MPRIS after launching Spotify.
+    pub ready_timeout_secs: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize, ConfigParse, Clone)]
@@ -411,6 +439,8 @@ impl Default for AppConfig {
 
             preferred_device: None,
 
+            desktop_spotify: DesktopSpotifyConfig::default(),
+
             device: DeviceConfig::default(),
 
             #[cfg(all(feature = "streaming", feature = "notify"))]
@@ -446,6 +476,20 @@ impl Default for DeviceConfig {
             audio_cache: false,
             normalization: false,
             autoplay: false,
+        }
+    }
+}
+
+impl Default for DesktopSpotifyConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            command: "spotify".to_string(),
+            args: Vec::new(),
+            mpris_dest: "org.mpris.MediaPlayer2.spotify".to_string(),
+            nudge_uri: None,
+            pause_after_nudge: true,
+            ready_timeout_secs: 45,
         }
     }
 }

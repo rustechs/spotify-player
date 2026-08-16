@@ -33,6 +33,7 @@ This file guides Claude Code when working in this repository.
 | `vis.rs`                      | Shared FFT state/processor: `VisBands`, `BandProcessor` (feature-gated)     |
 | `ui/streaming.rs`             | librespot `VisualizationSink` + spectrum bar-chart render (feature-gated)   |
 | `streaming.rs`                | librespot connection + audio backend setup (feature-gated)                  |
+| `desktop_spotify.rs`          | Linux: launch/MPRIS-nudge official desktop Spotify for Connect visibility   |
 | `system_audio.rs`             | PipeWire/Pulse monitor capture for Connect-device visualization (Linux; `system-audio-visualization` feature) |
 | `cli/`                        | Unix socket server and client for inter-process CLI commands                |
 | `auth.rs`                     | OAuth scopes and librespot credential/session building                      |
