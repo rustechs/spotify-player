@@ -2444,6 +2444,11 @@ async fn desktop_wake_needed(client: &AppClient) -> Result<bool> {
 }
 
 /// Find the Connect id of `preferred` among `devices`, given as `(id, name)` pairs.
+///
+/// Compiled on Linux (production wake path) and under `cfg(test)` so unit tests
+/// can exercise matching on every CI host. The non-test macOS/Windows binary
+/// never calls this helper.
+#[cfg(any(test, target_os = "linux"))]
 fn preferred_device_id<'a>(
     devices: impl IntoIterator<Item = (&'a str, &'a str)>,
     preferred: &str,
