@@ -35,9 +35,11 @@ pub fn render_toasts(frame: &mut Frame, ui: &UIStateGuard, content: Rect) {
         .title(title);
     let inner = block.inner(body);
     frame.render_widget(block, body);
+    // Body text is not bold so wrapped lines stay within the box; terminals
+    // often overflow bold glyphs on long strings.
     frame.render_widget(
         Paragraph::new(current.message.as_str())
-            .style(style)
+            .style(style.remove_modifier(Modifier::BOLD))
             .wrap(Wrap { trim: true }),
         inner,
     );
