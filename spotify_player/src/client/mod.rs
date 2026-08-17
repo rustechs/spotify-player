@@ -343,13 +343,15 @@ impl AppClient {
                         continue;
                     }
 
-                    // Keep audio on the client the wake just started; the generic path
-                    // transfers with the playback state Spotify already reports.
-                    let keep_playing = wake_target.is_some()
-                        && !config::get_config()
+                    // Transfer onto the woken preferred device. Whether that
+                    // transfer starts audio is `pause_after_nudge` (default: pause).
+                    let keep_playing = keep_playing_after_desktop_wake(
+                        wake_target.is_some(),
+                        config::get_config()
                             .app_config
                             .desktop_spotify
-                            .pause_after_nudge;
+                            .pause_after_nudge,
+                    );
 
                     let device_ids = match device_ids_after_wake(wake_target, woke_for_preferred) {
                         DeviceIdsAfterWake::Preferred(ids) => ids,
@@ -2568,6 +2570,14 @@ fn should_select_device(has_playback: bool, woke_desktop: bool) -> bool {
     !has_playback || woke_desktop
 }
 
+/// After a desktop wake, transfer audio onto the new device only when the
+/// wake is allowed to keep playing. Startup launches still need a Play/OpenUri
+/// nudge so Connect can see the client, then pause unless the user asked to
+/// keep that automatically started playback.
+fn keep_playing_after_desktop_wake(woke_preferred: bool, pause_after_nudge: bool) -> bool {
+    woke_preferred && !pause_after_nudge
+}
+
 /// Select transfer candidates after attempting a desktop wake.
 ///
 /// A successful wake for a preferred device must either target that device or
@@ -2674,10 +2684,10 @@ fn patch_missing_show_fields(value: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_memory_caches_on_new_session, device_ids_after_wake, move_seed_track_to_front,
-        order_transfer_device_ids, preferred_device_id, process_spotify_api_response,
-        rate_limit_backoff, should_select_device, should_wake_for_preferred, DeviceIdsAfterWake,
-        MAX_RETRY_AFTER,
+        clear_memory_caches_on_new_session, device_ids_after_wake, keep_playing_after_desktop_wake,
+        move_seed_track_to_front, order_transfer_device_ids, preferred_device_id,
+        process_spotify_api_response, rate_limit_backoff, should_select_device,
+        should_wake_for_preferred, DeviceIdsAfterWake, MAX_RETRY_AFTER,
     };
     use crate::state::{Device, Track};
     use rspotify::model::TrackId;
@@ -2792,6 +2802,14 @@ mod tests {
         assert!(!should_select_device(true, false));
         assert!(should_select_device(true, true));
         assert!(should_select_device(false, false));
+    }
+
+    #[test]
+    fn desktop_wake_does_not_keep_playing_when_pause_after_nudge() {
+        assert!(!keep_playing_after_desktop_wake(true, true));
+        assert!(keep_playing_after_desktop_wake(true, false));
+        assert!(!keep_playing_after_desktop_wake(false, false));
+        assert!(!keep_playing_after_desktop_wake(false, true));
     }
 
     #[test]

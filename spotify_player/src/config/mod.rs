@@ -261,8 +261,9 @@ pub struct DesktopSpotifyConfig {
     /// played is tried, then bare `Play`.
     pub nudge_uri: Option<String>,
     /// Pause immediately after the wake nudge so Connect can see the device
-    /// without leaving audio playing. Defaults to `false` so the nudged
-    /// playback remains audible.
+    /// without leaving audio playing. Defaults to `true` so launching the
+    /// desktop client does not start playback; play only after an explicit
+    /// CLI/TUI command. Set `false` to hear the automatically started playback.
     pub pause_after_nudge: bool,
     /// Hide the official client to the system tray after launch or nudge (and
     /// again after Connect transfer if the window remaps). Linux Spotify ignores
@@ -497,7 +498,7 @@ impl Default for DesktopSpotifyConfig {
             args: Vec::new(),
             mpris_dest: "org.mpris.MediaPlayer2.spotify".to_string(),
             nudge_uri: None,
-            pause_after_nudge: false,
+            pause_after_nudge: true,
             start_minimized: true,
             ready_timeout_secs: 45,
         }
