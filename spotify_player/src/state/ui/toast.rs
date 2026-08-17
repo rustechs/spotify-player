@@ -8,6 +8,7 @@ pub const TOAST_QUEUE_CAP: usize = 10;
 
 const TOAST_MAX_WIDTH: u16 = 60;
 const TOAST_BODY_HEIGHT: u16 = 6;
+const TOAST_BODY_MIN_HEIGHT: u16 = 3;
 const TOAST_PEEK_HEIGHT: u16 = 1;
 const TOAST_BODY_BORDER_ROWS: u16 = 2;
 const TOAST_ELLIPSIS: char = '…';
@@ -116,15 +117,19 @@ pub fn close_popup_or_dismiss_toast<P>(popup: &mut Option<P>, toasts: &mut Toast
 }
 
 /// Lower-right toast body (and optional peek sliver) clipped to `content`.
+/// `body_height` is the bordered body block height (clamped to min/max defaults).
 /// `None` when the content rect is too small to draw anything.
-pub fn toast_area(content: Rect, has_peek: bool) -> Option<(Rect, Option<Rect>)> {
+pub fn toast_area(content: Rect, has_peek: bool, body_height: u16) -> Option<(Rect, Option<Rect>)> {
     if content.width == 0 || content.height == 0 {
         return None;
     }
 
-    let width = content.width.min(TOAST_MAX_WIDTH);
+    let width = toast_box_width(content.width);
     let peek_h = if has_peek { TOAST_PEEK_HEIGHT } else { 0 };
-    let total_h = TOAST_BODY_HEIGHT.saturating_add(peek_h);
+    let body_height = body_height
+        .clamp(TOAST_BODY_MIN_HEIGHT, TOAST_BODY_HEIGHT)
+        .min(content.height.saturating_sub(peek_h));
+    let total_h = body_height.saturating_add(peek_h);
     let draw_h = total_h.min(content.height);
 
     let x = content.x + content.width.saturating_sub(width);
@@ -166,6 +171,30 @@ fn rect_inside(inner: Rect, outer: Rect) -> bool {
         && inner.y >= outer.y
         && inner.x.saturating_add(inner.width) <= outer.x.saturating_add(outer.width)
         && inner.y.saturating_add(inner.height) <= outer.y.saturating_add(outer.height)
+}
+
+/// Toast box width inside `content`.
+pub fn toast_box_width(content_width: u16) -> u16 {
+    content_width.min(TOAST_MAX_WIDTH)
+}
+
+/// Inner text width inside a bordered toast box (left/right borders).
+pub fn toast_inner_text_width(box_width: u16) -> u16 {
+    box_width.saturating_sub(2)
+}
+
+/// Bordered body height for `message` (min one inner row, max four).
+pub fn toast_body_height_for_message(message: &str, inner_width: u16, max_inner_lines: u16) -> u16 {
+    let width = inner_width as usize;
+    if width == 0 {
+        return TOAST_BODY_MIN_HEIGHT;
+    }
+    let wrapped = wrap_toast_lines(message, width);
+    let line_count = wrapped.len().max(1).min(max_inner_lines as usize);
+    let inner_lines = line_count as u16;
+    inner_lines
+        .saturating_add(TOAST_BODY_BORDER_ROWS)
+        .clamp(TOAST_BODY_MIN_HEIGHT, TOAST_BODY_HEIGHT)
 }
 
 /// Wrap `message` to `inner_width` and keep at most `max_lines` rows. When more
@@ -262,6 +291,11 @@ fn wrap_toast_lines(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Maximum inner text rows in a full-size toast body.
+pub fn toast_max_inner_lines() -> u16 {
+    toast_body_inner_lines(TOAST_BODY_HEIGHT)
+}
+
 /// Inner text rows available in a bordered toast body of `body_height`.
 pub fn toast_body_inner_lines(body_height: u16) -> u16 {
     body_height.saturating_sub(TOAST_BODY_BORDER_ROWS)
@@ -340,7 +374,7 @@ mod tests {
         ];
         for content in contents {
             for has_peek in [false, true] {
-                if let Some((body, peek)) = toast_area(content, has_peek) {
+                if let Some((body, peek)) = toast_area(content, has_peek, TOAST_BODY_HEIGHT) {
                     assert!(
                         rect_inside(body, content),
                         "body {body:?} not in {content:?}"
@@ -354,25 +388,55 @@ mod tests {
                 }
             }
         }
-        assert!(toast_area(Rect::new(0, 0, 0, 10), false).is_none());
-        assert!(toast_area(Rect::new(0, 0, 10, 0), false).is_none());
+        assert!(toast_area(Rect::new(0, 0, 0, 10), false, TOAST_BODY_HEIGHT).is_none());
+        assert!(toast_area(Rect::new(0, 0, 10, 0), false, TOAST_BODY_HEIGHT).is_none());
     }
 
     #[test]
     fn toast_area_uses_roomier_defaults_when_content_allows() {
         let content = Rect::new(0, 0, 80, 24);
-        let (body, peek) = toast_area(content, false).expect("body");
+        let (body, peek) = toast_area(content, false, TOAST_BODY_HEIGHT).expect("body");
         assert_eq!(body.width, TOAST_MAX_WIDTH);
         assert_eq!(body.height, TOAST_BODY_HEIGHT);
         assert!(peek.is_none());
         assert_eq!(body.x, content.width - TOAST_MAX_WIDTH);
 
-        let (body, peek) = toast_area(content, true).expect("body+peek");
+        let (body, peek) = toast_area(content, true, TOAST_BODY_HEIGHT).expect("body+peek");
         assert_eq!(body.width, TOAST_MAX_WIDTH);
         assert_eq!(body.height, TOAST_BODY_HEIGHT);
         let peek = peek.expect("peek");
         assert_eq!(peek.height, TOAST_PEEK_HEIGHT);
         assert_eq!(peek.y + peek.height, body.y);
+    }
+
+    #[test]
+    fn toast_body_height_fits_short_messages() {
+        assert_eq!(
+            toast_body_height_for_message("Copied link", 58, 4),
+            TOAST_BODY_MIN_HEIGHT
+        );
+        let msg = "Failed: Could not start Spotify desktop: Connection refused (os error 111) while waking preferred device after Connect timeout";
+        assert_eq!(toast_body_height_for_message(msg, 40, 4), TOAST_BODY_HEIGHT);
+    }
+
+    #[test]
+    fn toast_area_uses_compact_height_for_short_message() {
+        let content = Rect::new(0, 0, 80, 24);
+        let height = toast_body_height_for_message("Copied link", 58, 4);
+        let (body, _) = toast_area(content, false, height).expect("body");
+        assert_eq!(body.height, TOAST_BODY_MIN_HEIGHT);
+    }
+
+    #[test]
+    fn toast_peek_title_clips_overflow_with_ellipsis() {
+        let title = format_toast_body_text(
+            "Failed: Could not start Spotify desktop: Connection refused while waking",
+            40,
+            1,
+        );
+        assert!(!title.contains('\n'));
+        assert!(title.ends_with('…'));
+        assert!(title.chars().count() <= 40);
     }
 
     #[test]
