@@ -6,13 +6,22 @@
 //! `enable_streaming = "Never"`, that leaves `spotify_player` unable to transfer
 //! until the user hits play in the GUI. This module starts the client if needed
 //! and wakes it via MPRIS (`Play` / `OpenUri`) so Connect can use it.
+//!
+//! When `pause_after_nudge` is set, that Play/OpenUri is silenced: MPRIS volume
+//! is set to 0 and any Spotify PipeWire/Pulse sink-input is muted for the wake,
+//! then Pause runs and volume/mute are restored. Connect still sees a session;
+//! explicit CLI/TUI play starts audible audio.
 
 use std::{
     fs,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    thread,
     time::{Duration, Instant},
 };
 
@@ -435,6 +444,15 @@ fn nudge(dest: &str, nudge_uri: Option<&str>, pause_after: bool) -> Result<()> {
         .filter(|s| !s.is_empty())
         .map(normalize_spotify_uri);
 
+    // Connect only lists the desktop client after a real playback session.
+    // Mute locally for the duration of that session when we intend to pause
+    // immediately afterward, so the user does not hear the registration Play.
+    let _pulse_mute = pause_after.then(PulseMuteGuard::start);
+    let _volume_guard = pause_after.then(|| MprisVolumeGuard::start(dest)).flatten();
+    if pause_after {
+        let _ = mpris_call(dest, "Pause");
+    }
+
     if let Some(uri) = uri {
         tracing::info!("Nudging desktop Spotify via OpenUri ({uri})");
         mpris_open_uri(dest, &uri)?;
@@ -446,7 +464,7 @@ fn nudge(dest: &str, nudge_uri: Option<&str>, pause_after: bool) -> Result<()> {
     if pause_after {
         // Give Connect a moment to register the device before pausing.
         std::thread::sleep(Duration::from_millis(800));
-        tracing::info!("Pausing desktop Spotify after wake nudge");
+        tracing::info!("Pausing desktop Spotify after silent wake nudge");
         let _ = mpris_call(dest, "Pause");
     }
 
@@ -527,6 +545,198 @@ fn mpris_open_uri(dest: &str, uri: &str) -> Result<()> {
     Ok(())
 }
 
+const DBUS_PROPERTIES: &str = "org.freedesktop.DBus.Properties";
+
+fn mpris_get_volume(dest: &str) -> Result<f64> {
+    let output = Command::new("dbus-send")
+        .args([
+            "--session",
+            "--print-reply=literal",
+            "--type=method_call",
+            &format!("--dest={dest}"),
+            MPRIS_OBJECT,
+            &format!("{DBUS_PROPERTIES}.Get"),
+            &format!("string:{MPRIS_PLAYER}"),
+            "string:Volume",
+        ])
+        .output()
+        .context("failed to read MPRIS Volume")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("MPRIS Get Volume failed: {stderr}");
+    }
+
+    parse_mpris_volume_reply(&String::from_utf8_lossy(&output.stdout))
+        .context("could not parse MPRIS Volume")
+}
+
+fn mpris_set_volume(dest: &str, volume: f64) -> Result<()> {
+    let status = Command::new("dbus-send")
+        .args([
+            "--session",
+            "--type=method_call",
+            &format!("--dest={dest}"),
+            MPRIS_OBJECT,
+            &format!("{DBUS_PROPERTIES}.Set"),
+            &format!("string:{MPRIS_PLAYER}"),
+            "string:Volume",
+            &format!("variant:double:{volume}"),
+        ])
+        .status()
+        .context("failed to set MPRIS Volume")?;
+
+    if !status.success() {
+        anyhow::bail!("MPRIS Set Volume failed with status {status}");
+    }
+    Ok(())
+}
+
+/// Parse `dbus-send --print-reply=literal` output for a double Volume.
+fn parse_mpris_volume_reply(stdout: &str) -> Option<f64> {
+    let text = stdout.trim();
+    let after_double = text.split("double").nth(1)?;
+    after_double
+        .split_whitespace()
+        .next()?
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v >= 0.0)
+}
+
+fn is_spotify_client_binary(binary: &str) -> bool {
+    Path::new(binary)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "spotify")
+}
+
+fn spotify_sink_input_indices_from_json(json: &str) -> Vec<u32> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let Some(inputs) = value.as_array() else {
+        return Vec::new();
+    };
+    inputs
+        .iter()
+        .filter_map(|input| {
+            let binary = input
+                .get("properties")
+                .and_then(|p| p.get("application.process.binary"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if !is_spotify_client_binary(binary) {
+                return None;
+            }
+            input.get("index")?.as_u64().map(|i| i as u32)
+        })
+        .collect()
+}
+
+fn spotify_sink_input_indices() -> Vec<u32> {
+    let output = Command::new("pactl")
+        .args(["--format=json", "list", "sink-inputs"])
+        .output();
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    spotify_sink_input_indices_from_json(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn set_sink_input_mute(index: u32, mute: bool) -> bool {
+    Command::new("pactl")
+        .args([
+            "set-sink-input-mute",
+            &index.to_string(),
+            if mute { "1" } else { "0" },
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Restore MPRIS Volume after a silent wake, including Play/OpenUri errors.
+struct MprisVolumeGuard {
+    dest: String,
+    volume: f64,
+}
+
+impl MprisVolumeGuard {
+    /// Zero volume only after a successful read so Drop always has a restore target.
+    fn start(dest: &str) -> Option<Self> {
+        let volume = match mpris_get_volume(dest) {
+            Ok(volume) => volume,
+            Err(err) => {
+                tracing::warn!("Could not read MPRIS volume for silent wake: {err:#}");
+                return None;
+            }
+        };
+        if let Err(err) = mpris_set_volume(dest, 0.0) {
+            tracing::warn!("Could not mute MPRIS volume for silent wake: {err:#}");
+            return None;
+        }
+        Some(Self {
+            dest: dest.to_string(),
+            volume,
+        })
+    }
+}
+
+impl Drop for MprisVolumeGuard {
+    fn drop(&mut self) {
+        if let Err(err) = mpris_set_volume(&self.dest, self.volume) {
+            tracing::warn!("Could not restore MPRIS volume after silent wake: {err:#}");
+        }
+    }
+}
+
+/// Mute Spotify's local audio streams for the wake Play, then unmute on drop.
+struct PulseMuteGuard {
+    stop: Arc<AtomicBool>,
+    join: Option<thread::JoinHandle<Vec<u32>>>,
+}
+
+impl PulseMuteGuard {
+    fn start() -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let join = thread::spawn(move || {
+            let mut muted = Vec::new();
+            while !stop_thread.load(Ordering::Relaxed) {
+                for index in spotify_sink_input_indices() {
+                    if !muted.contains(&index) && set_sink_input_mute(index, true) {
+                        muted.push(index);
+                    }
+                }
+                thread::sleep(Duration::from_millis(40));
+            }
+            muted
+        });
+        Self {
+            stop,
+            join: Some(join),
+        }
+    }
+}
+
+impl Drop for PulseMuteGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(join) = self.join.take() {
+            if let Ok(muted) = join.join() {
+                for index in muted {
+                    let _ = set_sink_input_mute(index, false);
+                }
+            }
+        }
+    }
+}
+
 fn spotify_process_running() -> bool {
     // Match the official client binary name without catching spotify_player / spotifyd.
     Command::new("pgrep")
@@ -602,5 +812,37 @@ mod tests {
         assert!(!should_relaunch_for_mpris(false, false, true));
         assert!(!should_relaunch_for_mpris(false, true, false));
         assert!(!should_relaunch_for_mpris(true, false, false));
+    }
+
+    #[test]
+    fn parses_literal_mpris_volume_reply() {
+        assert_eq!(
+            parse_mpris_volume_reply("   variant       double 0.42\n"),
+            Some(0.42)
+        );
+        assert_eq!(parse_mpris_volume_reply("double 1"), Some(1.0));
+        assert_eq!(parse_mpris_volume_reply("not a volume"), None);
+    }
+
+    #[test]
+    fn identifies_official_spotify_binary_only() {
+        assert!(is_spotify_client_binary("spotify"));
+        assert!(is_spotify_client_binary("/usr/bin/spotify"));
+        assert!(!is_spotify_client_binary("spotify_player"));
+        assert!(!is_spotify_client_binary("/usr/local/bin/spotify_player"));
+        assert!(!is_spotify_client_binary("spotifyd"));
+    }
+
+    #[test]
+    fn extracts_spotify_sink_input_indices_from_pactl_json() {
+        let json = r#"
+        [
+          {"index": 12, "properties": {"application.process.binary": "spotify"}},
+          {"index": 13, "properties": {"application.process.binary": "spotify_player"}},
+          {"index": 14, "properties": {"application.process.binary": "/usr/bin/spotify"}}
+        ]
+        "#;
+        assert_eq!(spotify_sink_input_indices_from_json(json), vec![12, 14]);
+        assert!(spotify_sink_input_indices_from_json("not json").is_empty());
     }
 }
