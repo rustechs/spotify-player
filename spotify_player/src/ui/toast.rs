@@ -5,7 +5,9 @@ use ratatui::{
     Frame,
 };
 
-use crate::state::{toast_area, ToastKind, UIStateGuard};
+use crate::state::{
+    format_toast_body_text, toast_area, toast_body_inner_lines, ToastKind, UIStateGuard,
+};
 
 /// Draw the current toast (and optional peek sliver) in the leftover content rect.
 pub fn render_toasts(frame: &mut Frame, ui: &UIStateGuard, content: Rect) {
@@ -34,11 +36,16 @@ pub fn render_toasts(frame: &mut Frame, ui: &UIStateGuard, content: Rect) {
         .border_style(style)
         .title(title);
     let inner = block.inner(body);
+    let body_text = format_toast_body_text(
+        current.message.as_str(),
+        inner.width,
+        toast_body_inner_lines(inner.height),
+    );
     frame.render_widget(block, body);
     // Body text is not bold so wrapped lines stay within the box; terminals
     // often overflow bold glyphs on long strings.
     frame.render_widget(
-        Paragraph::new(current.message.as_str())
+        Paragraph::new(body_text)
             .style(style.remove_modifier(Modifier::BOLD))
             .wrap(Wrap { trim: true }),
         inner,
