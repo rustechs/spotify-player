@@ -6,9 +6,11 @@ use ratatui::layout::Rect;
 /// Maximum number of toasts stored (current + waiting).
 pub const TOAST_QUEUE_CAP: usize = 10;
 
-const TOAST_MAX_WIDTH: u16 = 72;
+const TOAST_MAX_WIDTH: u16 = 60;
 const TOAST_BODY_HEIGHT: u16 = 6;
 const TOAST_PEEK_HEIGHT: u16 = 1;
+const TOAST_BODY_BORDER_ROWS: u16 = 2;
+const TOAST_ELLIPSIS: char = '…';
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToastKind {
@@ -166,6 +168,105 @@ fn rect_inside(inner: Rect, outer: Rect) -> bool {
         && inner.y.saturating_add(inner.height) <= outer.y.saturating_add(outer.height)
 }
 
+/// Wrap `message` to `inner_width` and keep at most `max_lines` rows. When more
+/// text would fit, the last row ends with `…`.
+pub fn format_toast_body_text(message: &str, inner_width: u16, max_lines: u16) -> String {
+    let width = inner_width as usize;
+    let max_lines = max_lines as usize;
+    if width == 0 || max_lines == 0 {
+        return String::new();
+    }
+
+    let wrapped = wrap_toast_lines(message, width);
+    if wrapped.is_empty() {
+        return String::new();
+    }
+    if wrapped.len() <= max_lines {
+        return wrapped.join("\n");
+    }
+
+    let mut lines: Vec<String> = wrapped.into_iter().take(max_lines).collect();
+    if let Some(last) = lines.last_mut() {
+        mark_toast_line_clipped(last, width);
+    }
+    lines.join("\n")
+}
+
+fn mark_toast_line_clipped(line: &mut String, max_width: usize) {
+    if max_width == 0 {
+        line.clear();
+        return;
+    }
+    if max_width == 1 {
+        line.clear();
+        line.push(TOAST_ELLIPSIS);
+        return;
+    }
+    let keep = max_width - 1;
+    let len = line.chars().count();
+    if len > keep {
+        let mut out = String::new();
+        for ch in line.chars().take(keep) {
+            out.push(ch);
+        }
+        out.push(TOAST_ELLIPSIS);
+        *line = out;
+    } else {
+        line.push(TOAST_ELLIPSIS);
+    }
+}
+
+fn wrap_toast_lines(text: &str, width: usize) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for word in trimmed.split_whitespace() {
+        if word.chars().count() > width {
+            if !current.is_empty() {
+                lines.push(current);
+                current = String::new();
+            }
+            let mut chunk = String::new();
+            for ch in word.chars() {
+                if chunk.chars().count() == width {
+                    lines.push(chunk);
+                    chunk = String::new();
+                }
+                chunk.push(ch);
+            }
+            if !chunk.is_empty() {
+                current = chunk;
+            }
+            continue;
+        }
+
+        if current.is_empty() {
+            current = word.to_string();
+        } else if current.chars().count() + 1 + word.chars().count() <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(current);
+            current = word.to_string();
+        }
+    }
+
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// Inner text rows available in a bordered toast body of `body_height`.
+pub fn toast_body_inner_lines(body_height: u16) -> u16 {
+    body_height.saturating_sub(TOAST_BODY_BORDER_ROWS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +373,28 @@ mod tests {
         let peek = peek.expect("peek");
         assert_eq!(peek.height, TOAST_PEEK_HEIGHT);
         assert_eq!(peek.y + peek.height, body.y);
+    }
+
+    #[test]
+    fn toast_body_text_clips_overflow_with_ellipsis() {
+        let msg = "Failed: Could not start Spotify desktop: Connection refused (os error 111) while waking preferred device after Connect timeout";
+        let body = format_toast_body_text(msg, 40, 3);
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[2].ends_with('…'));
+        assert!(lines[2].chars().count() <= 40);
+    }
+
+    #[test]
+    fn toast_body_text_wraps_without_clip_when_short() {
+        let body = format_toast_body_text("Copied link", 58, 4);
+        assert_eq!(body, "Copied link");
+    }
+
+    #[test]
+    fn toast_body_inner_lines_matches_border_box() {
+        assert_eq!(toast_body_inner_lines(TOAST_BODY_HEIGHT), 4);
+        assert_eq!(toast_body_inner_lines(3), 1);
     }
 
     #[test]
