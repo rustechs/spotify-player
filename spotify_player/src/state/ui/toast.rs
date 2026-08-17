@@ -6,8 +6,8 @@ use ratatui::layout::Rect;
 /// Maximum number of toasts stored (current + waiting).
 pub const TOAST_QUEUE_CAP: usize = 10;
 
-const TOAST_MAX_WIDTH: u16 = 48;
-const TOAST_BODY_HEIGHT: u16 = 3;
+const TOAST_MAX_WIDTH: u16 = 72;
+const TOAST_BODY_HEIGHT: u16 = 6;
 const TOAST_PEEK_HEIGHT: u16 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -255,6 +255,23 @@ mod tests {
         }
         assert!(toast_area(Rect::new(0, 0, 0, 10), false).is_none());
         assert!(toast_area(Rect::new(0, 0, 10, 0), false).is_none());
+    }
+
+    #[test]
+    fn toast_area_uses_roomier_defaults_when_content_allows() {
+        let content = Rect::new(0, 0, 80, 24);
+        let (body, peek) = toast_area(content, false).expect("body");
+        assert_eq!(body.width, TOAST_MAX_WIDTH);
+        assert_eq!(body.height, TOAST_BODY_HEIGHT);
+        assert!(peek.is_none());
+        assert_eq!(body.x, content.width - TOAST_MAX_WIDTH);
+
+        let (body, peek) = toast_area(content, true).expect("body+peek");
+        assert_eq!(body.width, TOAST_MAX_WIDTH);
+        assert_eq!(body.height, TOAST_BODY_HEIGHT);
+        let peek = peek.expect("peek");
+        assert_eq!(peek.height, TOAST_PEEK_HEIGHT);
+        assert_eq!(peek.y + peek.height, body.y);
     }
 
     #[test]

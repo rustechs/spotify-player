@@ -236,8 +236,8 @@ The `component_style` table customizes UI component appearance. All fields are o
 | `like`                           | Style for the like indicator                              |
 | `lyrics_played`                  | Style for played lyrics lines                             |
 | `lyrics_playing`                 | Style for the currently playing lyrics line               |
-| `toast_success`                  | Style for success toast borders and text                  |
-| `toast_error`                    | Style for error toast borders and text                    |
+| `toast_success`                  | Style for success toast borders and title. Body text drops `Bold` so wrapped lines stay inside the box. |
+| `toast_error`                    | Style for error toast borders and title. Body text drops `Bold` so wrapped lines stay inside the box. |
 
 Each style accepts optional fields:
 
