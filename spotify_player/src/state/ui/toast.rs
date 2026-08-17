@@ -428,6 +428,39 @@ mod tests {
     }
 
     #[test]
+    fn toast_body_height_uses_intermediate_rows_for_multi_line_messages() {
+        const INNER_WIDTH: u16 = 58;
+        let two_line =
+            "Failed: Could not start Spotify desktop client because the connection timed out waiting";
+        let three_line = "Failed: Could not start Spotify desktop: Connection refused (os error 111) while waking preferred device after Connect";
+
+        assert_eq!(wrap_toast_lines(two_line, INNER_WIDTH as usize).len(), 2);
+        assert_eq!(wrap_toast_lines(three_line, INNER_WIDTH as usize).len(), 3);
+        assert_eq!(toast_body_height_for_message(two_line, INNER_WIDTH, 4), 4);
+        assert_eq!(toast_body_height_for_message(three_line, INNER_WIDTH, 4), 5);
+    }
+
+    #[test]
+    fn toast_area_uses_intermediate_body_height() {
+        let content = Rect::new(0, 0, 80, 24);
+        const INNER_WIDTH: u16 = 58;
+        let two_line =
+            "Failed: Could not start Spotify desktop client because the connection timed out waiting";
+        let two_h = toast_body_height_for_message(two_line, INNER_WIDTH, 4);
+        let (two_body, _) = toast_area(content, false, two_h).expect("two-line body");
+        assert_eq!(two_h, 4);
+        assert_eq!(two_body.height, 4);
+
+        let three_line = "Failed: Could not start Spotify desktop: Connection refused (os error 111) while waking preferred device after Connect";
+        let three_h = toast_body_height_for_message(three_line, INNER_WIDTH, 4);
+        let (three_body, peek) = toast_area(content, true, three_h).expect("three-line body");
+        assert_eq!(three_h, 5);
+        assert_eq!(three_body.height, 5);
+        let peek = peek.expect("peek sliver");
+        assert_eq!(peek.y + peek.height, three_body.y);
+    }
+
+    #[test]
     fn toast_peek_title_clips_overflow_with_ellipsis() {
         let title = format_toast_body_text(
             "Failed: Could not start Spotify desktop: Connection refused while waking",
