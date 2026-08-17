@@ -263,6 +263,9 @@ pub struct DesktopSpotifyConfig {
     /// Pause immediately after the wake nudge so Connect can see the device
     /// without leaving audio playing. The Play/OpenUri session is silenced
     /// (MPRIS volume 0 + local Spotify sink mute) so registration is inaudible.
+    /// Mute is held until MPRIS reports paused (retries, then a short
+    /// background hold); volume is restored after pause, or after a timeout so
+    /// mute cannot stick forever.
     /// Defaults to `true`; play only after an explicit CLI/TUI command. Set
     /// `false` to hear the automatically started playback.
     pub pause_after_nudge: bool,

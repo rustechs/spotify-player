@@ -8,9 +8,11 @@
 //! and wakes it via MPRIS (`Play` / `OpenUri`) so Connect can use it.
 //!
 //! When `pause_after_nudge` is set, that Play/OpenUri is silenced: MPRIS volume
-//! is set to 0 and any Spotify PipeWire/Pulse sink-input is muted for the wake,
-//! then Pause runs and volume/mute are restored. Connect still sees a session;
-//! explicit CLI/TUI play starts audible audio.
+//! is set to 0 and any Spotify PipeWire/Pulse sink-input is muted for the wake.
+//! Mute is held until MPRIS reports paused (retries, then a short background
+//! hold). Volume/mute are restored after pause, or after a timeout so mute
+//! cannot stick forever. Connect still sees a session; explicit CLI/TUI play
+//! starts audible audio.
 
 use std::{
     fs,
@@ -447,8 +449,8 @@ fn nudge(dest: &str, nudge_uri: Option<&str>, pause_after: bool) -> Result<()> {
     // Connect only lists the desktop client after a real playback session.
     // Mute locally for the duration of that session when we intend to pause
     // immediately afterward, so the user does not hear the registration Play.
-    let _pulse_mute = pause_after.then(PulseMuteGuard::start);
-    let _volume_guard = pause_after.then(|| MprisVolumeGuard::start(dest)).flatten();
+    let pulse_mute = pause_after.then(PulseMuteGuard::start);
+    let volume_guard = pause_after.then(|| MprisVolumeGuard::start(dest)).flatten();
     if pause_after {
         let _ = mpris_call(dest, "Pause");
     }
@@ -465,7 +467,15 @@ fn nudge(dest: &str, nudge_uri: Option<&str>, pause_after: bool) -> Result<()> {
         // Give Connect a moment to register the device before pausing.
         std::thread::sleep(Duration::from_millis(800));
         tracing::info!("Pausing desktop Spotify after silent wake nudge");
-        let _ = mpris_call(dest, "Pause");
+        if pause_until_silent(dest, Duration::from_secs(2)) {
+            tracing::info!("Desktop Spotify paused; restoring local volume");
+        } else {
+            tracing::warn!(
+                "Desktop Spotify did not pause after silent wake; holding mute until pause confirms"
+            );
+            hold_silence_until_paused(dest.to_string(), pulse_mute, volume_guard);
+            return Ok(());
+        }
     }
 
     Ok(())
@@ -569,6 +579,95 @@ fn mpris_get_volume(dest: &str) -> Result<f64> {
 
     parse_mpris_volume_reply(&String::from_utf8_lossy(&output.stdout))
         .context("could not parse MPRIS Volume")
+}
+
+fn mpris_get_playback_status(dest: &str) -> Result<String> {
+    let output = Command::new("dbus-send")
+        .args([
+            "--session",
+            "--print-reply=literal",
+            "--type=method_call",
+            &format!("--dest={dest}"),
+            MPRIS_OBJECT,
+            &format!("{DBUS_PROPERTIES}.Get"),
+            &format!("string:{MPRIS_PLAYER}"),
+            "string:PlaybackStatus",
+        ])
+        .output()
+        .context("failed to read MPRIS PlaybackStatus")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("MPRIS Get PlaybackStatus failed: {stderr}");
+    }
+
+    parse_mpris_playback_status_reply(&String::from_utf8_lossy(&output.stdout))
+        .map(str::to_string)
+        .context("could not parse MPRIS PlaybackStatus")
+}
+
+fn mpris_is_silent(dest: &str) -> bool {
+    mpris_get_playback_status(dest)
+        .ok()
+        .as_deref()
+        .is_some_and(playback_status_is_silent)
+}
+
+/// Retry Pause until MPRIS reports Paused/Stopped, or `budget` elapses.
+fn pause_until_silent(dest: &str, budget: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        let _ = mpris_call(dest, "Pause");
+        if mpris_is_silent(dest) {
+            return true;
+        }
+        if pause_poll_should_stop(false, start.elapsed(), budget) {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn hold_silence_until_paused(
+    dest: String,
+    pulse_mute: Option<PulseMuteGuard>,
+    volume_guard: Option<MprisVolumeGuard>,
+) {
+    thread::spawn(move || {
+        let budget = Duration::from_secs(10);
+        if pause_until_silent(&dest, budget) {
+            tracing::info!("Desktop Spotify paused after delayed silent-wake hold");
+        } else {
+            tracing::warn!(
+                "Desktop Spotify still playing after {budget:?}; restoring volume to avoid a stuck mute"
+            );
+        }
+        drop(volume_guard);
+        drop(pulse_mute);
+    });
+}
+
+/// Stop polling once playback is silent, or the retry budget is spent.
+fn pause_poll_should_stop(confirmed_silent: bool, elapsed: Duration, budget: Duration) -> bool {
+    confirmed_silent || elapsed >= budget
+}
+
+fn playback_status_is_silent(status: &str) -> bool {
+    status.eq_ignore_ascii_case("Paused") || status.eq_ignore_ascii_case("Stopped")
+}
+
+/// Parse `dbus-send --print-reply=literal` `PlaybackStatus` (`Playing`/`Paused`/`Stopped`).
+fn parse_mpris_playback_status_reply(stdout: &str) -> Option<&'static str> {
+    let text = stdout.to_ascii_lowercase();
+    if text.contains("paused") {
+        Some("Paused")
+    } else if text.contains("stopped") {
+        Some("Stopped")
+    } else if text.contains("playing") {
+        Some("Playing")
+    } else {
+        None
+    }
 }
 
 fn mpris_set_volume(dest: &str, volume: f64) -> Result<()> {
@@ -822,6 +921,45 @@ mod tests {
         );
         assert_eq!(parse_mpris_volume_reply("double 1"), Some(1.0));
         assert_eq!(parse_mpris_volume_reply("not a volume"), None);
+    }
+
+    #[test]
+    fn parses_literal_mpris_playback_status() {
+        assert_eq!(
+            parse_mpris_playback_status_reply("   variant       string \"Paused\"\n"),
+            Some("Paused")
+        );
+        assert_eq!(
+            parse_mpris_playback_status_reply("string Playing"),
+            Some("Playing")
+        );
+        assert_eq!(
+            parse_mpris_playback_status_reply("string Stopped"),
+            Some("Stopped")
+        );
+        assert_eq!(parse_mpris_playback_status_reply("garbage"), None);
+        assert!(playback_status_is_silent("Paused"));
+        assert!(playback_status_is_silent("stopped"));
+        assert!(!playback_status_is_silent("Playing"));
+    }
+
+    #[test]
+    fn pause_poll_holds_mute_until_silent_or_budget() {
+        assert!(!pause_poll_should_stop(
+            false,
+            Duration::from_millis(100),
+            Duration::from_secs(2)
+        ));
+        assert!(pause_poll_should_stop(
+            true,
+            Duration::from_millis(100),
+            Duration::from_secs(2)
+        ));
+        assert!(pause_poll_should_stop(
+            false,
+            Duration::from_secs(2),
+            Duration::from_secs(2)
+        ));
     }
 
     #[test]
