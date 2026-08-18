@@ -248,7 +248,9 @@ pub struct DesktopSpotifyConfig {
     /// When true, start Spotify if needed and MPRIS-nudge it during playback init
     /// (and via `spotify_player wake-desktop`) when `preferred_device` is missing
     /// from Connect or listed but not actively playing (or when no devices are
-    /// listed if `preferred_device` is unset).
+    /// listed if `preferred_device` is unset). If MPRIS is already Playing and
+    /// Connect lists `preferred_device`, startup still transfers to that device
+    /// with keep-playing and never to another speaker.
     pub enable: bool,
     /// Executable used to launch the desktop client (`spotify`, absolute path, etc.).
     pub command: String,

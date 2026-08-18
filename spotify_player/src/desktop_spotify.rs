@@ -130,7 +130,13 @@ pub async fn ensure_awake(
         watch.abort();
     }
 
-    nudge(dest, nudge_uri, config.pause_after_nudge)?;
+    if mpris_is_playing(dest) {
+        tracing::info!(
+            "Desktop Spotify is already playing (MPRIS); skipping wake nudge so local playback is left alone"
+        );
+    } else {
+        nudge(dest, nudge_uri, config.pause_after_nudge)?;
+    }
     let minimized = if config.start_minimized {
         // Prefer tray hide once MPRIS (and usually the tray icon) is up.
         // Also run when we only nudged an already-running instance — Connect
@@ -602,6 +608,22 @@ fn mpris_is_silent(dest: &str) -> bool {
         .is_some_and(playback_status_is_silent)
 }
 
+/// Whether the official desktop client is currently playing via MPRIS.
+///
+/// Connect often omits that client from `/v1/me/player` even while the GUI is
+/// already playing. Callers must treat this as local active playback and must
+/// not OpenUri/Pause it as a "wake".
+pub fn mpris_is_playing(dest: &str) -> bool {
+    mpris_get_playback_status(dest)
+        .ok()
+        .as_deref()
+        .is_some_and(playback_status_is_playing)
+}
+
+fn playback_status_is_playing(status: &str) -> bool {
+    status.eq_ignore_ascii_case("Playing")
+}
+
 /// Retry Pause until MPRIS reports Paused/Stopped, or `budget` elapses.
 fn pause_until_silent(dest: &str, budget: Duration) -> bool {
     let start = Instant::now();
@@ -954,6 +976,9 @@ mod tests {
         assert!(playback_status_is_silent("Paused"));
         assert!(playback_status_is_silent("stopped"));
         assert!(!playback_status_is_silent("Playing"));
+        assert!(playback_status_is_playing("Playing"));
+        assert!(playback_status_is_playing("playing"));
+        assert!(!playback_status_is_playing("Paused"));
     }
 
     #[test]
