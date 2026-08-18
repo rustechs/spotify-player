@@ -160,7 +160,7 @@ pub struct AppConfig {
 
     /// In-TUI toast overlay for mutation results (not desktop `notify`).
     pub enable_toast: bool,
-    /// Auto-dismiss timeout for success toasts. Error toasts stay until `esc`.
+    /// Auto-dismiss timeout for in-TUI toasts, including errors.
     pub toast_success_timeout_secs: u64,
 
     /// Start the application with playback paused instead of resuming the

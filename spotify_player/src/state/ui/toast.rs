@@ -5,11 +5,13 @@ use ratatui::layout::Rect;
 
 /// Maximum number of toasts stored (current + waiting).
 pub const TOAST_QUEUE_CAP: usize = 10;
+/// Maximum number of full notification cards rendered at once.
+pub const TOAST_VISIBLE_COUNT: usize = 3;
 
 const TOAST_MAX_WIDTH: u16 = 60;
 const TOAST_BODY_HEIGHT: u16 = 6;
 const TOAST_BODY_MIN_HEIGHT: u16 = 3;
-const TOAST_PEEK_HEIGHT: u16 = 1;
+const TOAST_OVERFLOW_HEIGHT: u16 = 1;
 const TOAST_BODY_BORDER_ROWS: u16 = 2;
 const TOAST_ELLIPSIS: char = '…';
 
@@ -23,7 +25,7 @@ pub enum ToastKind {
 pub struct Toast {
     pub kind: ToastKind,
     pub message: String,
-    /// `None` means sticky (errors). Success toasts set an expiry.
+    /// Deadline after which the toast leaves the FIFO.
     pub expires_at: Option<Instant>,
 }
 
@@ -36,11 +38,11 @@ impl Toast {
         }
     }
 
-    pub fn error(message: impl Into<String>) -> Self {
+    pub fn error(message: impl Into<String>, timeout: Duration) -> Self {
         Self {
             kind: ToastKind::Error,
             message: message.into(),
-            expires_at: None,
+            expires_at: Some(Instant::now() + timeout),
         }
     }
 }
@@ -53,12 +55,8 @@ pub struct ToastQueue {
 }
 
 impl ToastQueue {
-    pub fn current(&self) -> Option<&Toast> {
-        self.items.front()
-    }
-
-    pub fn peek(&self) -> Option<&Toast> {
-        self.items.get(1)
+    pub fn visible(&self) -> impl Iterator<Item = &Toast> {
+        self.items.iter().take(TOAST_VISIBLE_COUNT)
     }
 
     pub fn len(&self) -> usize {
@@ -84,7 +82,7 @@ impl ToastQueue {
         true
     }
 
-    /// Remove expired success toasts from the front. Sticky errors are never expired.
+    /// Remove expired toasts from the front.
     pub fn expire_due(&mut self, now: Instant) {
         while let Some(front) = self.items.front() {
             match front.expires_at {
@@ -116,54 +114,89 @@ pub fn close_popup_or_dismiss_toast<P>(popup: &mut Option<P>, toasts: &mut Toast
     }
 }
 
-/// Lower-right toast body (and optional peek sliver) clipped to `content`.
-/// `body_height` is the bordered body block height (clamped to min/max defaults).
+/// Lower-right stacked toast cards (and optional `4+` overflow marker) clipped
+/// to `content`. `body_heights` is FIFO order: current toast first, drawn last
+/// on screen (closest to the lower-right corner).
 /// `None` when the content rect is too small to draw anything.
-pub fn toast_area(content: Rect, has_peek: bool, body_height: u16) -> Option<(Rect, Option<Rect>)> {
-    if content.width == 0 || content.height == 0 {
+pub fn toast_stack_areas(
+    content: Rect,
+    body_heights: &[u16],
+    show_overflow: bool,
+) -> Option<(Vec<Rect>, Option<Rect>)> {
+    if content.width == 0 || content.height == 0 || body_heights.is_empty() {
         return None;
     }
 
     let width = toast_box_width(content.width);
-    let peek_h = if has_peek { TOAST_PEEK_HEIGHT } else { 0 };
-    let body_height = body_height
-        .clamp(TOAST_BODY_MIN_HEIGHT, TOAST_BODY_HEIGHT)
-        .min(content.height.saturating_sub(peek_h));
-    let total_h = body_height.saturating_add(peek_h);
-    let draw_h = total_h.min(content.height);
-
     let x = content.x + content.width.saturating_sub(width);
-    let y = content.y + content.height.saturating_sub(draw_h);
 
-    if has_peek && draw_h > TOAST_PEEK_HEIGHT {
-        let peek = Rect {
-            x,
-            y,
-            width,
-            height: TOAST_PEEK_HEIGHT,
-        };
-        let body = Rect {
-            x,
-            y: y + TOAST_PEEK_HEIGHT,
-            width,
-            height: draw_h.saturating_sub(TOAST_PEEK_HEIGHT),
-        };
-        if !rect_inside(body, content) || !rect_inside(peek, content) {
-            return None;
+    let mut placed_heights = Vec::new();
+    let mut used = 0u16;
+    for &raw in body_heights {
+        let remaining = content.height.saturating_sub(used);
+        if remaining == 0 {
+            break;
         }
-        Some((body, Some(peek)))
-    } else {
-        let body = Rect {
-            x,
-            y,
-            width,
-            height: draw_h,
+        let want = raw.clamp(TOAST_BODY_MIN_HEIGHT, TOAST_BODY_HEIGHT);
+        let h = if placed_heights.is_empty() {
+            want.min(remaining)
+        } else if remaining < TOAST_BODY_MIN_HEIGHT {
+            break;
+        } else {
+            want.min(remaining)
         };
-        if !rect_inside(body, content) {
-            return None;
+        if h == 0 {
+            break;
         }
-        Some((body, None))
+        placed_heights.push(h);
+        used = used.saturating_add(h);
     }
+    if placed_heights.is_empty() {
+        return None;
+    }
+
+    let mut cards = Vec::with_capacity(placed_heights.len());
+    let mut y = content.y.saturating_add(content.height);
+    for h in &placed_heights {
+        y = y.saturating_sub(*h);
+        if y < content.y {
+            y = content.y;
+        }
+        let card = Rect {
+            x,
+            y,
+            width,
+            height: *h,
+        };
+        if !rect_inside(card, content) {
+            return None;
+        }
+        cards.push(card);
+    }
+
+    let overflow = if show_overflow {
+        let top = cards.last().map_or(y, |card| card.y);
+        let space_above = top.saturating_sub(content.y);
+        if space_above >= TOAST_OVERFLOW_HEIGHT {
+            let ov = Rect {
+                x,
+                y: top.saturating_sub(TOAST_OVERFLOW_HEIGHT),
+                width,
+                height: TOAST_OVERFLOW_HEIGHT,
+            };
+            if rect_inside(ov, content) {
+                Some(ov)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Some((cards, overflow))
 }
 
 fn rect_inside(inner: Rect, outer: Rect) -> bool {
@@ -314,45 +347,56 @@ mod tests {
         }
     }
 
-    fn error(msg: &str) -> Toast {
+    fn error(msg: &str, expires_at: Instant) -> Toast {
         Toast {
             kind: ToastKind::Error,
             message: msg.to_string(),
-            expires_at: None,
+            expires_at: Some(expires_at),
         }
     }
 
     #[test]
-    fn toast_queue_peek() {
+    fn toast_queue_visible_items_are_limited_to_three() {
         let mut q = ToastQueue::default();
         let t0 = Instant::now() + Duration::from_secs(3);
         q.push(success("first", t0));
         q.push(success("second", t0));
-        assert_eq!(q.current().map(|t| t.message.as_str()), Some("first"));
-        assert_eq!(q.peek().map(|t| t.message.as_str()), Some("second"));
+        q.push(success("third", t0));
+        q.push(success("fourth", t0));
+        assert_eq!(
+            q.visible().next().map(|t| t.message.as_str()),
+            Some("first")
+        );
+        assert_eq!(
+            q.visible()
+                .map(|toast| toast.message.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
     }
 
     #[test]
-    fn toast_queue_expire_due() {
+    fn toast_queue_expires_successes_and_errors() {
         let mut q = ToastQueue::default();
         let past = Instant::now() - Duration::from_secs(1);
         let future = Instant::now() + Duration::from_secs(10);
         q.push(success("old", past));
-        q.push(error("sticky"));
+        q.push(error("old error", past));
         q.push(success("later", future));
         q.expire_due(Instant::now());
-        assert_eq!(q.current().map(|t| t.message.as_str()), Some("sticky"));
-        assert_eq!(q.peek().map(|t| t.message.as_str()), Some("later"));
+        assert_eq!(
+            q.visible().next().map(|t| t.message.as_str()),
+            Some("later")
+        );
         q.expire_due(Instant::now() + Duration::from_secs(20));
-        assert_eq!(q.current().map(|t| t.message.as_str()), Some("sticky"));
-        assert_eq!(q.len(), 2);
+        assert!(q.is_empty());
     }
 
     #[test]
     fn toast_queue_drops_newest_at_cap() {
         let mut q = ToastQueue::default();
         let t0 = Instant::now() + Duration::from_secs(3);
-        q.push(error("visible"));
+        q.push(error("visible", t0));
         for i in 0..9 {
             assert!(q.push(success(&format!("n{i}"), t0)));
         }
@@ -360,11 +404,14 @@ mod tests {
         assert!(!q.push(success("too-new", t0)));
         assert_eq!(q.len(), 10);
         assert_eq!(q.dropped_newest, 1);
-        assert_eq!(q.current().map(|t| t.message.as_str()), Some("visible"));
+        assert_eq!(
+            q.visible().next().map(|t| t.message.as_str()),
+            Some("visible")
+        );
     }
 
     #[test]
-    fn toast_area_stays_inside_content() {
+    fn toast_stack_areas_stay_inside_content() {
         let contents = [
             Rect::new(0, 0, 80, 24),
             Rect::new(10, 5, 40, 10),
@@ -373,40 +420,72 @@ mod tests {
             Rect::new(0, 0, 1, 1),
         ];
         for content in contents {
-            for has_peek in [false, true] {
-                if let Some((body, peek)) = toast_area(content, has_peek, TOAST_BODY_HEIGHT) {
+            for count in 1..=5 {
+                let heights = vec![TOAST_BODY_HEIGHT; count.min(TOAST_VISIBLE_COUNT)];
+                let show_overflow = count > TOAST_VISIBLE_COUNT;
+                if let Some((cards, overflow)) = toast_stack_areas(content, &heights, show_overflow)
+                {
                     assert!(
-                        rect_inside(body, content),
-                        "body {body:?} not in {content:?}"
+                        cards.iter().all(|card| rect_inside(*card, content)),
+                        "cards {cards:?} not in {content:?}"
                     );
-                    if let Some(peek) = peek {
+                    if let Some(overflow) = overflow {
                         assert!(
-                            rect_inside(peek, content),
-                            "peek {peek:?} not in {content:?}"
+                            rect_inside(overflow, content),
+                            "overflow {overflow:?} not in {content:?}"
                         );
                     }
                 }
             }
         }
-        assert!(toast_area(Rect::new(0, 0, 0, 10), false, TOAST_BODY_HEIGHT).is_none());
-        assert!(toast_area(Rect::new(0, 0, 10, 0), false, TOAST_BODY_HEIGHT).is_none());
+        assert!(toast_stack_areas(Rect::new(0, 0, 0, 10), &[TOAST_BODY_HEIGHT], false).is_none());
+        assert!(toast_stack_areas(Rect::new(0, 0, 10, 0), &[TOAST_BODY_HEIGHT], false).is_none());
     }
 
     #[test]
-    fn toast_area_uses_roomier_defaults_when_content_allows() {
+    fn toast_stack_areas_show_three_cards_and_four_plus_marker() {
         let content = Rect::new(0, 0, 80, 24);
-        let (body, peek) = toast_area(content, false, TOAST_BODY_HEIGHT).expect("body");
+        let heights = [TOAST_BODY_HEIGHT, TOAST_BODY_HEIGHT, TOAST_BODY_HEIGHT];
+        let (cards, overflow) = toast_stack_areas(content, &heights, true).expect("toast layout");
+        assert_eq!(cards.len(), TOAST_VISIBLE_COUNT);
+        assert_eq!(
+            cards[0],
+            Rect::new(20, 18, TOAST_MAX_WIDTH, TOAST_BODY_HEIGHT)
+        );
+        assert_eq!(
+            cards[1],
+            Rect::new(20, 12, TOAST_MAX_WIDTH, TOAST_BODY_HEIGHT)
+        );
+        assert_eq!(
+            cards[2],
+            Rect::new(20, 6, TOAST_MAX_WIDTH, TOAST_BODY_HEIGHT)
+        );
+        assert_eq!(
+            overflow,
+            Some(Rect::new(20, 5, TOAST_MAX_WIDTH, TOAST_OVERFLOW_HEIGHT))
+        );
+    }
+
+    #[test]
+    fn toast_stack_uses_roomier_defaults_when_content_allows() {
+        let content = Rect::new(0, 0, 80, 24);
+        let (cards, overflow) =
+            toast_stack_areas(content, &[TOAST_BODY_HEIGHT], false).expect("body");
+        assert_eq!(cards.len(), 1);
+        let body = cards[0];
         assert_eq!(body.width, TOAST_MAX_WIDTH);
         assert_eq!(body.height, TOAST_BODY_HEIGHT);
-        assert!(peek.is_none());
+        assert!(overflow.is_none());
         assert_eq!(body.x, content.width - TOAST_MAX_WIDTH);
 
-        let (body, peek) = toast_area(content, true, TOAST_BODY_HEIGHT).expect("body+peek");
-        assert_eq!(body.width, TOAST_MAX_WIDTH);
-        assert_eq!(body.height, TOAST_BODY_HEIGHT);
-        let peek = peek.expect("peek");
-        assert_eq!(peek.height, TOAST_PEEK_HEIGHT);
-        assert_eq!(peek.y + peek.height, body.y);
+        let (cards, overflow) =
+            toast_stack_areas(content, &[TOAST_BODY_HEIGHT, TOAST_BODY_HEIGHT], false)
+                .expect("two cards");
+        assert_eq!(cards.len(), 2);
+        assert_eq!(cards[0].height, TOAST_BODY_HEIGHT);
+        assert_eq!(cards[1].height, TOAST_BODY_HEIGHT);
+        assert_eq!(cards[1].y + cards[1].height, cards[0].y);
+        assert!(overflow.is_none());
     }
 
     #[test]
@@ -420,11 +499,11 @@ mod tests {
     }
 
     #[test]
-    fn toast_area_uses_compact_height_for_short_message() {
+    fn toast_stack_uses_compact_height_for_short_message() {
         let content = Rect::new(0, 0, 80, 24);
         let height = toast_body_height_for_message("Copied link", 58, 4);
-        let (body, _) = toast_area(content, false, height).expect("body");
-        assert_eq!(body.height, TOAST_BODY_MIN_HEIGHT);
+        let (cards, _) = toast_stack_areas(content, &[height], false).expect("body");
+        assert_eq!(cards[0].height, TOAST_BODY_MIN_HEIGHT);
     }
 
     #[test]
@@ -441,27 +520,30 @@ mod tests {
     }
 
     #[test]
-    fn toast_area_uses_intermediate_body_height() {
+    fn toast_stack_uses_intermediate_body_height() {
         let content = Rect::new(0, 0, 80, 24);
         const INNER_WIDTH: u16 = 58;
         let two_line =
             "Failed: Could not start Spotify desktop client because the connection timed out waiting";
         let two_h = toast_body_height_for_message(two_line, INNER_WIDTH, 4);
-        let (two_body, _) = toast_area(content, false, two_h).expect("two-line body");
+        let (two_cards, _) = toast_stack_areas(content, &[two_h], false).expect("two-line body");
         assert_eq!(two_h, 4);
-        assert_eq!(two_body.height, 4);
+        assert_eq!(two_cards[0].height, 4);
 
         let three_line = "Failed: Could not start Spotify desktop: Connection refused (os error 111) while waking preferred device after Connect";
         let three_h = toast_body_height_for_message(three_line, INNER_WIDTH, 4);
-        let (three_body, peek) = toast_area(content, true, three_h).expect("three-line body");
+        let (cards, overflow) =
+            toast_stack_areas(content, &[three_h, TOAST_BODY_MIN_HEIGHT], false)
+                .expect("stacked bodies");
         assert_eq!(three_h, 5);
-        assert_eq!(three_body.height, 5);
-        let peek = peek.expect("peek sliver");
-        assert_eq!(peek.y + peek.height, three_body.y);
+        assert_eq!(cards[0].height, 5);
+        assert_eq!(cards[1].height, TOAST_BODY_MIN_HEIGHT);
+        assert_eq!(cards[1].y + cards[1].height, cards[0].y);
+        assert!(overflow.is_none());
     }
 
     #[test]
-    fn toast_peek_title_clips_overflow_with_ellipsis() {
+    fn toast_single_line_clips_overflow_with_ellipsis() {
         let title = format_toast_body_text(
             "Failed: Could not start Spotify desktop: Connection refused while waking",
             40,
@@ -497,21 +579,25 @@ mod tests {
     #[test]
     fn close_popup_or_dismiss_toast_search_still_open() {
         let mut q = ToastQueue::default();
-        q.push(error("api failed"));
+        q.push(error("api failed", Instant::now() + Duration::from_secs(3)));
         let mut popup = Some("search");
         close_popup_or_dismiss_toast(&mut popup, &mut q);
         assert!(popup.is_none());
-        assert_eq!(q.current().map(|t| t.message.as_str()), Some("api failed"));
+        assert_eq!(
+            q.visible().next().map(|t| t.message.as_str()),
+            Some("api failed")
+        );
     }
 
     #[test]
     fn close_popup_or_dismiss_toast_dismisses_when_no_popup() {
         let mut q = ToastQueue::default();
-        q.push(error("api failed"));
-        q.push(error("next"));
+        let expires_at = Instant::now() + Duration::from_secs(3);
+        q.push(error("api failed", expires_at));
+        q.push(error("next", expires_at));
         let mut popup: Option<&str> = None;
         close_popup_or_dismiss_toast(&mut popup, &mut q);
         assert!(popup.is_none());
-        assert_eq!(q.current().map(|t| t.message.as_str()), Some("next"));
+        assert_eq!(q.visible().next().map(|t| t.message.as_str()), Some("next"));
     }
 }
