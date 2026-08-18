@@ -287,13 +287,24 @@ enum HideVisible {
     Hidden,
 }
 
+/// Tray hide must only search mapped visible windows so `windowclose` never
+/// targets hidden ghosts (login autostart `wmctrl hidden`, `KWin` no-focus minimize).
+fn hide_search_only_visible() -> bool {
+    true
+}
+
+/// The tray stub window is named `spotify`; closing it tears down the tray entry.
+fn is_spotify_main_ui_window_name(name: &str) -> bool {
+    !name.trim().eq_ignore_ascii_case("spotify")
+}
+
 fn hide_visible_once(to_tray: bool) -> Result<HideVisible> {
     // Only act on mapped, visible main UI windows. Tray hide uses `windowclose`,
     // which must not target hidden/minimized ghosts (e.g. from login autostart or
     // a KWin no-focus rule): closing those leaves Spotify thinking the UI is
     // shown while nothing is actually visible ("Show Spotify" toggles to
     // "Minimize to Tray" without mapping a window).
-    let ids = ui_window_ids(true)?;
+    let ids = ui_window_ids(hide_search_only_visible())?;
     if ids.is_empty() {
         return Ok(HideVisible::NoneVisible);
     }
@@ -351,7 +362,7 @@ fn ui_window_ids(only_visible: bool) -> Result<Vec<String>> {
                 .output()
                 .ok()
                 .and_then(|o| String::from_utf8(o.stdout).ok())
-                .is_some_and(|name| !name.trim().eq_ignore_ascii_case("spotify"))
+                .is_some_and(|name| is_spotify_main_ui_window_name(&name))
         })
         .map(str::to_owned)
         .collect())
@@ -905,6 +916,19 @@ mod tests {
             mpris_name_has_owner("org.mpris.MediaPlayer2.spotify-player-wake-test-missing");
         assert!(result.is_ok());
         assert!(!result.unwrap());
+    }
+
+    #[test]
+    fn hide_search_only_visible_is_always_true() {
+        assert!(hide_search_only_visible());
+    }
+
+    #[test]
+    fn spotify_main_ui_window_name_excludes_tray_stub() {
+        assert!(!is_spotify_main_ui_window_name("spotify"));
+        assert!(!is_spotify_main_ui_window_name(" Spotify "));
+        assert!(is_spotify_main_ui_window_name("Spotify Premium"));
+        assert!(is_spotify_main_ui_window_name("Artist - Track"));
     }
 
     #[test]
