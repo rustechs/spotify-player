@@ -251,7 +251,21 @@ async fn handle_get_key_request(
             serde_json::to_vec(&tracks)?
         }
         Key::UserTopTracks => {
-            let tracks = client.current_user_top_tracks().await?;
+            let tracks = client
+                .current_user_top_tracks(rspotify::model::TimeRange::MediumTerm)
+                .await?;
+            serde_json::to_vec(&tracks)?
+        }
+        Key::UserTopTracksShortTerm => {
+            let tracks = client
+                .current_user_top_tracks(rspotify::model::TimeRange::ShortTerm)
+                .await?;
+            serde_json::to_vec(&tracks)?
+        }
+        Key::UserTopTracksLongTerm => {
+            let tracks = client
+                .current_user_top_tracks(rspotify::model::TimeRange::LongTerm)
+                .await?;
             serde_json::to_vec(&tracks)?
         }
         Key::UserSavedAlbums => {

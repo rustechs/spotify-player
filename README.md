@@ -467,7 +467,9 @@ List of supported commands:
 | `BrowseUserFollowedArtists`     | open a popup for browsing user's followed artists                                                  | `u a`              |
 | `BrowseUserSavedAlbums`         | open a popup for browsing user's saved albums                                                      | `u A`              |
 | `CurrentlyPlayingContextPage`   | go to the currently playing context page                                                           | `g space`          |
-| `TopTrackPage`                  | go to the user top track page                                                                      | `g t`              |
+| `TopTrackPage`                  | go to the user top track page (~6 months)                                                          | `g t`              |
+| `ShortTermTopTrackPage`         | go to the user top track page (~4 weeks)                                                           | `g S`              |
+| `LongTermTopTrackPage`          | go to the user top track page (~1 year)                                                            | `g Y`              |
 | `RecentlyPlayedTrackPage`       | go to the user recently played track page                                                          | `g r`              |
 | `LikedTrackPage`                | go to the user liked track page                                                                    | `g y`, `l`         |
 | `LyricsPage`                    | go to the lyrics page of the current track                                                         | `g L`              |
