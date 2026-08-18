@@ -225,3 +225,31 @@ pub fn init_cli() -> anyhow::Result<clap::Command> {
 
     Ok(cmd)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Key;
+    use clap::ValueEnum;
+
+    #[test]
+    fn get_key_values_include_top_track_time_ranges() {
+        let values: Vec<_> = Key::value_variants()
+            .iter()
+            .filter_map(|key| {
+                key.to_possible_value()
+                    .map(|value| value.get_name().to_string())
+            })
+            .collect();
+
+        for expected in [
+            "user-top-tracks",
+            "user-top-tracks-short-term",
+            "user-top-tracks-long-term",
+        ] {
+            assert!(
+                values.iter().any(|value| value == expected),
+                "missing CLI get key {expected:?} in {values:?}"
+            );
+        }
+    }
+}

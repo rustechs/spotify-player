@@ -392,6 +392,22 @@ To enable [fuzzy search](https://en.wikipedia.org/wiki/Approximate_string_matchi
 `spotify_player` provides several CLI commands for interacting with Spotify:
 
 - `get`: Get Spotify data (playlist/album/artist data, user's data, etc)
+
+  `spotify_player get key <key>` returns JSON for the selected key:
+
+  | Key | Data |
+  |---|---|
+  | `playback` | Current playback |
+  | `devices` | Available Connect devices |
+  | `user-playlists` | Current user's playlists |
+  | `user-liked-tracks` | Liked tracks |
+  | `user-saved-albums` | Saved albums |
+  | `user-followed-artists` | Followed artists |
+  | `user-top-tracks` | Personal top tracks over ~6 months (`medium_term`) |
+  | `user-top-tracks-short-term` | Personal top tracks over ~4 weeks (`short_term`) |
+  | `user-top-tracks-long-term` | Personal top tracks over ~1 year (`long_term`) |
+  | `queue` | Current playback queue |
+
 - `playback`: Interact with the playback (start a playback, play-pause, next, etc)
 - `search`: Search spotify
 - `connect`: Connect to a Spotify device
