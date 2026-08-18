@@ -123,7 +123,8 @@ impl UIState {
         if !should_enqueue_toast(app_config.enable_toast, false) {
             return;
         }
-        self.toasts.push(Toast::error(message));
+        let timeout = std::time::Duration::from_secs(app_config.toast_success_timeout_secs);
+        self.toasts.push(Toast::error(message, timeout));
     }
 
     /// Return whether there exists a focused popup.
@@ -209,12 +210,15 @@ mod tests {
     #[test]
     fn new_page_does_not_clear_toasts() {
         let mut ui = UIState::default();
-        ui.toasts.push(Toast::error("sticky"));
+        ui.toasts.push(Toast::error(
+            "api failed",
+            std::time::Duration::from_secs(3),
+        ));
         ui.new_page(PageState::Queue { scroll_offset: 0 });
         assert_eq!(ui.toasts.len(), 1);
         assert_eq!(
-            ui.toasts.current().map(|t| t.message.as_str()),
-            Some("sticky")
+            ui.toasts.visible().next().map(|t| t.message.as_str()),
+            Some("api failed")
         );
         assert!(ui.popup.is_none());
     }
