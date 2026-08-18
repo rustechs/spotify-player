@@ -328,7 +328,8 @@ pub fn toast_max_inner_lines() -> u16 {
     toast_body_inner_lines(TOAST_BODY_HEIGHT)
 }
 
-/// Inner text rows available in a bordered toast body of `body_height`.
+/// Inner text rows available in a bordered toast body of outer `body_height`.
+/// Pass the card rect height, not `Block::inner` (that already dropped the borders).
 pub fn toast_body_inner_lines(body_height: u16) -> u16 {
     body_height.saturating_sub(TOAST_BODY_BORDER_ROWS)
 }
