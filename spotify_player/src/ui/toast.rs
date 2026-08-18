@@ -7,11 +7,11 @@ use ratatui::{
 
 use crate::state::{
     format_toast_body_text, toast_body_height_for_message, toast_box_width, toast_inner_text_width,
-    toast_max_inner_lines, toast_stack_areas, ToastKind, UIStateGuard, TOAST_VISIBLE_COUNT,
+    toast_max_inner_lines, toast_stack_areas, ToastKind, UIState, TOAST_VISIBLE_COUNT,
 };
 
 /// Draw up to three toast cards and a `4+` marker for additional queued items.
-pub fn render_toasts(frame: &mut Frame, ui: &UIStateGuard, content: Rect) {
+pub fn render_toasts(frame: &mut Frame, ui: &UIState, content: Rect) {
     if ui.toasts.is_empty() {
         return;
     }
@@ -80,10 +80,28 @@ fn format_toast_card_body(message: &str, inner: Rect) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::Toast;
     use ratatui::{
+        backend::TestBackend,
         buffer::Buffer,
         widgets::{Block, Widget},
+        Terminal,
     };
+    use std::time::Duration;
+
+    fn buffer_contains(buf: &Buffer, needle: &str) -> bool {
+        let area = *buf.area();
+        for y in area.y..area.bottom() {
+            let mut row = String::new();
+            for x in area.x..area.right() {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            if row.contains(needle) {
+                return true;
+            }
+        }
+        false
+    }
 
     #[test]
     fn compact_toast_inner_keeps_short_message() {
@@ -96,13 +114,32 @@ mod tests {
         assert_eq!(body, "Copied link");
         Widget::render(block, area, &mut buf);
         Widget::render(Paragraph::new(body), inner, &mut buf);
-        let mut row = String::new();
-        for x in inner.x..inner.right() {
-            row.push_str(buf[(x, inner.y)].symbol());
-        }
         assert!(
-            row.contains("Copied link"),
-            "compact toast body should show the message, got {row:?}"
+            buffer_contains(&buf, "Copied link"),
+            "compact toast body should show the message, got {buf:?}"
+        );
+    }
+
+    #[test]
+    fn compact_render_toasts_shows_short_message() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut ui = UIState::default();
+        ui.toasts
+            .push(Toast::success("Copied link", Duration::from_secs(3)));
+        terminal
+            .draw(|frame| {
+                render_toasts(frame, &ui, frame.area());
+            })
+            .expect("draw toasts");
+        let buf = terminal.backend().buffer();
+        assert!(
+            buffer_contains(buf, "Success"),
+            "render_toasts should draw the Success title, got {buf:?}"
+        );
+        assert!(
+            buffer_contains(buf, "Copied link"),
+            "render_toasts should paint the compact body, got {buf:?}"
         );
     }
 }
