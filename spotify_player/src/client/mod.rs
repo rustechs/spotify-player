@@ -147,6 +147,28 @@ fn next_repeat_state(current: rspotify::model::RepeatState) -> rspotify::model::
     }
 }
 
+fn top_tracks_time_range_param(
+    time_range: rspotify::model::TimeRange,
+) -> (&'static str, &'static str) {
+    ("time_range", time_range.into())
+}
+
+fn paging_query<'a>(
+    limit: &'a str,
+    offset: &'a str,
+    extra_params: &[(&'a str, &'a str)],
+) -> Query<'a> {
+    let mut params = Query::from([
+        ("market", "from_token"),
+        ("limit", limit),
+        ("offset", offset),
+    ]);
+    for &(key, value) in extra_params {
+        params.insert(key, value);
+    }
+    params
+}
+
 impl AppClient {
     /// Construct a new client
     pub async fn new() -> Result<Self> {
@@ -1191,12 +1213,11 @@ impl AppClient {
         &self,
         time_range: rspotify::model::TimeRange,
     ) -> Result<Vec<Track>> {
-        let time_range: &'static str = time_range.into();
         let tracks = self
             .all_paging_items_with::<rspotify::model::FullTrack>(
                 &format!("{SPOTIFY_API_ENDPOINT}/me/top/tracks"),
                 0, // we don't know the total number of top tracks beforehand
-                &[("time_range", time_range)],
+                &[top_tracks_time_range_param(time_range)],
             )
             .await?;
 
@@ -1941,14 +1962,7 @@ impl AppClient {
                 let extra_params = extra_params.to_vec();
 
                 futures.push(async move {
-                    let mut params = Query::from([
-                        ("market", "from_token"),
-                        ("limit", &limit_str),
-                        ("offset", &offset_str),
-                    ]);
-                    for (key, value) in extra_params {
-                        params.insert(key, value);
-                    }
+                    let params = paging_query(&limit_str, &offset_str, &extra_params);
                     self.http_get::<rspotify::model::Page<T>>(base_url, &params)
                         .await
                 });
@@ -2734,9 +2748,10 @@ fn patch_missing_show_fields(value: &mut serde_json::Value) {
 mod tests {
     use super::{
         clear_memory_caches_on_new_session, device_ids_after_wake, keep_playing_after_desktop_wake,
-        move_seed_track_to_front, order_transfer_device_ids, preferred_device_id,
+        move_seed_track_to_front, order_transfer_device_ids, paging_query, preferred_device_id,
         process_spotify_api_response, rate_limit_backoff, should_select_device,
-        should_wake_for_preferred, DeviceIdsAfterWake, MAX_RETRY_AFTER,
+        should_wake_for_preferred, top_tracks_time_range_param, DeviceIdsAfterWake,
+        MAX_RETRY_AFTER,
     };
     use crate::state::{Device, Track};
     use rspotify::model::TrackId;
@@ -2922,6 +2937,46 @@ mod tests {
         let markets = &patched["items"][0]["show"]["available_markets"];
         assert!(markets.is_array());
         assert!(markets.as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn top_tracks_time_range_param_uses_spotify_snake_case() {
+        assert_eq!(
+            top_tracks_time_range_param(rspotify::model::TimeRange::ShortTerm),
+            ("time_range", "short_term")
+        );
+        assert_eq!(
+            top_tracks_time_range_param(rspotify::model::TimeRange::MediumTerm),
+            ("time_range", "medium_term")
+        );
+        assert_eq!(
+            top_tracks_time_range_param(rspotify::model::TimeRange::LongTerm),
+            ("time_range", "long_term")
+        );
+    }
+
+    #[test]
+    fn paging_query_includes_time_range_extra_on_every_page() {
+        let extra = [top_tracks_time_range_param(
+            rspotify::model::TimeRange::MediumTerm,
+        )];
+        let first = paging_query("50", "0", &extra);
+        let second = paging_query("50", "50", &extra);
+
+        assert_eq!(first.get("market").copied(), Some("from_token"));
+        assert_eq!(first.get("limit").copied(), Some("50"));
+        assert_eq!(first.get("offset").copied(), Some("0"));
+        assert_eq!(first.get("time_range").copied(), Some("medium_term"));
+
+        assert_eq!(second.get("offset").copied(), Some("50"));
+        assert_eq!(second.get("time_range").copied(), Some("medium_term"));
+    }
+
+    #[test]
+    fn paging_query_omits_time_range_without_extras() {
+        let params = paging_query("50", "0", &[]);
+        assert!(!params.contains_key("time_range"));
+        assert_eq!(params.get("market").copied(), Some("from_token"));
     }
 
     #[test]
