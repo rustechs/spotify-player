@@ -250,7 +250,9 @@ pub struct DesktopSpotifyConfig {
     /// from Connect or listed but not actively playing (or when no devices are
     /// listed if `preferred_device` is unset). If MPRIS is already Playing and
     /// Connect lists `preferred_device`, startup still transfers to that device
-    /// with keep-playing and never to another speaker.
+    /// with keep-playing and never to another speaker. If Connect has no current
+    /// playback, the TUI still shows the MPRIS track (title/artists/album/progress)
+    /// so the window is not empty while the desktop client is playing.
     pub enable: bool,
     /// Executable used to launch the desktop client (`spotify`, absolute path, etc.).
     pub command: String,

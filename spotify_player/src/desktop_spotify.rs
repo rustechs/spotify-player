@@ -5,7 +5,9 @@
 //! after autostart that still cannot accept control until nudged. With
 //! `enable_streaming = "Never"`, that leaves `spotify_player` unable to transfer
 //! until the user hits play in the GUI. This module starts the client if needed
-//! and wakes it via MPRIS (`Play` / `OpenUri`) so Connect can use it.
+//! and wakes it via MPRIS (`Play` / `OpenUri`) so Connect can use it. When
+//! Connect has no current playback, it also exposes MPRIS track metadata so the
+//! TUI playback window is not empty while the desktop client is already playing.
 //!
 //! When `pause_after_nudge` is set, that Play/OpenUri is silenced by muting
 //! Spotify's PipeWire/Pulse sink-inputs for the wake (Spotify's MPRIS volume
@@ -16,6 +18,7 @@
 //! audible audio.
 
 use std::{
+    collections::HashMap,
     fs,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
@@ -29,6 +32,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use rspotify::model::{
+    Actions, CurrentPlaybackContext, CurrentlyPlayingType, Device, DeviceType, FullTrack, Image,
+    PlayableItem, RepeatState, SimplifiedAlbum, SimplifiedArtist, TrackId, Type,
+};
 
 use crate::config::DesktopSpotifyConfig;
 
@@ -624,6 +631,351 @@ fn playback_status_is_playing(status: &str) -> bool {
     status.eq_ignore_ascii_case("Playing")
 }
 
+/// Local desktop-client playback parsed from MPRIS (Connect may still be empty).
+#[derive(Debug, Clone, PartialEq)]
+struct MprisNowPlaying {
+    title: String,
+    artists: Vec<String>,
+    album: String,
+    length: chrono::Duration,
+    position: chrono::Duration,
+    is_playing: bool,
+    track_id: Option<String>,
+    art_url: Option<String>,
+    track_number: u32,
+    volume_percent: Option<u32>,
+    shuffle: bool,
+    repeat: RepeatState,
+}
+
+/// Connect `/v1/me/player` often returns null while the official client is
+/// already Playing (or paused on a loaded track) via MPRIS. Use that metadata
+/// for the playback window until Connect lists a session.
+pub fn current_playback_from_mpris(
+    dest: &str,
+    device_name: &str,
+) -> Result<Option<CurrentPlaybackContext>> {
+    Ok(mpris_now_playing(dest)?.map(|now| playback_context_from_mpris(now, device_name)))
+}
+
+fn mpris_now_playing(dest: &str) -> Result<Option<MprisNowPlaying>> {
+    let status = mpris_get_playback_status(dest)?;
+    if status.eq_ignore_ascii_case("Stopped") {
+        return Ok(None);
+    }
+    let metadata_reply = mpris_get_property_reply(dest, "Metadata")?;
+    let parsed = parse_mpris_metadata_reply(&metadata_reply);
+    let position_us = mpris_get_property_reply(dest, "Position")
+        .ok()
+        .as_deref()
+        .and_then(parse_int_after_token_any)
+        .unwrap_or(0);
+    let volume_percent = mpris_get_property_reply(dest, "Volume")
+        .ok()
+        .as_deref()
+        .and_then(parse_volume_percent);
+    let shuffle = mpris_get_property_reply(dest, "Shuffle")
+        .ok()
+        .as_deref()
+        .is_some_and(|s| s.contains("true"));
+    let repeat = mpris_get_property_reply(dest, "LoopStatus")
+        .ok()
+        .as_deref()
+        .map_or(RepeatState::Off, parse_loop_status);
+    Ok(now_playing_from_parsed(
+        &status,
+        parsed,
+        position_us,
+        volume_percent,
+        shuffle,
+        repeat,
+    ))
+}
+
+fn now_playing_from_parsed(
+    status: &str,
+    parsed: ParsedMprisMetadata,
+    position_us: i64,
+    volume_percent: Option<u32>,
+    shuffle: bool,
+    repeat: RepeatState,
+) -> Option<MprisNowPlaying> {
+    if parsed.title.is_empty() {
+        return None;
+    }
+    Some(MprisNowPlaying {
+        title: parsed.title,
+        artists: parsed.artists,
+        album: parsed.album,
+        length: chrono::Duration::microseconds(parsed.length_us.max(0)),
+        position: chrono::Duration::microseconds(position_us.max(0)),
+        is_playing: playback_status_is_playing(status),
+        track_id: parsed.track_id,
+        art_url: parsed.art_url,
+        track_number: parsed.track_number.unwrap_or(1),
+        volume_percent,
+        shuffle,
+        repeat,
+    })
+}
+
+fn playback_context_from_mpris(now: MprisNowPlaying, device_name: &str) -> CurrentPlaybackContext {
+    let artists = if now.artists.is_empty() {
+        vec![simplified_artist("Unknown")]
+    } else {
+        now.artists
+            .iter()
+            .map(|name| simplified_artist(name))
+            .collect()
+    };
+    let images = now
+        .art_url
+        .as_ref()
+        .map(|url| Image {
+            url: url.clone(),
+            height: None,
+            width: None,
+        })
+        .into_iter()
+        .collect();
+    let track_id = now
+        .track_id
+        .as_deref()
+        .and_then(|id| TrackId::from_id(id).ok().map(TrackId::into_static));
+    #[allow(deprecated)]
+    let track = FullTrack {
+        album: SimplifiedAlbum {
+            album_type: None,
+            artists: artists.clone(),
+            external_urls: HashMap::new(),
+            href: None,
+            id: None,
+            images,
+            name: now.album,
+            release_date: None,
+            release_date_precision: None,
+            restrictions: None,
+            ..Default::default()
+        },
+        artists,
+        available_markets: Vec::new(),
+        disc_number: 1,
+        duration: now.length,
+        explicit: false,
+        external_ids: HashMap::new(),
+        external_urls: HashMap::new(),
+        href: None,
+        id: track_id,
+        is_local: false,
+        is_playable: Some(true),
+        linked_from: None,
+        restrictions: None,
+        name: now.title,
+        popularity: 0,
+        preview_url: None,
+        track_number: now.track_number,
+        r#type: Type::Track,
+    };
+    CurrentPlaybackContext {
+        device: Device {
+            id: None,
+            is_active: true,
+            is_private_session: false,
+            is_restricted: false,
+            name: device_name.to_string(),
+            _type: DeviceType::Computer,
+            volume_percent: now.volume_percent,
+        },
+        repeat_state: now.repeat,
+        shuffle_state: now.shuffle,
+        context: None,
+        timestamp: chrono::Utc::now(),
+        progress: Some(now.position),
+        is_playing: now.is_playing,
+        item: Some(PlayableItem::Track(track)),
+        currently_playing_type: CurrentlyPlayingType::Track,
+        actions: Actions::default(),
+    }
+}
+
+fn simplified_artist(name: &str) -> SimplifiedArtist {
+    SimplifiedArtist {
+        external_urls: HashMap::new(),
+        href: None,
+        id: None,
+        name: name.to_string(),
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ParsedMprisMetadata {
+    title: String,
+    artists: Vec<String>,
+    album: String,
+    length_us: i64,
+    track_id: Option<String>,
+    art_url: Option<String>,
+    track_number: Option<u32>,
+}
+
+fn parse_mpris_metadata_reply(stdout: &str) -> ParsedMprisMetadata {
+    let mut parsed = ParsedMprisMetadata::default();
+    for (key, value) in metadata_dict_entries(stdout) {
+        match key.as_str() {
+            "xesam:title" => {
+                parsed.title = first_quoted(&value).unwrap_or_default().to_string();
+            }
+            "xesam:album" => {
+                parsed.album = first_quoted(&value).unwrap_or_default().to_string();
+            }
+            "xesam:artist" => {
+                parsed.artists = quoted_strings(&value);
+            }
+            "mpris:length" => {
+                parsed.length_us = parse_int_after_token_any(&value).unwrap_or(0);
+            }
+            "mpris:trackid" | "mpris:trackId" => {
+                parsed.track_id = first_quoted(&value).and_then(spotify_track_id_from_mpris_text);
+            }
+            "xesam:url" => {
+                if parsed.track_id.is_none() {
+                    parsed.track_id =
+                        first_quoted(&value).and_then(spotify_track_id_from_mpris_text);
+                }
+            }
+            "mpris:artUrl" => {
+                parsed.art_url = first_quoted(&value).map(str::to_string);
+            }
+            "xesam:trackNumber" => {
+                parsed.track_number = parse_int_after_token_any(&value).map(|n| n as u32);
+            }
+            _ => {}
+        }
+    }
+    parsed
+}
+
+fn metadata_dict_entries(stdout: &str) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    let mut rest = stdout;
+    while let Some(idx) = rest.find("dict entry(") {
+        rest = &rest[idx + "dict entry(".len()..];
+        let (this, next) = match rest.find("dict entry(") {
+            Some(n) => rest.split_at(n),
+            None => (rest, ""),
+        };
+        if let Some(key) = first_quoted(this) {
+            let after_key = this
+                .split_once(&format!("\"{key}\""))
+                .map(|(_, rest)| rest.to_string())
+                .unwrap_or_default();
+            entries.push((key.to_string(), after_key));
+        }
+        rest = next;
+    }
+    entries
+}
+
+fn first_quoted(s: &str) -> Option<&str> {
+    let start = s.find('"')?;
+    let rest = &s[start + 1..];
+    let end = rest.find('"')?;
+    Some(&rest[..end])
+}
+
+fn quoted_strings(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(start) = rest.find('"') {
+        rest = &rest[start + 1..];
+        match rest.find('"') {
+            Some(end) => {
+                out.push(rest[..end].to_string());
+                rest = &rest[end + 1..];
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+fn parse_int_after_token_any(s: &str) -> Option<i64> {
+    for token in ["int64", "uint64", "int32"] {
+        if let Some(idx) = s.find(token) {
+            let num = s[idx + token.len()..].split_whitespace().next()?;
+            return num.parse().ok();
+        }
+    }
+    None
+}
+
+fn parse_volume_percent(s: &str) -> Option<u32> {
+    let idx = s.find("double")?;
+    let num: f64 = s[idx + "double".len()..]
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    Some((num.clamp(0.0, 1.0) * 100.0).round() as u32)
+}
+
+fn parse_loop_status(s: &str) -> RepeatState {
+    let text = s.to_ascii_lowercase();
+    if text.contains("track") {
+        RepeatState::Track
+    } else if text.contains("playlist") {
+        RepeatState::Context
+    } else {
+        RepeatState::Off
+    }
+}
+
+fn spotify_track_id_from_mpris_text(text: &str) -> Option<String> {
+    const ID_LEN: usize = 22;
+    if let Some(idx) = text.rfind("/track/") {
+        let id = text[idx + "/track/".len()..]
+            .split(['?', '/'])
+            .next()
+            .unwrap_or("");
+        if id.len() == ID_LEN {
+            return Some(id.to_string());
+        }
+    }
+    if let Some((_, rest)) = text.split_once("track:") {
+        let id = rest.split(['?', '/']).next().unwrap_or("");
+        if id.len() == ID_LEN {
+            return Some(id.to_string());
+        }
+    }
+    if text.len() == ID_LEN && text.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Some(text.to_string());
+    }
+    None
+}
+
+fn mpris_get_property_reply(dest: &str, name: &str) -> Result<String> {
+    let output = Command::new("dbus-send")
+        .args([
+            "--session",
+            "--print-reply",
+            "--type=method_call",
+            &format!("--dest={dest}"),
+            MPRIS_OBJECT,
+            &format!("{DBUS_PROPERTIES}.Get"),
+            &format!("string:{MPRIS_PLAYER}"),
+            &format!("string:{name}"),
+        ])
+        .output()
+        .with_context(|| format!("failed to read MPRIS {name}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("MPRIS Get {name} failed: {stderr}");
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 /// Retry Pause until MPRIS reports Paused/Stopped, or `budget` elapses.
 fn pause_until_silent(dest: &str, budget: Duration) -> bool {
     let start = Instant::now();
@@ -979,6 +1331,128 @@ mod tests {
         assert!(playback_status_is_playing("Playing"));
         assert!(playback_status_is_playing("playing"));
         assert!(!playback_status_is_playing("Paused"));
+    }
+
+    const SAMPLE_METADATA: &str = r#"
+method return
+   variant       array [
+         dict entry(
+            string "mpris:trackid"
+            variant                string "/com/spotify/track/6lmsHxA47XsTQ1BPL1PMx7"
+         )
+         dict entry(
+            string "mpris:length"
+            variant                uint64 152000000
+         )
+         dict entry(
+            string "mpris:artUrl"
+            variant                string "https://i.scdn.co/image/ab67616d0000b2735e968be90e158a68975426b8"
+         )
+         dict entry(
+            string "xesam:album"
+            variant                string "Paradise Records (Compilation)"
+         )
+         dict entry(
+            string "xesam:artist"
+            variant                array [
+                  string "Logic"
+               ]
+         )
+         dict entry(
+            string "xesam:title"
+            variant                string "Raider of the Lost Art"
+         )
+         dict entry(
+            string "xesam:trackNumber"
+            variant                int32 3
+         )
+         dict entry(
+            string "xesam:url"
+            variant                string "https://open.spotify.com/track/6lmsHxA47XsTQ1BPL1PMx7"
+         )
+      ]
+"#;
+
+    #[test]
+    fn parses_mpris_metadata_dict_for_playback_window() {
+        let parsed = parse_mpris_metadata_reply(SAMPLE_METADATA);
+        assert_eq!(parsed.title, "Raider of the Lost Art");
+        assert_eq!(parsed.artists, vec!["Logic"]);
+        assert_eq!(parsed.album, "Paradise Records (Compilation)");
+        assert_eq!(parsed.length_us, 152_000_000);
+        assert_eq!(parsed.track_id.as_deref(), Some("6lmsHxA47XsTQ1BPL1PMx7"));
+        assert_eq!(
+            parsed.art_url.as_deref(),
+            Some("https://i.scdn.co/image/ab67616d0000b2735e968be90e158a68975426b8")
+        );
+        assert_eq!(parsed.track_number, Some(3));
+    }
+
+    #[test]
+    fn mpris_now_playing_skips_empty_title_and_stopped() {
+        let parsed = ParsedMprisMetadata::default();
+        assert!(
+            now_playing_from_parsed("Playing", parsed, 0, None, false, RepeatState::Off).is_none()
+        );
+    }
+
+    #[test]
+    fn mpris_fallback_builds_connect_shaped_playback() {
+        let parsed = parse_mpris_metadata_reply(SAMPLE_METADATA);
+        let now = now_playing_from_parsed(
+            "Playing",
+            parsed,
+            47_166_000,
+            Some(80),
+            false,
+            RepeatState::Off,
+        )
+        .expect("title present");
+        let playback = playback_context_from_mpris(now, "estelle");
+        assert!(playback.is_playing);
+        assert_eq!(playback.device.name, "estelle");
+        assert_eq!(playback.device.id, None);
+        assert_eq!(
+            playback.progress,
+            Some(chrono::Duration::microseconds(47_166_000))
+        );
+        match playback.item {
+            Some(PlayableItem::Track(track)) => {
+                assert_eq!(track.name, "Raider of the Lost Art");
+                assert_eq!(track.artists[0].name, "Logic");
+                assert_eq!(track.album.name, "Paradise Records (Compilation)");
+                assert_eq!(track.duration, chrono::Duration::microseconds(152_000_000));
+                assert_eq!(
+                    track.id.as_ref().map(rspotify::prelude::Id::id),
+                    Some("6lmsHxA47XsTQ1BPL1PMx7")
+                );
+                assert_eq!(
+                    track.album.images[0].url,
+                    "https://i.scdn.co/image/ab67616d0000b2735e968be90e158a68975426b8"
+                );
+            }
+            other => panic!("expected track, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_spotify_ids_from_mpris_trackid_and_url() {
+        assert_eq!(
+            spotify_track_id_from_mpris_text("/com/spotify/track/6lmsHxA47XsTQ1BPL1PMx7")
+                .as_deref(),
+            Some("6lmsHxA47XsTQ1BPL1PMx7")
+        );
+        assert_eq!(
+            spotify_track_id_from_mpris_text(
+                "https://open.spotify.com/track/6lmsHxA47XsTQ1BPL1PMx7"
+            )
+            .as_deref(),
+            Some("6lmsHxA47XsTQ1BPL1PMx7")
+        );
+        assert_eq!(
+            spotify_track_id_from_mpris_text("spotify:track:6lmsHxA47XsTQ1BPL1PMx7").as_deref(),
+            Some("6lmsHxA47XsTQ1BPL1PMx7")
+        );
     }
 
     #[test]
