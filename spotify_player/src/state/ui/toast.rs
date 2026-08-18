@@ -26,7 +26,7 @@ pub struct Toast {
     pub kind: ToastKind,
     pub message: String,
     /// Deadline after which the toast leaves the FIFO.
-    pub expires_at: Option<Instant>,
+    pub expires_at: Instant,
 }
 
 impl Toast {
@@ -34,7 +34,7 @@ impl Toast {
         Self {
             kind: ToastKind::Success,
             message: message.into(),
-            expires_at: Some(Instant::now() + timeout),
+            expires_at: Instant::now() + timeout,
         }
     }
 
@@ -42,7 +42,7 @@ impl Toast {
         Self {
             kind: ToastKind::Error,
             message: message.into(),
-            expires_at: Some(Instant::now() + timeout),
+            expires_at: Instant::now() + timeout,
         }
     }
 }
@@ -84,13 +84,12 @@ impl ToastQueue {
 
     /// Remove expired toasts from the front.
     pub fn expire_due(&mut self, now: Instant) {
-        while let Some(front) = self.items.front() {
-            match front.expires_at {
-                Some(deadline) if deadline <= now => {
-                    self.items.pop_front();
-                }
-                _ => break,
-            }
+        while self
+            .items
+            .front()
+            .is_some_and(|toast| toast.expires_at <= now)
+        {
+            self.items.pop_front();
         }
     }
 
@@ -343,7 +342,7 @@ mod tests {
         Toast {
             kind: ToastKind::Success,
             message: msg.to_string(),
-            expires_at: Some(expires_at),
+            expires_at,
         }
     }
 
@@ -351,7 +350,7 @@ mod tests {
         Toast {
             kind: ToastKind::Error,
             message: msg.to_string(),
-            expires_at: Some(expires_at),
+            expires_at,
         }
     }
 

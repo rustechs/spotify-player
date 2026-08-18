@@ -2072,6 +2072,7 @@ impl AppClient {
                     }
                 }
             };
+            let playback = overlay_mpris_when_connect_empty(playback);
             let mut player = state.player.write();
 
             let prev_item = player.currently_playing();
@@ -2187,12 +2188,18 @@ impl AppClient {
 
         let filename = (match curr_item {
             rspotify::model::PlayableItem::Track(ref track) => {
+                let artist = track
+                    .album
+                    .artists
+                    .first()
+                    .map_or("unknown", |a| a.name.as_str());
+                let album_id = track.album.id.as_ref().map(rspotify::prelude::Id::id);
+                let track_id = track.id.as_ref().map(rspotify::prelude::Id::id);
                 format!(
                     "{}-{}-cover-{}.jpg",
                     track.album.name,
-                    track.album.artists.first().unwrap().name,
-                    // first 6 characters of the album's id
-                    &track.album.id.as_ref().unwrap().id()[..6]
+                    artist,
+                    cover_image_id_prefix(album_id, track_id)
                 )
             }
             rspotify::model::PlayableItem::Episode(ref episode) => {
@@ -2473,6 +2480,52 @@ fn parse_retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
         .ok()?
         .parse()
         .ok()
+}
+
+/// When Connect has no session, show the official client's MPRIS track instead
+/// of an empty playback window.
+fn overlay_mpris_when_connect_empty(
+    connect: Option<rspotify::model::CurrentPlaybackContext>,
+) -> Option<rspotify::model::CurrentPlaybackContext> {
+    if connect.is_some() {
+        return connect;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let configs = config::get_config();
+        let desktop = &configs.app_config.desktop_spotify;
+        if !desktop.enable {
+            return None;
+        }
+        let device_name = configs
+            .app_config
+            .preferred_device
+            .clone()
+            .unwrap_or_else(|| "Spotify".to_string());
+        match crate::desktop_spotify::current_playback_from_mpris(&desktop.mpris_dest, &device_name)
+        {
+            Ok(Some(playback)) => {
+                tracing::debug!(
+                    "Connect has no current playback; showing desktop MPRIS track as {device_name}"
+                );
+                Some(playback)
+            }
+            Ok(None) => None,
+            Err(err) => {
+                tracing::debug!("MPRIS playback fallback failed: {err:#}");
+                None
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+fn cover_image_id_prefix(album_id: Option<&str>, track_id: Option<&str>) -> String {
+    let src = album_id.or(track_id).unwrap_or("mpris");
+    src.chars().take(6).collect()
 }
 
 /// Wake the desktop client, returning how the wake went (`None` when it did not happen).
@@ -2809,11 +2862,11 @@ fn patch_missing_show_fields(value: &mut serde_json::Value) {
 #[cfg(test)]
 mod tests {
     use super::{
-        clear_memory_caches_on_new_session, device_ids_after_wake, keep_playing_after_desktop_wake,
-        move_seed_track_to_front, order_transfer_device_ids, paging_query, preferred_device_id,
-        process_spotify_api_response, rate_limit_backoff, should_select_device,
-        should_wake_for_preferred, top_tracks_time_range_param, DeviceIdsAfterWake,
-        MAX_RETRY_AFTER,
+        clear_memory_caches_on_new_session, cover_image_id_prefix, device_ids_after_wake,
+        keep_playing_after_desktop_wake, move_seed_track_to_front, order_transfer_device_ids,
+        paging_query, preferred_device_id, process_spotify_api_response, rate_limit_backoff,
+        should_select_device, should_wake_for_preferred, top_tracks_time_range_param,
+        DeviceIdsAfterWake, MAX_RETRY_AFTER,
     };
     use crate::state::{Device, Track};
     use rspotify::model::TrackId;
@@ -2939,6 +2992,16 @@ mod tests {
         // Local MPRIS already Playing: transfer must not pause.
         assert!(keep_playing_after_desktop_wake(true, true, true));
         assert!(!keep_playing_after_desktop_wake(false, true, true));
+    }
+
+    #[test]
+    fn cover_image_id_prefix_falls_back_without_album_id() {
+        assert_eq!(cover_image_id_prefix(Some("abcdef123"), None), "abcdef");
+        assert_eq!(
+            cover_image_id_prefix(None, Some("6lmsHxA47XsTQ1BPL1PMx7")),
+            "6lmsHx"
+        );
+        assert_eq!(cover_image_id_prefix(None, None), "mpris");
     }
 
     #[test]
