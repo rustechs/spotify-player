@@ -171,8 +171,10 @@ Options in the `[desktop_spotify]` section launch and/or MPRIS-nudge the officia
 | `mpris_dest` | MPRIS D-Bus name. | `org.mpris.MediaPlayer2.spotify` |
 | `nudge_uri` | Optional `OpenUri` target (`spotify:…` or open.spotify.com URL). If unset, recently played is used at TUI startup, else bare `Play`. | unset |
 | `pause_after_nudge` | Pause after the wake so Connect registers the device without leaving audio playing. The registration Play/OpenUri is silenced (MPRIS volume 0 and local Spotify Pulse/PipeWire mute). Mute stays until MPRIS reports paused (retries, then a short background hold); volume is restored only after pause, or after a timeout so mute cannot stick forever. Playback then starts only from an explicit CLI/TUI play command. Set false to hear the automatically started playback. | `true` |
-| `start_minimized` | Hide Spotify to the **system tray** after launch or MPRIS nudge (and again after Connect transfer if the window remaps). Uses `xdotool windowclose` when Spotify's `ui.minimize_to_tray` pref is on (this helper enables that pref before launch); otherwise falls back to taskbar minimize. Requires `xdotool`. Brief flash still possible. | `true` |
+| `start_minimized` | Hide Spotify to the **system tray** after launch or MPRIS nudge (and again after Connect transfer if the window remaps). Uses `xdotool windowclose` on **visible** main UI windows when Spotify's `ui.minimize_to_tray` pref is on (this helper enables that pref before launch); otherwise falls back to taskbar minimize. Requires `xdotool`. Brief flash still possible. | `true` |
 | `ready_timeout_secs` | Max wait for MPRIS after launch. | `45` |
+
+Tray hide only targets mapped visible main windows. Closing hidden or minimized ghosts (for example from `wmctrl hidden` login autostart or a KWin no-focus rule that minimized Spotify before tray hide runs) can leave the desktop client thinking the UI is shown while nothing is visible — tray **Show Spotify** toggles to **Minimize to Tray** without mapping a window. For KDE login autostart, use tray-compatible hide when `ui.minimize_to_tray=true` (see `scripts/spotify-login-autostart.example.sh`) instead of `wmctrl hidden`.
 
 ### Layout configuration
 
