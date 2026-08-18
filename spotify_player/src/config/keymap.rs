@@ -189,6 +189,14 @@ impl Default for KeymapConfig {
                     command: Command::TopTrackPage,
                 },
                 Keymap {
+                    key_sequence: "g S".into(),
+                    command: Command::ShortTermTopTrackPage,
+                },
+                Keymap {
+                    key_sequence: "g Y".into(),
+                    command: Command::LongTermTopTrackPage,
+                },
+                Keymap {
                     key_sequence: "g r".into(),
                     command: Command::RecentlyPlayedTrackPage,
                 },

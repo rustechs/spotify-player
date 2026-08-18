@@ -2,11 +2,19 @@ pub use super::*;
 use std::sync::LazyLock;
 
 pub const USER_TOP_TRACKS_URI: &str = "tracks:user-top-tracks";
+pub const USER_TOP_TRACKS_SHORT_TERM_URI: &str = "tracks:user-top-tracks-short-term";
+pub const USER_TOP_TRACKS_LONG_TERM_URI: &str = "tracks:user-top-tracks-long-term";
 pub const USER_RECENTLY_PLAYED_TRACKS_URI: &str = "tracks:user-recently-played-tracks";
 pub const USER_LIKED_TRACKS_URI: &str = "tracks:user-liked-tracks";
 
 pub static USER_TOP_TRACKS_ID: LazyLock<TracksId> =
     LazyLock::new(|| TracksId::new(USER_TOP_TRACKS_URI, "Top Tracks"));
+
+pub static USER_TOP_TRACKS_SHORT_TERM_ID: LazyLock<TracksId> =
+    LazyLock::new(|| TracksId::new(USER_TOP_TRACKS_SHORT_TERM_URI, "Top Tracks (4 Weeks)"));
+
+pub static USER_TOP_TRACKS_LONG_TERM_ID: LazyLock<TracksId> =
+    LazyLock::new(|| TracksId::new(USER_TOP_TRACKS_LONG_TERM_URI, "Top Tracks (1 Year)"));
 
 pub static USER_RECENTLY_PLAYED_TRACKS_ID: LazyLock<TracksId> =
     LazyLock::new(|| TracksId::new(USER_RECENTLY_PLAYED_TRACKS_URI, "Recently Played Tracks"));

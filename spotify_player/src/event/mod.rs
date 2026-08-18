@@ -14,6 +14,7 @@ use crate::{
         PlaylistFolderItem, PlaylistId, PlaylistPopupAction, PopupState, SearchFocusState,
         SearchPageUIState, SharedState, ShowId, Track, TrackId, TrackOrder, TracksId, UIStateGuard,
         USER_LIKED_TRACKS_ID, USER_RECENTLY_PLAYED_TRACKS_ID, USER_TOP_TRACKS_ID,
+        USER_TOP_TRACKS_LONG_TERM_ID, USER_TOP_TRACKS_SHORT_TERM_ID,
     },
     ui::{single_line_input::LineInput, Orientation},
     utils::parse_uri,
@@ -701,6 +702,20 @@ fn handle_global_command(
                 ui,
                 client_pub,
                 ContextId::Tracks(USER_TOP_TRACKS_ID.to_owned()),
+            )?;
+        }
+        Command::ShortTermTopTrackPage => {
+            open_context_page(
+                ui,
+                client_pub,
+                ContextId::Tracks(USER_TOP_TRACKS_SHORT_TERM_ID.to_owned()),
+            )?;
+        }
+        Command::LongTermTopTrackPage => {
+            open_context_page(
+                ui,
+                client_pub,
+                ContextId::Tracks(USER_TOP_TRACKS_LONG_TERM_ID.to_owned()),
             )?;
         }
         Command::RecentlyPlayedTrackPage => {

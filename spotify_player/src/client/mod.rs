@@ -11,7 +11,7 @@ use crate::{
         Device, FileCacheKey, Item, ItemId, MemoryCaches, Playback, PlaybackMetadata, Playlist,
         PlaylistFolderItem, PlaylistId, SearchResults, SharedState, Show, ShowId, Track, TrackId,
         UserId, TTL_CACHE_DURATION, USER_LIKED_TRACKS_URI, USER_RECENTLY_PLAYED_TRACKS_URI,
-        USER_TOP_TRACKS_URI,
+        USER_TOP_TRACKS_LONG_TERM_URI, USER_TOP_TRACKS_SHORT_TERM_URI, USER_TOP_TRACKS_URI,
     },
 };
 
@@ -803,10 +803,27 @@ impl AppClient {
                         ContextId::Album(album_id) => self.album_context(album_id).await?,
                         ContextId::Artist(artist_id) => self.artist_context(artist_id).await?,
                         ContextId::Tracks(tracks_id) => match tracks_id.uri.as_str() {
-                            USER_TOP_TRACKS_URI => Context::Tracks {
-                                tracks: self.current_user_top_tracks().await?,
-                                desc: "User's top tracks".to_string(),
-                            },
+                            USER_TOP_TRACKS_URI => {
+                                self.user_top_tracks_context(
+                                    rspotify::model::TimeRange::MediumTerm,
+                                    "User's top tracks (~6 months)",
+                                )
+                                .await?
+                            }
+                            USER_TOP_TRACKS_SHORT_TERM_URI => {
+                                self.user_top_tracks_context(
+                                    rspotify::model::TimeRange::ShortTerm,
+                                    "User's top tracks (~4 weeks)",
+                                )
+                                .await?
+                            }
+                            USER_TOP_TRACKS_LONG_TERM_URI => {
+                                self.user_top_tracks_context(
+                                    rspotify::model::TimeRange::LongTerm,
+                                    "User's top tracks (~1 year)",
+                                )
+                                .await?
+                            }
                             USER_RECENTLY_PLAYED_TRACKS_URI => Context::Tracks {
                                 tracks: self.current_user_recently_played_tracks().await?,
                                 desc: "User's recently played tracks".to_string(),
@@ -1169,12 +1186,17 @@ impl AppClient {
         Ok(tracks)
     }
 
-    /// Get the top tracks of the current user
-    pub async fn current_user_top_tracks(&self) -> Result<Vec<Track>> {
+    /// Get the top tracks of the current user over a Spotify affinity time range.
+    pub async fn current_user_top_tracks(
+        &self,
+        time_range: rspotify::model::TimeRange,
+    ) -> Result<Vec<Track>> {
+        let time_range: &'static str = time_range.into();
         let tracks = self
-            .all_paging_items::<rspotify::model::FullTrack>(
+            .all_paging_items_with::<rspotify::model::FullTrack>(
                 &format!("{SPOTIFY_API_ENDPOINT}/me/top/tracks"),
                 0, // we don't know the total number of top tracks beforehand
+                &[("time_range", time_range)],
             )
             .await?;
 
@@ -1182,6 +1204,17 @@ impl AppClient {
             .into_iter()
             .filter_map(Track::try_from_full_track)
             .collect())
+    }
+
+    async fn user_top_tracks_context(
+        &self,
+        time_range: rspotify::model::TimeRange,
+        desc: &str,
+    ) -> Result<Context> {
+        Ok(Context::Tracks {
+            tracks: self.current_user_top_tracks(time_range).await?,
+            desc: desc.to_string(),
+        })
     }
 
     /// Get all playlists of the current user
@@ -1869,7 +1902,19 @@ impl AppClient {
         }
     }
 
-    async fn all_paging_items<T>(&self, base_url: &str, mut count: usize) -> Result<Vec<T>>
+    async fn all_paging_items<T>(&self, base_url: &str, count: usize) -> Result<Vec<T>>
+    where
+        T: serde::de::DeserializeOwned + std::fmt::Debug,
+    {
+        self.all_paging_items_with(base_url, count, &[]).await
+    }
+
+    async fn all_paging_items_with<T>(
+        &self,
+        base_url: &str,
+        mut count: usize,
+        extra_params: &[(&'static str, &'static str)],
+    ) -> Result<Vec<T>>
     where
         T: serde::de::DeserializeOwned + std::fmt::Debug,
     {
@@ -1893,13 +1938,17 @@ impl AppClient {
                 let current_offset = offset + i * PAGE_LIMIT;
                 let limit_str = PAGE_LIMIT.to_string();
                 let offset_str = current_offset.to_string();
+                let extra_params = extra_params.to_vec();
 
                 futures.push(async move {
-                    let params = Query::from([
+                    let mut params = Query::from([
                         ("market", "from_token"),
                         ("limit", &limit_str),
                         ("offset", &offset_str),
                     ]);
+                    for (key, value) in extra_params {
+                        params.insert(key, value);
+                    }
                     self.http_get::<rspotify::model::Page<T>>(base_url, &params)
                         .await
                 });
