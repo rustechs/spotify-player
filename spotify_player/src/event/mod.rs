@@ -72,6 +72,12 @@ pub fn open_context_page(
     Ok(())
 }
 
+/// Next volume after `delta`, or `None` when unchanged.
+fn adjusted_volume(current: u32, delta: i32) -> Option<u8> {
+    let new = (current as i32 + delta).clamp(0, 100) as u8;
+    (u32::from(new) != current).then_some(new)
+}
+
 // Handle a terminal mouse event
 fn handle_mouse_event(
     event: crossterm::event::MouseEvent,
@@ -87,8 +93,10 @@ fn handle_mouse_event(
             let step = config::get_config().app_config.volume_scroll_step;
             if let Some(ref playback) = state.player.read().buffered_playback {
                 if let Some(volume) = playback.volume {
-                    let new_volume = std::cmp::min(volume as u8 + step, 100);
-                    client_pub.send(ClientRequest::Player(PlayerRequest::Volume(new_volume)))?;
+                    if let Some(new_volume) = adjusted_volume(volume, i32::from(step)) {
+                        client_pub
+                            .send(ClientRequest::Player(PlayerRequest::Volume(new_volume)))?;
+                    }
                 }
             }
         }
@@ -96,8 +104,10 @@ fn handle_mouse_event(
             let step = config::get_config().app_config.volume_scroll_step;
             if let Some(ref playback) = state.player.read().buffered_playback {
                 if let Some(volume) = playback.volume {
-                    let new_volume = (volume as u8).saturating_sub(step);
-                    client_pub.send(ClientRequest::Player(PlayerRequest::Volume(new_volume)))?;
+                    if let Some(new_volume) = adjusted_volume(volume, -i32::from(step)) {
+                        client_pub
+                            .send(ClientRequest::Player(PlayerRequest::Volume(new_volume)))?;
+                    }
                 }
             }
         }
@@ -603,8 +613,10 @@ fn handle_global_command(
         Command::VolumeChange { offset } => {
             if let Some(ref playback) = state.player.read().buffered_playback {
                 if let Some(volume) = playback.volume {
-                    let volume = std::cmp::min(volume as i32 + offset, 100_i32);
-                    client_pub.send(ClientRequest::Player(PlayerRequest::Volume(volume as u8)))?;
+                    if let Some(new_volume) = adjusted_volume(volume, offset) {
+                        client_pub
+                            .send(ClientRequest::Player(PlayerRequest::Volume(new_volume)))?;
+                    }
                 }
             }
         }
@@ -899,4 +911,18 @@ fn handle_global_command(
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::adjusted_volume;
+
+    #[test]
+    fn adjusted_volume_skips_noop_at_zero_and_full() {
+        assert_eq!(adjusted_volume(0, -5), None);
+        assert_eq!(adjusted_volume(100, 5), None);
+        assert_eq!(adjusted_volume(0, 5), Some(5));
+        assert_eq!(adjusted_volume(80, -5), Some(75));
+        assert_eq!(adjusted_volume(98, 5), Some(100));
+    }
 }

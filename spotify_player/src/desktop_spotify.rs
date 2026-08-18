@@ -8,6 +8,9 @@
 //! and wakes it via MPRIS (`Play` / `OpenUri`) so Connect can use it. When
 //! Connect has no current playback, it also exposes MPRIS track metadata so the
 //! TUI playback window is not empty while the desktop client is already playing.
+//! When Connect reports a preferred-device session at silent volume,
+//! `overlay_connect_volume` / `mpris_volume_percent` overlay the audible MPRIS
+//! volume (the Web API often reports 0% while MPRIS is not).
 //!
 //! When `pause_after_nudge` is set, that Play/OpenUri is silenced by muting
 //! Spotify's PipeWire/Pulse sink-inputs for the wake (Spotify's MPRIS volume
@@ -909,6 +912,25 @@ fn parse_int_after_token_any(s: &str) -> Option<i64> {
     None
 }
 
+/// Prefer a non-zero MPRIS percent when Connect reports 0 or missing volume.
+pub(crate) fn overlay_connect_volume(
+    connect_volume: Option<u32>,
+    mpris_volume: Option<u32>,
+) -> Option<u32> {
+    match connect_volume {
+        Some(v) if v > 0 => Some(v),
+        _ => mpris_volume.filter(|&v| v > 0).or(connect_volume),
+    }
+}
+
+/// Desktop client's MPRIS Volume as a percent (0–100).
+pub(crate) fn mpris_volume_percent(dest: &str) -> Option<u32> {
+    mpris_get_property_reply(dest, "Volume")
+        .ok()
+        .as_deref()
+        .and_then(parse_volume_percent)
+}
+
 fn parse_volume_percent(s: &str) -> Option<u32> {
     let idx = s.find("double")?;
     let num: f64 = s[idx + "double".len()..]
@@ -1412,6 +1434,7 @@ method return
         assert!(playback.is_playing);
         assert_eq!(playback.device.name, "estelle");
         assert_eq!(playback.device.id, None);
+        assert_eq!(playback.device.volume_percent, Some(80));
         assert_eq!(
             playback.progress,
             Some(chrono::Duration::microseconds(47_166_000))
@@ -1453,6 +1476,26 @@ method return
             spotify_track_id_from_mpris_text("spotify:track:6lmsHxA47XsTQ1BPL1PMx7").as_deref(),
             Some("6lmsHxA47XsTQ1BPL1PMx7")
         );
+    }
+
+    #[test]
+    fn overlay_connect_volume_prefers_audible_mpris_when_connect_is_silent() {
+        assert_eq!(overlay_connect_volume(Some(0), Some(100)), Some(100));
+        assert_eq!(overlay_connect_volume(None, Some(80)), Some(80));
+        assert_eq!(overlay_connect_volume(Some(70), Some(100)), Some(70));
+        assert_eq!(overlay_connect_volume(Some(0), Some(0)), Some(0));
+        assert_eq!(overlay_connect_volume(Some(0), None), Some(0));
+    }
+
+    #[test]
+    fn parses_dbus_send_double_volume() {
+        assert_eq!(
+            parse_volume_percent("method return\n   variant       double 1\n"),
+            Some(100)
+        );
+        assert_eq!(parse_volume_percent("variant double 0.8"), Some(80));
+        assert_eq!(parse_volume_percent("variant double 0"), Some(0));
+        assert_eq!(parse_volume_percent("no volume here"), None);
     }
 
     #[test]
