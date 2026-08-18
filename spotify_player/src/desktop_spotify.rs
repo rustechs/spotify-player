@@ -288,10 +288,12 @@ enum HideVisible {
 }
 
 fn hide_visible_once(to_tray: bool) -> Result<HideVisible> {
-    // A KWin no-focus rule may have minimized the UI before we get here.
-    // For tray hiding, include that already-hidden window so `windowclose`
-    // can remove its taskbar entry without mapping or focusing it first.
-    let ids = ui_window_ids(!to_tray)?;
+    // Only act on mapped, visible main UI windows. Tray hide uses `windowclose`,
+    // which must not target hidden/minimized ghosts (e.g. from login autostart or
+    // a KWin no-focus rule): closing those leaves Spotify thinking the UI is
+    // shown while nothing is actually visible ("Show Spotify" toggles to
+    // "Minimize to Tray" without mapping a window).
+    let ids = ui_window_ids(true)?;
     if ids.is_empty() {
         return Ok(HideVisible::NoneVisible);
     }
