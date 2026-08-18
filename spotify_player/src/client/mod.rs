@@ -2072,7 +2072,7 @@ impl AppClient {
                     }
                 }
             };
-            let playback = overlay_mpris_when_connect_empty(playback);
+            let playback = overlay_desktop_mpris(playback);
             let mut player = state.player.write();
 
             let prev_item = player.currently_playing();
@@ -2482,44 +2482,66 @@ fn parse_retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
         .ok()
 }
 
-/// When Connect has no session, show the official client's MPRIS track instead
-/// of an empty playback window.
-fn overlay_mpris_when_connect_empty(
+/// Overlay Linux desktop MPRIS onto Connect playback:
+/// - no Connect session → show the MPRIS track so the window is not empty
+/// - Connect session on `preferred_device` with volume 0/None → use MPRIS volume
+///   (the Web API often reports 0% for the official client while audio is fine)
+fn overlay_desktop_mpris(
     connect: Option<rspotify::model::CurrentPlaybackContext>,
 ) -> Option<rspotify::model::CurrentPlaybackContext> {
-    if connect.is_some() {
-        return connect;
+    #[cfg(not(target_os = "linux"))]
+    {
+        connect
     }
     #[cfg(target_os = "linux")]
     {
         let configs = config::get_config();
         let desktop = &configs.app_config.desktop_spotify;
         if !desktop.enable {
-            return None;
+            return connect;
         }
         let device_name = configs
             .app_config
             .preferred_device
             .clone()
             .unwrap_or_else(|| "Spotify".to_string());
-        match crate::desktop_spotify::current_playback_from_mpris(&desktop.mpris_dest, &device_name)
-        {
-            Ok(Some(playback)) => {
-                tracing::debug!(
-                    "Connect has no current playback; showing desktop MPRIS track as {device_name}"
-                );
+        match connect {
+            None => {
+                match crate::desktop_spotify::current_playback_from_mpris(
+                    &desktop.mpris_dest,
+                    &device_name,
+                ) {
+                    Ok(Some(playback)) => {
+                        tracing::debug!(
+                            "Connect has no current playback; showing desktop MPRIS track as {device_name}"
+                        );
+                        Some(playback)
+                    }
+                    Ok(None) => None,
+                    Err(err) => {
+                        tracing::debug!("MPRIS playback fallback failed: {err:#}");
+                        None
+                    }
+                }
+            }
+            Some(mut playback) => {
+                if playback.device.name.eq_ignore_ascii_case(&device_name) {
+                    let mpris = crate::desktop_spotify::mpris_volume_percent(&desktop.mpris_dest);
+                    let overlaid = crate::desktop_spotify::overlay_connect_volume(
+                        playback.device.volume_percent,
+                        mpris,
+                    );
+                    if overlaid != playback.device.volume_percent {
+                        tracing::debug!(
+                            "Connect volume {:?} is silent for {device_name}; using MPRIS volume {overlaid:?}",
+                            playback.device.volume_percent
+                        );
+                        playback.device.volume_percent = overlaid;
+                    }
+                }
                 Some(playback)
             }
-            Ok(None) => None,
-            Err(err) => {
-                tracing::debug!("MPRIS playback fallback failed: {err:#}");
-                None
-            }
         }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
     }
 }
 
