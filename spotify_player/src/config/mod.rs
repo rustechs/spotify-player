@@ -252,7 +252,7 @@ pub struct DesktopSpotifyConfig {
     /// but not actively playing (or when no devices are listed if
     /// `preferred_device` is unset). A paused mid-session reconnect skips that
     /// nudge. If MPRIS is already Playing and Connect lists `preferred_device`,
-    /// startup still transfers to that device with keep-playing and never to
+    /// first-session init still transfers to that device with keep-playing and never to
     /// another speaker. If Connect has no current playback, the TUI still shows
     /// the MPRIS track (title/artists/album/progress) so the window is not empty
     /// while the desktop client is playing. Connect often reports volume 0% for
