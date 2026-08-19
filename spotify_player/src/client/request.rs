@@ -73,7 +73,11 @@ impl ClientRequest {
             | Self::AddToLibrary(_)
             | Self::DeleteFromLibrary(_)
             | Self::CreatePlaylist { .. }
-            | Self::Player(PlayerRequest::NextTrack | PlayerRequest::PreviousTrack) => true,
+            | Self::Player(
+                PlayerRequest::StartPlayback(_, _)
+                | PlayerRequest::NextTrack
+                | PlayerRequest::PreviousTrack,
+            ) => true,
             Self::GetCurrentUser
             | Self::GetDevices
             | Self::GetBrowseCategories
@@ -104,6 +108,7 @@ impl ClientRequest {
             Self::DeleteFromLibrary(ItemId::Track(_)) => Some("Unliked"),
             Self::DeleteFromLibrary(_) => Some("Removed from library"),
             Self::CreatePlaylist { .. } => Some("Created playlist"),
+            Self::Player(PlayerRequest::StartPlayback(_, _)) => Some("Playing"),
             Self::Player(PlayerRequest::NextTrack) => Some("Skipped to next"),
             Self::Player(PlayerRequest::PreviousTrack) => Some("Skipped to previous"),
             Self::GetCurrentUser
@@ -129,7 +134,7 @@ impl ClientRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{Artist, ArtistId, Category, ContextId, Item, ItemId, TracksId};
+    use crate::state::{Artist, ArtistId, Category, ContextId, Item, ItemId, Playback, TracksId};
 
     fn track_id() -> TrackId<'static> {
         TrackId::from_id("3n3Ppam7vgaVa1iaRUc9Lp")
@@ -181,6 +186,10 @@ mod tests {
                 collab: false,
                 desc: String::new(),
             },
+            ClientRequest::Player(PlayerRequest::StartPlayback(
+                Playback::URIs(vec![track_id().into()], None),
+                None,
+            )),
             ClientRequest::Player(PlayerRequest::NextTrack),
             ClientRequest::Player(PlayerRequest::PreviousTrack),
         ];
@@ -219,6 +228,14 @@ mod tests {
         #[cfg(feature = "streaming")]
         assert!(!ClientRequest::RestartIntegratedClient.is_toastable());
 
+        assert_eq!(
+            ClientRequest::Player(PlayerRequest::StartPlayback(
+                Playback::URIs(vec![track_id().into()], None),
+                None,
+            ))
+            .toast_success_message(),
+            Some("Playing")
+        );
         assert_eq!(
             ClientRequest::Player(PlayerRequest::NextTrack).toast_success_message(),
             Some("Skipped to next")
