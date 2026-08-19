@@ -1265,8 +1265,7 @@ impl AppClient {
 
     #[cfg(not(target_os = "linux"))]
     async fn wake_preferred_device_for_playback(&self) -> Result<Option<String>> {
-        let _ = self;
-        Ok(None)
+        std::future::ready(Ok(None)).await
     }
 
     /// Find available Connect devices to transfer playback to, ordered by preference.
