@@ -235,6 +235,7 @@ pub fn handle_cli_subcommand(cmd: &str, args: &ArgMatches) -> Result<()> {
                 rt.block_on(crate::desktop_spotify::ensure_awake(
                     &desktop,
                     nudge_uri.as_deref(),
+                    crate::desktop_spotify::NudgePolicy::SkipIfPlaying,
                 ))
                 .context("wake desktop Spotify")?;
                 println!("Desktop Spotify woke (MPRIS nudged).");

@@ -306,6 +306,8 @@ impl AppClient {
                     let mut wake_target: Option<String> = None;
                     #[allow(unused_mut)]
                     let mut local_already_playing = false;
+                    #[allow(unused_mut)]
+                    let mut silent_connect_registration = false;
                     #[cfg(target_os = "linux")]
                     let mut minimize_after_transfer = false;
                     #[cfg(target_os = "linux")]
@@ -331,6 +333,26 @@ impl AppClient {
                                 woke_desktop = wake_target.is_some();
                                 minimize_after_transfer =
                                     wake_target.is_some() && desktop.start_minimized;
+                                if wake_target.is_none() {
+                                    tracing::info!(
+                                        "Desktop Spotify is playing locally but preferred Connect device is missing; registering Connect session"
+                                    );
+                                    if wake_desktop_spotify_if_enabled(
+                                        &client,
+                                        &state,
+                                        crate::desktop_spotify::NudgePolicy::RegisterConnect,
+                                    )
+                                    .await
+                                    .is_some()
+                                    {
+                                        silent_connect_registration = true;
+                                        woke_desktop = true;
+                                        wake_target =
+                                            wait_for_preferred_device(&client, &state).await;
+                                        minimize_after_transfer =
+                                            wake_target.is_some() && desktop.start_minimized;
+                                    }
+                                }
                             } else {
                                 let session_allows_wake =
                                     should_launch_desktop_on_init(first_session, resume);
@@ -384,8 +406,12 @@ impl AppClient {
                                     false
                                 };
                                 if should_wake {
-                                    let outcome =
-                                        wake_desktop_spotify_if_enabled(&client, &state).await;
+                                    let outcome = wake_desktop_spotify_if_enabled(
+                                        &client,
+                                        &state,
+                                        crate::desktop_spotify::NudgePolicy::SkipIfPlaying,
+                                    )
+                                    .await;
                                     woke_desktop = outcome.is_some();
                                     // Re-hide after Connect transfer even when we only nudged an
                                     // already-running tray instance (transfer can map the window).
@@ -416,14 +442,15 @@ impl AppClient {
 
                     // Transfer onto the woken preferred device. Whether that
                     // transfer starts audio is `pause_after_nudge` (default: pause).
-                    let keep_playing = keep_playing_after_desktop_wake(
-                        wake_target.is_some(),
-                        config::get_config()
+                    let keep_playing = keep_playing_after_desktop_wake(DesktopWakeTransferPolicy {
+                        woke_preferred: wake_target.is_some(),
+                        pause_after_nudge: config::get_config()
                             .app_config
                             .desktop_spotify
                             .pause_after_nudge,
                         local_already_playing,
-                    );
+                        silent_connect_registration,
+                    });
 
                     let device_ids = match device_ids_after_wake(wake_target, woke_for_preferred) {
                         DeviceIdsAfterWake::Preferred(ids) => ids,
@@ -466,6 +493,14 @@ impl AppClient {
                         match client.transfer_playback(&id, Some(keep_playing)).await {
                             Ok(()) => {
                                 tracing::info!("Connection succeeded (device_id={id})!");
+                                if !keep_playing {
+                                    if let Err(err) = client.pause_playback(Some(id.as_ref())).await
+                                    {
+                                        tracing::warn!(
+                                            "Failed to pause after desktop wake transfer: {err:#}"
+                                        );
+                                    }
+                                }
                                 if resume {
                                     if let Err(err) =
                                         client.resume_playback(Some(id.as_ref()), None).await
@@ -654,11 +689,32 @@ impl AppClient {
                     playback.shuffle_state = shuffle;
                 }
                 let device_id = playback.as_ref().and_then(|p| p.device_id.as_deref());
-                self.start_playback(p, device_id).await?;
+                let mut active_device = device_id.map(str::to_string);
+                let start_result = self
+                    .start_playback(p.clone(), active_device.as_deref())
+                    .await;
+                if let Err(err) = start_result {
+                    if is_no_active_device_msg(&err) {
+                        if let Some(id) = self.wake_preferred_device_for_playback().await? {
+                            tracing::info!(
+                                "No active Connect device for playback; transferring to `{id}` and retrying"
+                            );
+                            self.transfer_playback(&id, Some(false)).await?;
+                            active_device = Some(id);
+                            self.start_playback(p.clone(), active_device.as_deref())
+                                .await?;
+                        } else {
+                            return Err(err);
+                        }
+                    } else {
+                        return Err(err);
+                    }
+                }
                 // For some reasons, when starting a new playback, the integrated `spotify_player`
                 // client doesn't respect the initial shuffle state, so we need to manually update the state
                 if let Some(ref playback) = playback {
-                    self.shuffle(playback.shuffle_state, device_id).await?;
+                    self.shuffle(playback.shuffle_state, active_device.as_deref())
+                        .await?;
                 }
                 return Ok(None);
             }
@@ -1146,6 +1202,71 @@ impl AppClient {
             })
             .map(Into::into)
             .collect())
+    }
+
+    /// Wake the preferred desktop Connect device when playback commands hit 404.
+    #[cfg(target_os = "linux")]
+    async fn wake_preferred_device_for_playback(&self) -> Result<Option<String>> {
+        let desktop = config::get_config().app_config.desktop_spotify.clone();
+        if !desktop.enable {
+            return Ok(None);
+        }
+        let preferred = config::get_config()
+            .app_config
+            .preferred_device
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let Some(preferred) = preferred else {
+            return Ok(None);
+        };
+
+        let devices = self.available_devices().await?;
+        let pairs = devices
+            .iter()
+            .filter_map(|d| Some((d.id.as_deref()?, d.name.as_str())));
+        if let Some(id) = preferred_device_id(pairs, &preferred) {
+            return Ok(Some(id.to_string()));
+        }
+
+        let recent_uri = self
+            .current_user_recently_played_tracks()
+            .await
+            .ok()
+            .and_then(|tracks| tracks.first().map(|t| t.id.uri()));
+        let nudge_uri = crate::desktop_spotify::resolve_nudge_uri(
+            desktop.nudge_uri.as_deref(),
+            recent_uri.as_deref(),
+        );
+        let policy = if crate::desktop_spotify::mpris_is_playing(&desktop.mpris_dest) {
+            crate::desktop_spotify::NudgePolicy::RegisterConnect
+        } else {
+            crate::desktop_spotify::NudgePolicy::SkipIfPlaying
+        };
+        crate::desktop_spotify::ensure_awake(&desktop, nudge_uri.as_deref(), policy).await?;
+
+        let deadline = std::time::Instant::now() + PREFERRED_DEVICE_WAIT;
+        loop {
+            let devices = self.available_devices().await?;
+            let pairs = devices
+                .iter()
+                .filter_map(|d| Some((d.id.as_deref()?, d.name.as_str())));
+            if let Some(id) = preferred_device_id(pairs, &preferred) {
+                return Ok(Some(id.to_string()));
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        Ok(None)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    async fn wake_preferred_device_for_playback(&self) -> Result<Option<String>> {
+        let _ = self;
+        Ok(None)
     }
 
     /// Find available Connect devices to transfer playback to, ordered by preference.
@@ -2478,6 +2599,11 @@ fn is_rate_limit_msg(err: &impl std::fmt::Display) -> bool {
         || msg.contains("rate limit")
 }
 
+fn is_no_active_device_msg(err: &impl std::fmt::Display) -> bool {
+    let msg = format!("{err:#}").to_ascii_lowercase();
+    msg.contains("404") || msg.contains("no active device")
+}
+
 fn rate_limit_backoff(attempt: u32) -> Duration {
     Duration::from_secs(1u64 << attempt.min(4)).min(Duration::from_secs(30))
 }
@@ -2575,6 +2701,7 @@ fn cover_image_id_prefix(album_id: Option<&str>, track_id: Option<&str>) -> Stri
 async fn wake_desktop_spotify_if_enabled(
     client: &AppClient,
     state: &SharedState,
+    nudge_policy: crate::desktop_spotify::NudgePolicy,
 ) -> Option<crate::desktop_spotify::WakeOutcome> {
     let desktop = config::get_config().app_config.desktop_spotify.clone();
     if !desktop.enable {
@@ -2611,7 +2738,7 @@ async fn wake_desktop_spotify_if_enabled(
         recent_uri.as_deref(),
     );
 
-    match crate::desktop_spotify::ensure_awake(&desktop, nudge_uri.as_deref()).await {
+    match crate::desktop_spotify::ensure_awake(&desktop, nudge_uri.as_deref(), nudge_policy).await {
         Ok(outcome) => {
             let message = match (outcome.launched, outcome.minimized) {
                 (true, true) => "Spotify desktop started in the system tray and is ready",
@@ -2803,22 +2930,32 @@ fn should_select_device(has_playback: bool, woke_desktop: bool) -> bool {
     !has_playback || woke_desktop
 }
 
+/// Inputs for whether a desktop wake transfer should keep audio playing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+struct DesktopWakeTransferPolicy {
+    woke_preferred: bool,
+    pause_after_nudge: bool,
+    local_already_playing: bool,
+    silent_connect_registration: bool,
+}
+
 /// After a desktop wake, transfer audio onto the new device only when the
 /// wake is allowed to keep playing. Startup launches still need a Play/OpenUri
 /// nudge so Connect can see the client, then pause unless the user asked to
 /// keep that automatically started playback.
 ///
 /// When `local_already_playing` is true and preferred was targeted, the transfer
-/// keeps playing even if `pause_after_nudge` is true.
-fn keep_playing_after_desktop_wake(
-    woke_preferred: bool,
-    pause_after_nudge: bool,
-    local_already_playing: bool,
-) -> bool {
-    if local_already_playing && woke_preferred {
+/// keeps playing even if `pause_after_nudge` is true — unless this was a
+/// silent Connect registration for a missing preferred device.
+fn keep_playing_after_desktop_wake(policy: DesktopWakeTransferPolicy) -> bool {
+    if policy.silent_connect_registration {
+        return policy.woke_preferred && !policy.pause_after_nudge;
+    }
+    if policy.local_already_playing && policy.woke_preferred {
         return true;
     }
-    woke_preferred && !pause_after_nudge
+    policy.woke_preferred && !policy.pause_after_nudge
 }
 
 /// Select transfer candidates after attempting a desktop wake.
@@ -2931,8 +3068,8 @@ mod tests {
         keep_playing_after_desktop_wake, move_seed_track_to_front, order_transfer_device_ids,
         paging_query, preferred_device_id, process_spotify_api_response, rate_limit_backoff,
         should_launch_desktop_on_init, should_nudge_desktop_on_init, should_select_device,
-        should_wake_for_preferred, top_tracks_time_range_param, DeviceIdsAfterWake,
-        MAX_RETRY_AFTER,
+        should_wake_for_preferred, top_tracks_time_range_param, DesktopWakeTransferPolicy,
+        DeviceIdsAfterWake, MAX_RETRY_AFTER,
     };
     use crate::state::{Device, Track};
     use rspotify::model::TrackId;
@@ -3051,13 +3188,27 @@ mod tests {
 
     #[test]
     fn desktop_wake_does_not_keep_playing_when_pause_after_nudge() {
-        assert!(!keep_playing_after_desktop_wake(true, true, false));
-        assert!(keep_playing_after_desktop_wake(true, false, false));
-        assert!(!keep_playing_after_desktop_wake(false, false, false));
-        assert!(!keep_playing_after_desktop_wake(false, true, false));
+        let p = |woke_preferred,
+                 pause_after_nudge,
+                 local_already_playing,
+                 silent_connect_registration| {
+            keep_playing_after_desktop_wake(DesktopWakeTransferPolicy {
+                woke_preferred,
+                pause_after_nudge,
+                local_already_playing,
+                silent_connect_registration,
+            })
+        };
+        assert!(!p(true, true, false, false));
+        assert!(p(true, false, false, false));
+        assert!(!p(false, false, false, false));
+        assert!(!p(false, true, false, false));
         // Local MPRIS already Playing: transfer must not pause.
-        assert!(keep_playing_after_desktop_wake(true, true, true));
-        assert!(!keep_playing_after_desktop_wake(false, true, true));
+        assert!(p(true, true, true, false));
+        assert!(!p(false, true, true, false));
+        // Silent Connect registration must respect pause_after_nudge even when MPRIS was playing.
+        assert!(!p(true, true, true, true));
+        assert!(p(true, false, true, true));
     }
 
     #[test]
