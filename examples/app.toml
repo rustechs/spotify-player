@@ -42,8 +42,10 @@ audio_cache = false
 normalization = false
 autoplay = false
 
-# Linux: launch/nudge official desktop Spotify when preferred is missing or idle/paused in the tray.
-# When Connect has no current playback, the TUI still shows the MPRIS track.
+# Linux: launch/nudge official desktop Spotify on first session (and playing
+# reconnect) when preferred is missing or idle/paused in the tray. Paused
+# reconnect skips that wake. When Connect has no current playback, the TUI
+# still shows the MPRIS track.
 # [desktop_spotify]
 # enable = true
 # command = "spotify"
