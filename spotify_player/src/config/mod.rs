@@ -135,8 +135,9 @@ pub struct AppConfig {
     /// Especially useful with `enable_streaming = "Never"`.
     pub preferred_device: Option<String>,
 
-    /// Linux: launch/nudge the official desktop Spotify client when preferred is
-    /// missing from Connect or listed but idle/paused (e.g. tray after autostart).
+    /// Linux: launch/nudge the official desktop Spotify client on first session
+    /// (and playing reconnect) when preferred is missing from Connect or listed
+    /// but idle/paused (e.g. tray after autostart). Paused reconnect skips wake.
     pub desktop_spotify: DesktopSpotifyConfig,
 
     pub device: DeviceConfig,
@@ -245,15 +246,17 @@ pub struct DeviceConfig {
 #[serde(default)]
 /// Linux helpers for waking the official Spotify desktop Connect endpoint.
 pub struct DesktopSpotifyConfig {
-    /// When true, start Spotify if needed and MPRIS-nudge it during playback init
-    /// (and via `spotify_player wake-desktop`) when `preferred_device` is missing
-    /// from Connect or listed but not actively playing (or when no devices are
-    /// listed if `preferred_device` is unset). If MPRIS is already Playing and
-    /// Connect lists `preferred_device`, startup still transfers to that device
-    /// with keep-playing and never to another speaker. If Connect has no current
-    /// playback, the TUI still shows the MPRIS track (title/artists/album/progress)
-    /// so the window is not empty while the desktop client is playing. Connect
-    /// often reports volume 0% for that client; MPRIS volume is used instead.
+    /// When true, start Spotify if needed and MPRIS-nudge it during first-session
+    /// playback init (and via `spotify_player wake-desktop`, or when restoring a
+    /// playing session) when `preferred_device` is missing from Connect or listed
+    /// but not actively playing (or when no devices are listed if
+    /// `preferred_device` is unset). A paused mid-session reconnect skips that
+    /// nudge. If MPRIS is already Playing and Connect lists `preferred_device`,
+    /// startup still transfers to that device with keep-playing and never to
+    /// another speaker. If Connect has no current playback, the TUI still shows
+    /// the MPRIS track (title/artists/album/progress) so the window is not empty
+    /// while the desktop client is playing. Connect often reports volume 0% for
+    /// that client; MPRIS volume is used instead.
     pub enable: bool,
     /// Executable used to launch the desktop client (`spotify`, absolute path, etc.).
     pub command: String,
