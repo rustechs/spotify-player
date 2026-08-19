@@ -220,16 +220,21 @@ impl AppClient {
     /// Initialize the application's playback upon creating a new session or during startup.
     ///
     /// `resume` controls whether playback should be (re)started on the device we connect to.
-    pub fn initialize_playback(&self, state: &SharedState, resume: bool) {
+    /// `first_session` is true for a fresh login/startup; false for a mid-session reconnect.
+    pub fn initialize_playback(&self, state: &SharedState, resume: bool, first_session: bool) {
         tokio::task::spawn({
             let client = self.clone();
             let state = state.clone();
             async move {
                 // Start the local desktop process before any startup sleeps or Web API
                 // calls. Its MPRIS/Connect registration can then happen in parallel
-                // with playback initialization.
+                // with playback initialization. A paused reconnect must not launch
+                // Spotify just to `OpenUri`-register it — that is what randomly starts
+                // music after a transient API/session blip.
+                #[cfg(not(target_os = "linux"))]
+                let _ = first_session;
                 #[cfg(target_os = "linux")]
-                let desktop_prelaunched = {
+                let desktop_prelaunched = if should_launch_desktop_on_init(first_session, resume) {
                     let desktop = config::get_config().app_config.desktop_spotify.clone();
                     match crate::desktop_spotify::launch_early_if_needed(&desktop) {
                         Ok(true) => {
@@ -247,6 +252,8 @@ impl AppClient {
                             false
                         }
                     }
+                } else {
+                    false
                 };
 
                 // The main playback initialization logic is simple:
@@ -325,43 +332,56 @@ impl AppClient {
                                 minimize_after_transfer =
                                     wake_target.is_some() && desktop.start_minimized;
                             } else {
-                                // A process we just launched is necessarily the desktop
-                                // endpoint we need; avoid waiting on another devices API call.
-                                let should_wake = if desktop_prelaunched {
-                                    true
-                                } else {
-                                    let (preferred_actively_playing, other_actively_playing) = {
-                                        let preferred = config::get_config()
-                                            .app_config
-                                            .preferred_device
-                                            .as_deref()
-                                            .map(str::trim)
-                                            .filter(|s| !s.is_empty());
-                                        match state.player.read().playback.as_ref() {
-                                            Some(p) if p.is_playing => {
-                                                let on_preferred = preferred.is_some_and(|name| {
-                                                    p.device.name.eq_ignore_ascii_case(name)
-                                                });
-                                                (on_preferred, !on_preferred)
+                                let session_allows_wake =
+                                    should_launch_desktop_on_init(first_session, resume);
+                                let should_wake = if desktop_prelaunched || session_allows_wake {
+                                    let wake_needed = if desktop_prelaunched {
+                                        true
+                                    } else {
+                                        let (preferred_actively_playing, other_actively_playing) = {
+                                            let preferred = config::get_config()
+                                                .app_config
+                                                .preferred_device
+                                                .as_deref()
+                                                .map(str::trim)
+                                                .filter(|s| !s.is_empty());
+                                            match state.player.read().playback.as_ref() {
+                                                Some(p) if p.is_playing => {
+                                                    let on_preferred =
+                                                        preferred.is_some_and(|name| {
+                                                            p.device.name.eq_ignore_ascii_case(name)
+                                                        });
+                                                    (on_preferred, !on_preferred)
+                                                }
+                                                _ => (false, false),
                                             }
-                                            _ => (false, false),
+                                        };
+                                        match desktop_wake_needed(
+                                            &client,
+                                            preferred_actively_playing,
+                                            other_actively_playing,
+                                        )
+                                        .await
+                                        {
+                                            Ok(needed) => needed,
+                                            Err(err) => {
+                                                tracing::warn!(
+                                                    "Failed to decide desktop Spotify wake: {err:#}; skipping wake"
+                                                );
+                                                false
+                                            }
                                         }
                                     };
-                                    match desktop_wake_needed(
-                                        &client,
-                                        preferred_actively_playing,
-                                        other_actively_playing,
+                                    should_nudge_desktop_on_init(
+                                        session_allows_wake,
+                                        desktop_prelaunched,
+                                        wake_needed,
                                     )
-                                    .await
-                                    {
-                                        Ok(needed) => needed,
-                                        Err(err) => {
-                                            tracing::warn!(
-                                                "Failed to decide desktop Spotify wake: {err:#}; skipping wake"
-                                            );
-                                            false
-                                        }
-                                    }
+                                } else {
+                                    tracing::info!(
+                                        "Skipping desktop Spotify wake/nudge on paused reconnect so an idle tray client is not OpenUri-started"
+                                    );
+                                    false
                                 };
                                 if should_wake {
                                     let outcome =
@@ -539,7 +559,7 @@ impl AppClient {
             if clear_memory_caches_on_new_session(reauth) {
                 state.data.write().caches = MemoryCaches::new();
             }
-            self.initialize_playback(state, was_playing);
+            self.initialize_playback(state, was_playing, reauth);
         }
 
         Ok(())
@@ -2683,6 +2703,29 @@ fn should_wake_for_preferred(
     !other_actively_playing
 }
 
+/// Launch desktop Spotify during playback init only on first session, or when
+/// reconnecting a session that was actually playing.
+#[cfg(any(test, target_os = "linux"))]
+fn should_launch_desktop_on_init(first_session: bool, resume: bool) -> bool {
+    first_session || resume
+}
+
+/// Whether playback init should MPRIS-nudge (`OpenUri`/`Play`) the desktop client.
+///
+/// `session_allows_wake` is first-session login or reconnect of a playing
+/// session (`should_launch_desktop_on_init`). A process we just launched still
+/// needs a registration nudge. A mid-session reconnect of a paused session
+/// must not `OpenUri` — that is what randomly starts music after a Spotify API
+/// blip.
+#[cfg(any(test, target_os = "linux"))]
+fn should_nudge_desktop_on_init(
+    session_allows_wake: bool,
+    desktop_prelaunched: bool,
+    wake_needed: bool,
+) -> bool {
+    desktop_prelaunched || (wake_needed && session_allows_wake)
+}
+
 /// Find the Connect id of `preferred` among `devices`, given as `(id, name)` pairs.
 ///
 /// Compiled on Linux (production wake path) and under `cfg(test)` so unit tests
@@ -2887,8 +2930,9 @@ mod tests {
         clear_memory_caches_on_new_session, cover_image_id_prefix, device_ids_after_wake,
         keep_playing_after_desktop_wake, move_seed_track_to_front, order_transfer_device_ids,
         paging_query, preferred_device_id, process_spotify_api_response, rate_limit_backoff,
-        should_select_device, should_wake_for_preferred, top_tracks_time_range_param,
-        DeviceIdsAfterWake, MAX_RETRY_AFTER,
+        should_launch_desktop_on_init, should_nudge_desktop_on_init, should_select_device,
+        should_wake_for_preferred, top_tracks_time_range_param, DeviceIdsAfterWake,
+        MAX_RETRY_AFTER,
     };
     use crate::state::{Device, Track};
     use rspotify::model::TrackId;
@@ -3037,6 +3081,21 @@ mod tests {
         assert!(should_wake_for_preferred(true, false, false));
         // Listed while another device is actively playing → do not steal.
         assert!(!should_wake_for_preferred(true, false, true));
+    }
+
+    #[test]
+    fn paused_reconnect_does_not_launch_or_nudge_desktop_spotify() {
+        assert!(should_launch_desktop_on_init(true, false));
+        assert!(should_launch_desktop_on_init(false, true));
+        assert!(!should_launch_desktop_on_init(false, false));
+
+        // First session or playing reconnect: nudge an idle tray client if Connect needs it.
+        assert!(should_nudge_desktop_on_init(true, false, true));
+        assert!(!should_nudge_desktop_on_init(true, false, false));
+        // Newly launched process: always register, even on a paused reconnect.
+        assert!(should_nudge_desktop_on_init(false, true, true));
+        // Paused reconnect with no new process: never OpenUri an idle tray client.
+        assert!(!should_nudge_desktop_on_init(false, false, true));
     }
 
     #[test]

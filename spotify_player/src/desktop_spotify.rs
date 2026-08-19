@@ -5,9 +5,12 @@
 //! after autostart that still cannot accept control until nudged. With
 //! `enable_streaming = "Never"`, that leaves `spotify_player` unable to transfer
 //! until the user hits play in the GUI. This module starts the client if needed
-//! and wakes it via MPRIS (`Play` / `OpenUri`) so Connect can use it. When
-//! Connect has no current playback, it also exposes MPRIS track metadata so the
-//! TUI playback window is not empty while the desktop client is already playing.
+//! and wakes it via MPRIS (`Play` / `OpenUri`) so Connect can use it. That
+//! registration nudge runs on first session (and when restoring a playing
+//! session); a paused mid-session reconnect skips `OpenUri` so an API blip
+//! cannot start music. When Connect has no current playback, it also exposes
+//! MPRIS track metadata so the TUI playback window is not empty while the
+//! desktop client is already playing.
 //! When Connect reports a preferred-device session at silent volume,
 //! `overlay_connect_volume` / `mpris_volume_percent` overlay the audible MPRIS
 //! volume (the Web API often reports 0% while MPRIS is not).
