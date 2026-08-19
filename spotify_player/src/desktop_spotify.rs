@@ -178,9 +178,11 @@ pub async fn ensure_awake(
         );
     } else if mpris_is_playing(dest) && nudge_policy == NudgePolicy::RegisterConnect {
         tracing::info!(
-            "Desktop Spotify is playing locally but Connect is missing the preferred device; registering via silent nudge"
+            "Desktop Spotify is playing locally but Connect is missing the preferred device; registering without pausing playback"
         );
-        nudge(dest, nudge_uri, config.pause_after_nudge)?;
+        // Do not pause an audible session — OpenUri on the current track is enough
+        // for Connect to list the desktop client.
+        nudge(dest, nudge_uri, false)?;
     } else {
         nudge(dest, nudge_uri, config.pause_after_nudge)?;
     }
