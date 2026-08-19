@@ -57,6 +57,16 @@ pub struct WakeOutcome {
     pub minimized: bool,
 }
 
+/// Whether `ensure_awake` should MPRIS-nudge an already-playing desktop client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NudgePolicy {
+    /// Leave local playback alone when MPRIS reports Playing.
+    SkipIfPlaying,
+    /// Nudge even while Playing — registers Connect when the GUI is audible but
+    /// the preferred device is missing from `/v1/me/player/devices`.
+    RegisterConnect,
+}
+
 /// Whether waking Spotify will need to start a new desktop process.
 pub fn will_launch(config: &DesktopSpotifyConfig) -> Result<bool> {
     Ok(!mpris_name_has_owner(&config.mpris_dest)? && !spotify_process_running())
@@ -90,11 +100,20 @@ pub fn launch_early_if_needed(config: &DesktopSpotifyConfig) -> Result<bool> {
     Ok(true)
 }
 
+/// Spotify track URI for the desktop client's current MPRIS session, if any.
+pub fn mpris_current_track_uri(dest: &str) -> Option<String> {
+    mpris_now_playing(dest)
+        .ok()
+        .flatten()
+        .and_then(|now| now.track_id.map(|id| format!("spotify:track:{id}")))
+}
+
 /// Ensure the desktop Spotify client is running and has an active playback
 /// session so it appears as a Connect device.
 pub async fn ensure_awake(
     config: &DesktopSpotifyConfig,
     nudge_uri: Option<&str>,
+    nudge_policy: NudgePolicy,
 ) -> Result<WakeOutcome> {
     if !config.enable {
         return Ok(WakeOutcome {
@@ -143,10 +162,25 @@ pub async fn ensure_awake(
         watch.abort();
     }
 
-    if mpris_is_playing(dest) {
+    let connect_nudge_uri;
+    let nudge_uri = match nudge_policy {
+        NudgePolicy::RegisterConnect => {
+            connect_nudge_uri =
+                mpris_current_track_uri(dest).or_else(|| nudge_uri.map(str::to_owned));
+            connect_nudge_uri.as_deref()
+        }
+        NudgePolicy::SkipIfPlaying => nudge_uri,
+    };
+
+    if mpris_is_playing(dest) && nudge_policy == NudgePolicy::SkipIfPlaying {
         tracing::info!(
             "Desktop Spotify is already playing (MPRIS); skipping wake nudge so local playback is left alone"
         );
+    } else if mpris_is_playing(dest) && nudge_policy == NudgePolicy::RegisterConnect {
+        tracing::info!(
+            "Desktop Spotify is playing locally but Connect is missing the preferred device; registering via silent nudge"
+        );
+        nudge(dest, nudge_uri, config.pause_after_nudge)?;
     } else {
         nudge(dest, nudge_uri, config.pause_after_nudge)?;
     }
@@ -496,8 +530,7 @@ fn nudge(dest: &str, nudge_uri: Option<&str>, pause_after: bool) -> Result<()> {
     }
 
     if pause_after {
-        // Give Connect a moment to register the device before pausing.
-        std::thread::sleep(Duration::from_millis(800));
+        // Pause immediately; Connect still sees the brief OpenUri session.
         tracing::info!("Pausing desktop Spotify after silent wake nudge");
         if pause_until_silent(dest, Duration::from_secs(2)) {
             tracing::info!("Desktop Spotify paused; unmuting local sink-inputs");
