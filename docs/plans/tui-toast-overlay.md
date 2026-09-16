@@ -18,7 +18,7 @@
 **Maximum Phase 0 rounds:** 3
 **Authorized phases:** phase-0, U2, U3, U4, U5, U6
 **Context strategy:** current context (`feat/toast-overlay-wire`)
-**Scope:** In: non-modal toast queue on `UIState`, render in main-content lower-right, enqueue from mutating `ClientRequest` results plus clipboard/copy-link, **plus `PlayerRequest::NextTrack` / `PreviousTrack`** (user override 2026-08-14: skip next/prev must toast). Config/theme/docs/tests. Out: desktop `notify` changes, playback-poll/Get*/search toasts, other `PlayerRequest`s (seek/volume/repeat/shuffle/resume), Cargo feature flag, daemon/CLI rendering.
+**Scope:** In: non-modal toast queue on `UIState`, render in main-content lower-right, enqueue from mutating `ClientRequest` results plus clipboard/copy-link, **plus `PlayerRequest::NextTrack` / `PreviousTrack`** (user override 2026-08-14: skip next/prev must toast) **and `PlayerRequest::StartPlayback`** (added in `d9c03ea` on 2026-08-19; documented in the 2026-09 review). Config/theme/docs/tests. Out: desktop `notify` changes, playback-poll/Get*/search toasts, other `PlayerRequest`s (seek/volume/repeat/shuffle/resume), Cargo feature flag, daemon/CLI rendering.
 
 ## 1. Observable outcome and invariants
 

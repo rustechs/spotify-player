@@ -62,6 +62,7 @@ fuzzy-matcher = { version = "0.3.7", optional = true }
 html-escape = "0.2.14"
 rustls = { version = "0.23.42", default-features = false, features = ["ring"] }
 unicode-bidi = "0.3.18"
+unicode-width = "0.2.2"
 futures = "0.3.33"
 # fix for https://github.com/aome510/spotify-player/issues/914
 vergen = "=9.0.6"

@@ -62,41 +62,13 @@ pub enum ClientRequest {
 }
 
 impl ClientRequest {
-    /// Mutating library/queue/playlist actions, plus skip next/previous.
+    /// Requests whose outcome is shown as a toast: mutating library/queue/
+    /// playlist actions, starting playback, and skip next/previous.
     pub fn is_toastable(&self) -> bool {
-        match self {
-            Self::AddPlayableToQueue(_)
-            | Self::AddAlbumToQueue(_)
-            | Self::AddPlayableToPlaylist(_, _)
-            | Self::DeleteTrackFromPlaylist(_, _)
-            | Self::ReorderPlaylistItems { .. }
-            | Self::AddToLibrary(_)
-            | Self::DeleteFromLibrary(_)
-            | Self::CreatePlaylist { .. }
-            | Self::Player(
-                PlayerRequest::StartPlayback(_, _)
-                | PlayerRequest::NextTrack
-                | PlayerRequest::PreviousTrack,
-            ) => true,
-            Self::GetCurrentUser
-            | Self::GetDevices
-            | Self::GetBrowseCategories
-            | Self::GetBrowseCategoryPlaylists(_)
-            | Self::GetUserPlaylists
-            | Self::GetUserSavedAlbums
-            | Self::GetUserSavedShows
-            | Self::GetUserFollowedArtists
-            | Self::GetContext(_)
-            | Self::GetCurrentPlayback
-            | Self::Search(_)
-            | Self::Player(_)
-            | Self::GetCurrentUserQueue
-            | Self::GetLyrics { .. } => false,
-            #[cfg(feature = "streaming")]
-            Self::RestartIntegratedClient => false,
-        }
+        self.toast_success_message().is_some()
     }
 
+    /// Success toast text; `None` for requests that never toast.
     pub fn toast_success_message(&self) -> Option<&'static str> {
         match self {
             Self::AddPlayableToQueue(_) | Self::AddAlbumToQueue(_) => Some("Added to queue"),

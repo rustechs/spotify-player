@@ -357,7 +357,7 @@ cargo install spotify_player --features notify
 
 ### Toasts
 
-The TUI shows a short overlay in the lower-right of the main content area (never on the playback window) after likes, queue adds, playlist edits, skip next/previous, copy-link, and opening a Spotify link from the clipboard. Each box grows with the message up to about 60 columns and 6 rows (four inner lines); overflow beyond that is clipped with `…`. Up to three toasts are stacked; a `4+` marker denotes additional queued messages. Body text is not bold so wrapped lines stay inside the border. Toasts, including errors, disappear after `toast_success_timeout_secs` (default 3). `esc` still dismisses the current toast early when no popup is open. Set `enable_toast = false` to disable. Desktop `notify` for track changes is separate.
+The TUI shows a short overlay in the lower-right of the main content area (never on the playback window or a popup) after likes, queue adds, playlist edits, starting playback (`Playing`), skip next/previous, copy-link, and opening a Spotify link from the clipboard. Each box grows with the message up to about 60 columns and 6 rows (four inner lines); overflow beyond that is clipped with `…`. Up to three toasts are stacked; a `4+` marker denotes additional queued messages. Body text is not bold so wrapped lines stay inside the border. Toasts, including errors, disappear `toast_success_timeout_secs` (default 3) after they become visible, so toasts waiting behind the `4+` marker still get their full time on screen. `esc` still dismisses the current toast early when no popup is open. Set `enable_toast = false` to disable. Desktop `notify` for track changes is separate.
 
 ### Mouse support
 

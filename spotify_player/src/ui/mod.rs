@@ -162,7 +162,7 @@ fn clean_up(mut terminal: Terminal) -> Result<()> {
 /// Render the application
 fn render_application(frame: &mut Frame, state: &SharedState, ui: &mut UIStateGuard, rect: Rect) {
     // rendering order: playback window -> shortcut help popup -> other popups -> main layout
-    // -> toast overlay (clipped to leftover content, never on the playback window)
+    // -> toast overlay (clipped to the main layout area, never on a popup or the playback window)
 
     // render playback window before other popups and windows to ensure nothing is rendered on top
     // of the playback window, which is to avoid "duplicated images" issue
@@ -174,7 +174,7 @@ fn render_application(frame: &mut Frame, state: &SharedState, ui: &mut UIStateGu
     let (rect, is_active) = popup::render_popup(frame, state, ui, rect);
 
     render_main_layout(is_active, frame, state, ui, rect);
-    toast::render_toasts(frame, ui, leftover);
+    toast::render_toasts(frame, ui, rect);
 }
 
 /// Render the application's main layout

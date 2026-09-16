@@ -21,7 +21,7 @@ use crate::{
 };
 
 use crate::utils::map_join;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use crossterm::event::KeyCode;
 
 use ratatui::widgets::ListState;
@@ -69,6 +69,53 @@ pub fn open_context_page(
 ) -> Result<()> {
     client_pub.send(ClientRequest::GetContext(context_id.clone()))?;
     ui.new_page(PageState::browsing(context_id));
+    Ok(())
+}
+
+/// Play a track link, or open the context page of a playlist/artist/album link.
+fn open_spotify_link(
+    state: &SharedState,
+    ui: &mut UIStateGuard,
+    client_pub: &flume::Sender<ClientRequest>,
+    content: &str,
+) -> Result<()> {
+    let re = regex::Regex::new(r"https://open.spotify.com/(?P<type>.*?)/(?P<id>[[:alnum:]]*).*")?;
+    let cap = re
+        .captures(content)
+        .context("Clipboard is not a valid Spotify link")?;
+    let typ = cap.name("type").expect("valid capture").as_str();
+    let id = cap.name("id").expect("valid capture").as_str();
+    match typ {
+        "track" => {
+            let id = TrackId::from_id(id)
+                .context("Invalid Spotify track link")?
+                .into_static();
+            state.player.write().currently_playing_tracks_id = None;
+            client_pub.send(ClientRequest::Player(PlayerRequest::StartPlayback(
+                Playback::URIs(vec![id.into()], None),
+                None,
+            )))?;
+        }
+        "playlist" => {
+            let id = PlaylistId::from_id(id)
+                .context("Invalid Spotify playlist link")?
+                .into_static();
+            open_context_page(ui, client_pub, ContextId::Playlist(id))?;
+        }
+        "artist" => {
+            let id = ArtistId::from_id(id)
+                .context("Invalid Spotify artist link")?
+                .into_static();
+            open_context_page(ui, client_pub, ContextId::Artist(id))?;
+        }
+        "album" => {
+            let id = AlbumId::from_id(id)
+                .context("Invalid Spotify album link")?
+                .into_static();
+            open_context_page(ui, client_pub, ContextId::Album(id))?;
+        }
+        other => anyhow::bail!("Unsupported Spotify link type `{other}`"),
+    }
     Ok(())
 }
 
@@ -274,7 +321,11 @@ pub fn handle_action_in_context(
                 } else {
                     client_pub.send(ClientRequest::AddToLibrary(Item::Track(track)))?;
                 }
-                ui.popup = None;
+                // `C-l` likes the playing track from anywhere; only close the
+                // action list, not an unrelated popup such as the device list.
+                if matches!(ui.popup, Some(PopupState::ActionList(..))) {
+                    ui.popup = None;
+                }
                 Ok(true)
             }
             Action::AddToLiked => {
@@ -771,50 +822,15 @@ fn handle_global_command(
             }
         }
         Command::OpenSpotifyLinkFromClipboard => match clipboard::get_clipboard_content() {
-            Ok(content) => {
-                let re = regex::Regex::new(
-                    r"https://open.spotify.com/(?P<type>.*?)/(?P<id>[[:alnum:]]*).*",
-                )?;
-                if let Some(cap) = re.captures(&content) {
-                    let typ = cap.name("type").expect("valid capture").as_str();
-                    let id = cap.name("id").expect("valid capture").as_str();
-                    match typ {
-                        "track" => {
-                            let id = TrackId::from_id(id)?.into_static();
-                            state.player.write().currently_playing_tracks_id = None;
-                            client_pub.send(ClientRequest::Player(
-                                PlayerRequest::StartPlayback(
-                                    Playback::URIs(vec![id.into()], None),
-                                    None,
-                                ),
-                            ))?;
-                            ui.push_success_toast("Opened Spotify link");
-                        }
-                        "playlist" => {
-                            let id = PlaylistId::from_id(id)?.into_static();
-                            open_context_page(ui, client_pub, ContextId::Playlist(id))?;
-                            ui.push_success_toast("Opened Spotify link");
-                        }
-                        "artist" => {
-                            let id = ArtistId::from_id(id)?.into_static();
-                            open_context_page(ui, client_pub, ContextId::Artist(id))?;
-                            ui.push_success_toast("Opened Spotify link");
-                        }
-                        "album" => {
-                            let id = AlbumId::from_id(id)?.into_static();
-                            open_context_page(ui, client_pub, ContextId::Album(id))?;
-                            ui.push_success_toast("Opened Spotify link");
-                        }
-                        e => {
-                            tracing::warn!("unsupported Spotify type {e}!");
-                            ui.push_error_toast(format!("Unsupported Spotify type {e}"));
-                        }
-                    }
-                } else {
-                    tracing::warn!("clipboard's content ({content}) is not a valid Spotify link!");
-                    ui.push_error_toast("Clipboard is not a valid Spotify link");
+            // Every failure is reported as a toast; the clipboard text itself is
+            // never logged (it may hold anything).
+            Ok(content) => match open_spotify_link(state, ui, client_pub, &content) {
+                Ok(()) => ui.push_success_toast("Opened Spotify link"),
+                Err(err) => {
+                    tracing::warn!("Failed to open a Spotify link from the clipboard: {err:#}");
+                    ui.push_error_toast(format!("{err:#}"));
                 }
-            }
+            },
             Err(err) => {
                 tracing::error!("Failed to get clipboard's content: {err:#}");
                 ui.push_error_toast(format!("Failed to read clipboard: {err:#}"));

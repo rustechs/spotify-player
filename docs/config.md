@@ -78,8 +78,8 @@ spotify_player -o device.volume=80 -o theme=dracula
 | `custom_queue`                    | Enable app-managed queue for custom playback integration (requires `streaming` feature).             | `true`                                                                 |
 | `pause_on_startup`                | Start with playback paused instead of resuming the previous session (requires `streaming` feature).  | `false`                                                                |
 | `enable_relative_line_number`     | Enable Vim-style relative line numbers for lists and popups.                                         | `false`                                                                |
-| `enable_toast`                    | Show in-TUI toasts for likes, queue, playlist edits, skip next/previous, copy-link, and clipboard-open. Desktop `notify` is unchanged. | `true` |
-| `toast_success_timeout_secs`      | Auto-dismiss timeout for all in-TUI toasts, including errors.     | `3`                                                                    |
+| `enable_toast`                    | Show in-TUI toasts for likes, queue, playlist edits, starting playback, skip next/previous, copy-link, and clipboard-open. Desktop `notify` is unchanged. | `true` |
+| `toast_success_timeout_secs`      | Auto-dismiss timeout for all in-TUI toasts, including errors, counted from when a toast becomes visible. | `3`                                                                    |
 | `device`                          | Device configuration (see below).                                                                    | See below                                                              |
 
 ### Notes

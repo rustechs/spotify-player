@@ -5840,6 +5840,7 @@ dependencies = [
  "tracing-subscriber",
  "ttl_cache",
  "unicode-bidi",
+ "unicode-width",
  "vergen",
  "which 8.0.5",
  "windows 0.58.0",
