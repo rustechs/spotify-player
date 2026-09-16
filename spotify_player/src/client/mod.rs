@@ -350,7 +350,7 @@ impl AppClient {
                     if attempt == 0 {
                         let desktop = config::get_config().app_config.desktop_spotify.clone();
                         if desktop.enable {
-                            if crate::desktop_spotify::mpris_is_playing(&desktop.mpris_dest) {
+                            if crate::desktop_spotify::mpris_is_playing(&desktop.mpris_dest).await {
                                 local_already_playing = true;
                                 tracing::info!(
                                     "Desktop Spotify is already playing locally (MPRIS); skipping wake/nudge"
@@ -1365,7 +1365,7 @@ impl AppClient {
             desktop.nudge_uri.as_deref(),
             recent_uri.as_deref(),
         );
-        let policy = if crate::desktop_spotify::mpris_is_playing(&desktop.mpris_dest) {
+        let policy = if crate::desktop_spotify::mpris_is_playing(&desktop.mpris_dest).await {
             crate::desktop_spotify::NudgePolicy::RegisterConnect
         } else {
             crate::desktop_spotify::NudgePolicy::SkipIfPlaying
@@ -2304,7 +2304,10 @@ impl AppClient {
                     }
                 }
             };
-            let playback = overlay_desktop_mpris(playback);
+            // MPRIS reads shell out; keep them off the runtime worker.
+            let playback = tokio::task::spawn_blocking(move || overlay_desktop_mpris(playback))
+                .await
+                .context("MPRIS overlay task panicked")?;
             let mut player = state.player.write();
 
             let prev_item = player.currently_playing();
@@ -2811,7 +2814,7 @@ async fn wake_desktop_spotify_if_enabled(
         return None;
     }
 
-    let will_launch = match crate::desktop_spotify::will_launch(&desktop) {
+    let will_launch = match crate::desktop_spotify::will_launch(&desktop).await {
         Ok(will_launch) => will_launch,
         Err(err) => {
             tracing::warn!("Failed to inspect desktop Spotify state: {err:#}");

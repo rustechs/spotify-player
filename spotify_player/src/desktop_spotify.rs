@@ -38,6 +38,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use rspotify::model::{
     Actions, CurrentPlaybackContext, CurrentlyPlayingType, Device, DeviceType, FullTrack, Image,
     PlayableItem, RepeatState, SimplifiedAlbum, SimplifiedArtist, TrackId, Type,
@@ -50,6 +51,15 @@ const DBUS_OBJECT: &str = "/org/freedesktop/DBus";
 const MPRIS_OBJECT: &str = "/org/mpris/MediaPlayer2";
 const MPRIS_PLAYER: &str = "org.mpris.MediaPlayer2.Player";
 static EARLY_LAUNCH: AtomicBool = AtomicBool::new(false);
+/// The single background watcher that re-hides Spotify's window (see `start_hide_watcher`).
+static HIDE_WATCHER: Mutex<Option<HideWatcher>> = Mutex::new(None);
+const HIDE_WATCH_POLL: Duration = Duration::from_millis(250);
+/// MPRIS reads shell out to `dbus-send`; cache them briefly so the playback
+/// poll and `update_playback` bursts do not each spawn a handful of processes.
+const MPRIS_CACHE_TTL: Duration = Duration::from_secs(1);
+static MPRIS_PLAYBACK_CACHE: Mutex<Option<(Instant, Option<CurrentPlaybackContext>)>> =
+    Mutex::new(None);
+static MPRIS_VOLUME_CACHE: Mutex<Option<(Instant, Option<u32>)>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WakeOutcome {
@@ -67,8 +77,26 @@ pub enum NudgePolicy {
     RegisterConnect,
 }
 
+/// Run D-Bus / `xdotool` / `pactl` process spawns off the async runtime.
+async fn run_blocking<T: Send + 'static>(
+    what: &'static str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .with_context(|| format!("{what} task panicked"))
+}
+
 /// Whether waking Spotify will need to start a new desktop process.
-pub fn will_launch(config: &DesktopSpotifyConfig) -> Result<bool> {
+pub async fn will_launch(config: &DesktopSpotifyConfig) -> Result<bool> {
+    let config = config.clone();
+    run_blocking("desktop Spotify probe", move || {
+        will_launch_blocking(&config)
+    })
+    .await?
+}
+
+fn will_launch_blocking(config: &DesktopSpotifyConfig) -> Result<bool> {
     Ok(!mpris_name_has_owner(&config.mpris_dest)? && !spotify_process_running())
 }
 
@@ -84,15 +112,13 @@ pub fn launch_early_if_needed(config: &DesktopSpotifyConfig) -> Result<bool> {
     if EARLY_LAUNCH.load(Ordering::Acquire) {
         return Ok(true);
     }
-    if !will_launch(config)? {
+    if !will_launch_blocking(config)? {
         return Ok(false);
     }
 
     if config.start_minimized {
         ensure_minimize_to_tray_pref();
-        tokio::spawn(async {
-            keep_hiding(Duration::from_secs(45), false).await;
-        });
+        start_hide_watcher(Duration::from_secs(45), false);
     }
     launch(config)?;
     EARLY_LAUNCH.store(true, Ordering::Release);
@@ -110,7 +136,32 @@ pub fn mpris_current_track_uri(dest: &str) -> Option<String> {
 
 /// Ensure the desktop Spotify client is running and has an active playback
 /// session so it appears as a Connect device.
+///
+/// Everything in here shells out (`dbus-send`, `xdotool`, `pactl`) and sleeps,
+/// so the work runs on a blocking thread, never on a runtime worker.
 pub async fn ensure_awake(
+    config: &DesktopSpotifyConfig,
+    nudge_uri: Option<&str>,
+    nudge_policy: NudgePolicy,
+) -> Result<WakeOutcome> {
+    let config = config.clone();
+    let nudge_uri = nudge_uri.map(str::to_owned);
+    run_blocking("desktop Spotify wake", move || {
+        ensure_awake_blocking(&config, nudge_uri.as_deref(), nudge_policy)
+    })
+    .await?
+}
+
+/// Stops the taskbar-minimize watcher on every exit path of the wake, including errors.
+struct StopHideWatcherOnDrop;
+
+impl Drop for StopHideWatcherOnDrop {
+    fn drop(&mut self) {
+        stop_hide_watcher();
+    }
+}
+
+fn ensure_awake_blocking(
     config: &DesktopSpotifyConfig,
     nudge_uri: Option<&str>,
     nudge_policy: NudgePolicy,
@@ -126,22 +177,20 @@ pub async fn ensure_awake(
     let launched_early = EARLY_LAUNCH.swap(false, Ordering::AcqRel);
     // Re-check even after an early launch: if that process exited during auth,
     // relaunch here instead of waiting the full MPRIS timeout.
-    let needs_launch = will_launch(config)?;
+    let needs_launch = will_launch_blocking(config)?;
     let launched = launched_early || needs_launch;
 
     // Spotify's `--minimized` flag is Windows-only. Closing the window too early
     // (before the tray icon is up) can quit the client, so: taskbar-minimize
-    // while waiting for MPRIS, then close-to-tray once MPRIS is ready.
-    if launched && config.start_minimized {
+    // while waiting for MPRIS, then close-to-tray once MPRIS is ready. The pref
+    // is only edited before this process starts Spotify itself.
+    if needs_launch && config.start_minimized {
         ensure_minimize_to_tray_pref();
     }
-    let flash_watch = if launched && config.start_minimized {
-        Some(tokio::spawn(async {
-            keep_hiding(Duration::from_secs(45), false).await;
-        }))
-    } else {
-        None
-    };
+    if launched && config.start_minimized {
+        start_hide_watcher(Duration::from_secs(45), false);
+    }
+    let _stop_watcher = StopHideWatcherOnDrop;
 
     if !mpris_name_has_owner(dest)? {
         if needs_launch {
@@ -156,11 +205,9 @@ pub async fn ensure_awake(
                 config.ready_timeout_secs
             );
         }
-        wait_for_mpris(config, Duration::from_secs(config.ready_timeout_secs)).await?;
+        wait_for_mpris(config, Duration::from_secs(config.ready_timeout_secs))?;
     }
-    if let Some(watch) = flash_watch {
-        watch.abort();
-    }
+    stop_hide_watcher();
 
     let connect_nudge_uri;
     let nudge_uri = match nudge_policy {
@@ -172,11 +219,12 @@ pub async fn ensure_awake(
         NudgePolicy::SkipIfPlaying => nudge_uri,
     };
 
-    if mpris_is_playing(dest) && nudge_policy == NudgePolicy::SkipIfPlaying {
+    let playing = mpris_is_playing_blocking(dest);
+    if playing && nudge_policy == NudgePolicy::SkipIfPlaying {
         tracing::info!(
             "Desktop Spotify is already playing (MPRIS); skipping wake nudge so local playback is left alone"
         );
-    } else if mpris_is_playing(dest) && nudge_policy == NudgePolicy::RegisterConnect {
+    } else if playing && nudge_policy == NudgePolicy::RegisterConnect {
         tracing::info!(
             "Desktop Spotify is playing locally but Connect is missing the preferred device; registering without pausing playback"
         );
@@ -190,7 +238,7 @@ pub async fn ensure_awake(
         // Prefer tray hide once MPRIS (and usually the tray icon) is up.
         // Also run when we only nudged an already-running instance — Connect
         // transfer / OpenUri can map a window that was parked in the tray.
-        hide_window().await
+        hide_window_blocking()
     } else {
         false
     };
@@ -224,7 +272,7 @@ fn resolve_command(command: &str) -> Result<String> {
         .with_context(|| format!("desktop Spotify command `{command}` not found on PATH"))
 }
 
-async fn wait_for_mpris(config: &DesktopSpotifyConfig, timeout: Duration) -> Result<()> {
+fn wait_for_mpris(config: &DesktopSpotifyConfig, timeout: Duration) -> Result<()> {
     let dest = config.mpris_dest.as_str();
     let start = Instant::now();
     let poll = Duration::from_millis(400);
@@ -246,7 +294,7 @@ async fn wait_for_mpris(config: &DesktopSpotifyConfig, timeout: Duration) -> Res
         if start.elapsed() >= timeout {
             anyhow::bail!("timed out after {timeout:?} waiting for desktop Spotify MPRIS ({dest})");
         }
-        tokio::time::sleep(poll).await;
+        thread::sleep(poll);
     }
 }
 
@@ -265,6 +313,12 @@ fn should_relaunch_for_mpris(
 /// alive and parks it in the `StatusNotifier` tray. Callers repeat this after a
 /// Connect transfer, which can raise the window again.
 pub async fn hide_window() -> bool {
+    run_blocking("desktop Spotify hide", hide_window_blocking)
+        .await
+        .unwrap_or(false)
+}
+
+fn hide_window_blocking() -> bool {
     if which::which("xdotool").is_err() {
         tracing::warn!("`xdotool` is unavailable; cannot hide the Spotify window");
         return false;
@@ -317,22 +371,46 @@ pub async fn hide_window() -> bool {
             tracing::warn!("No Spotify window found to hide");
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        thread::sleep(Duration::from_millis(200));
     }
 }
 
-/// Poll and hide Spotify whenever a real UI window maps.
+struct HideWatcher {
+    stop: Arc<AtomicBool>,
+}
+
+/// Start (or replace) the single background watcher that hides Spotify's
+/// window whenever a real UI window maps, for at most `max`.
 ///
+/// Only one watcher runs at a time: an early launch followed by `ensure_awake`
+/// used to leave two loops re-minimizing a window the user had just opened.
 /// `prefer_tray` selects close-to-tray (`windowclose`) vs taskbar minimize.
-async fn keep_hiding(max: Duration, prefer_tray: bool) {
+fn start_hide_watcher(max: Duration, prefer_tray: bool) {
     if which::which("xdotool").is_err() {
         return;
     }
-    let to_tray = prefer_tray && minimize_to_tray_pref_enabled();
-    let deadline = Instant::now() + max;
-    while Instant::now() < deadline {
-        let _ = hide_visible_once(to_tray);
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    stop_hide_watcher();
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    let spawned = thread::Builder::new()
+        .name("spotify-hide-watch".to_string())
+        .spawn(move || {
+            let to_tray = prefer_tray && minimize_to_tray_pref_enabled();
+            let deadline = Instant::now() + max;
+            while Instant::now() < deadline && !flag.load(Ordering::Relaxed) {
+                let _ = hide_visible_once(to_tray);
+                thread::sleep(HIDE_WATCH_POLL);
+            }
+        });
+    match spawned {
+        Ok(_) => *HIDE_WATCHER.lock() = Some(HideWatcher { stop }),
+        Err(err) => tracing::warn!("Failed to start the Spotify hide watcher: {err:#}"),
+    }
+}
+
+fn stop_hide_watcher() {
+    if let Some(watcher) = HIDE_WATCHER.lock().take() {
+        watcher.stop.store(true, Ordering::Relaxed);
     }
 }
 
@@ -504,7 +582,10 @@ fn set_prefs_bool(path: &Path, key: &str, value: bool) -> Result<bool> {
         if !out.ends_with('\n') {
             out.push('\n');
         }
-        fs::write(path, out).with_context(|| format!("write {}", path.display()))?;
+        // Write-then-rename so a crash mid-write cannot truncate Spotify's prefs.
+        let tmp = path.with_file_name("prefs.spotify-player.tmp");
+        fs::write(&tmp, out).with_context(|| format!("write {}", tmp.display()))?;
+        fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
     }
     Ok(changed)
 }
@@ -660,8 +741,17 @@ fn mpris_is_silent(dest: &str) -> bool {
 ///
 /// Connect often omits that client from `/v1/me/player` even while the GUI is
 /// already playing. Callers must treat this as local active playback and must
-/// not OpenUri/Pause it as a "wake".
-pub fn mpris_is_playing(dest: &str) -> bool {
+/// not OpenUri/Pause it as a "wake". `false` when the probe fails.
+pub async fn mpris_is_playing(dest: &str) -> bool {
+    let dest = dest.to_owned();
+    run_blocking("MPRIS status probe", move || {
+        mpris_is_playing_blocking(&dest)
+    })
+    .await
+    .unwrap_or(false)
+}
+
+fn mpris_is_playing_blocking(dest: &str) -> bool {
     mpris_get_playback_status(dest)
         .ok()
         .as_deref()
@@ -692,11 +782,32 @@ struct MprisNowPlaying {
 /// Connect `/v1/me/player` often returns null while the official client is
 /// already Playing (or paused on a loaded track) via MPRIS. Use that metadata
 /// for the playback window until Connect lists a session.
+///
+/// Blocking (spawns `dbus-send`); the result is cached for `MPRIS_CACHE_TTL`,
+/// so a cached `progress` can lag by up to that much.
 pub fn current_playback_from_mpris(
     dest: &str,
     device_name: &str,
 ) -> Result<Option<CurrentPlaybackContext>> {
-    Ok(mpris_now_playing(dest)?.map(|now| playback_context_from_mpris(now, device_name)))
+    cached(&MPRIS_PLAYBACK_CACHE, || {
+        Ok(mpris_now_playing(dest)?.map(|now| playback_context_from_mpris(now, device_name)))
+    })
+}
+
+/// Serve `compute`'s last value while it is younger than `MPRIS_CACHE_TTL`;
+/// errors are not cached.
+fn cached<T: Clone>(
+    cache: &Mutex<Option<(Instant, T)>>,
+    compute: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if let Some((at, value)) = cache.lock().as_ref() {
+        if at.elapsed() < MPRIS_CACHE_TTL {
+            return Ok(value.clone());
+        }
+    }
+    let value = compute()?;
+    *cache.lock() = Some((Instant::now(), value.clone()));
+    Ok(value)
 }
 
 fn mpris_now_playing(dest: &str) -> Result<Option<MprisNowPlaying>> {
@@ -961,12 +1072,15 @@ pub(crate) fn overlay_connect_volume(
     }
 }
 
-/// Desktop client's MPRIS Volume as a percent (0–100).
+/// Desktop client's MPRIS Volume as a percent (0–100). Blocking; cached briefly.
 pub(crate) fn mpris_volume_percent(dest: &str) -> Option<u32> {
-    mpris_get_property_reply(dest, "Volume")
-        .ok()
-        .as_deref()
-        .and_then(parse_volume_percent)
+    cached(&MPRIS_VOLUME_CACHE, || {
+        Ok(mpris_get_property_reply(dest, "Volume")
+            .ok()
+            .as_deref()
+            .and_then(parse_volume_percent))
+    })
+    .unwrap_or(None)
 }
 
 fn parse_volume_percent(s: &str) -> Option<u32> {
@@ -1148,14 +1262,17 @@ fn spotify_sink_inputs_from_json(json: &str) -> Vec<(u32, bool)> {
         .collect()
 }
 
-fn indices_to_restore(recorded: &[u32], current: &[(u32, bool)]) -> Vec<(u32, bool)> {
-    let mut out: Vec<(u32, bool)> = current.to_vec();
-    for index in recorded {
-        if !out.iter().any(|(i, _)| i == index) {
-            out.push((*index, false));
-        }
-    }
-    out
+/// The inputs this guard muted, paired with whether each currently sits at 0%
+/// Pulse volume (a restored stream at 0% stays silent even when unmuted).
+/// Streams the guard never touched, including ones the user muted, are left alone.
+fn restore_targets(recorded: &[u32], current: &[(u32, bool)]) -> Vec<(u32, bool)> {
+    recorded
+        .iter()
+        .map(|index| {
+            let silent = current.iter().any(|(i, silent)| i == index && *silent);
+            (*index, silent)
+        })
+        .collect()
 }
 
 fn spotify_sink_inputs() -> Vec<(u32, bool)> {
@@ -1194,7 +1311,7 @@ fn set_sink_input_volume_100(index: u32) -> bool {
 }
 
 fn restore_spotify_sink_inputs(recorded: &[u32]) {
-    for (index, silent_volume) in indices_to_restore(recorded, &spotify_sink_inputs()) {
+    for (index, silent_volume) in restore_targets(recorded, &spotify_sink_inputs()) {
         let _ = set_sink_input_mute(index, false);
         if silent_volume {
             let _ = set_sink_input_volume_100(index);
@@ -1220,7 +1337,7 @@ impl PulseMuteGuard {
                         muted.push(index);
                     }
                 }
-                thread::sleep(Duration::from_millis(40));
+                thread::sleep(Duration::from_millis(200));
             }
             muted
         });
@@ -1244,13 +1361,23 @@ impl Drop for PulseMuteGuard {
 }
 
 fn spotify_process_running() -> bool {
-    // Match the official client binary name without catching spotify_player / spotifyd.
-    Command::new("pgrep")
+    // Match the official client binary name without catching spotify_player /
+    // spotifyd, and only this user's processes on a shared machine.
+    let mut command = Command::new("pgrep");
+    if let Some(uid) = current_uid() {
+        command.args(["-u", &uid.to_string()]);
+    }
+    command
         .args(["-x", "spotify"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+fn current_uid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata("/proc/self").ok().map(|m| m.uid())
 }
 
 /// Resolve a nudge URI from config or a recently-played track id.
@@ -1366,11 +1493,12 @@ mod tests {
     }
 
     #[test]
-    fn restore_includes_current_and_recorded_indices() {
-        let current = vec![(99, true)];
+    fn restore_targets_only_touch_inputs_the_guard_muted() {
+        // 7 is a stream the guard never muted (e.g. muted by the user): untouched.
+        let current = vec![(99, true), (7, true)];
         assert_eq!(
-            indices_to_restore(&[12, 99], &current),
-            vec![(99, true), (12, false)]
+            restore_targets(&[12, 99], &current),
+            vec![(12, false), (99, true)]
         );
     }
 
