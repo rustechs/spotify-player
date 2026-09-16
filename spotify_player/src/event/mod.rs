@@ -880,9 +880,11 @@ fn handle_global_command(
         }
         Command::JumpToCurrentTrackInContext => {
             let track_id = match state.player.read().currently_playing() {
-                Some(rspotify::model::PlayableItem::Track(track)) => {
-                    PlayableId::Track(track.id.clone().expect("all non-local tracks have ids"))
-                }
+                Some(rspotify::model::PlayableItem::Track(track)) => match track.id.clone() {
+                    Some(id) => PlayableId::Track(id),
+                    // Local files have no id and cannot be located in a context.
+                    None => return Ok(false),
+                },
                 Some(rspotify::model::PlayableItem::Episode(episode)) => {
                     PlayableId::Episode(episode.id.clone())
                 }

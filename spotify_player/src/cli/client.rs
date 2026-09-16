@@ -476,12 +476,7 @@ async fn handle_playback_request(
                 .context("no active playback found!")?
                 .volume
                 .context("playback has no volume!")?;
-            let percent = if is_offset {
-                std::cmp::max(0, (volume as i8) + percent)
-            } else {
-                percent
-            };
-            PlayerRequest::Volume(percent.try_into()?)
+            PlayerRequest::Volume(volume_percent(volume, percent, is_offset)?)
         }
         Command::Seek(position_offset_ms) => {
             // Playback's progress cannot be computed trivially without knowing the `playback` variable in
@@ -956,4 +951,35 @@ async fn handle_lyrics_request(
     }
 
     Ok(output.into_bytes())
+}
+
+/// Resolve the `volume` CLI command into a percent within `0..=100`.
+///
+/// Offsets are clamped; an absolute value outside the range is an error.
+fn volume_percent(current: u32, percent: i8, is_offset: bool) -> Result<u8> {
+    let target = if is_offset {
+        (i64::from(current) + i64::from(percent)).clamp(0, 100)
+    } else {
+        i64::from(percent)
+    };
+    u8::try_from(target)
+        .ok()
+        .filter(|v| *v <= 100)
+        .with_context(|| format!("volume percent {percent} is outside 0..=100"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::volume_percent;
+
+    #[test]
+    fn volume_percent_clamps_offsets_and_rejects_bad_absolutes() {
+        assert_eq!(volume_percent(100, 50, true).unwrap(), 100);
+        assert_eq!(volume_percent(80, 30, true).unwrap(), 100);
+        assert_eq!(volume_percent(10, -30, true).unwrap(), 0);
+        assert_eq!(volume_percent(50, -5, true).unwrap(), 45);
+        assert_eq!(volume_percent(50, 70, false).unwrap(), 70);
+        assert!(volume_percent(50, -1, false).is_err());
+        assert!(volume_percent(50, 101, false).is_err());
+    }
 }

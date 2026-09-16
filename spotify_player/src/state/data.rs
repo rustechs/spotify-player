@@ -227,8 +227,14 @@ where
     let path = cache_folder.join(format!("{key:?}_cache.json"));
     if path.exists() {
         tracing::info!("Loading {key:?} data from {}...", path.display());
-        let f = BufReader::new(std::fs::File::open(path).expect("path exists"));
-        match serde_json::from_reader(f) {
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(err) => {
+                tracing::error!("Failed to open {key:?} cache {}: {err:#}", path.display());
+                return None;
+            }
+        };
+        match serde_json::from_reader(BufReader::new(file)) {
             Ok(data) => {
                 tracing::info!("Successfully loaded {key:?} data!");
                 Some(data)

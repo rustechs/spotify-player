@@ -95,3 +95,26 @@ pub fn filtered_items_from_query<'a, T: std::fmt::Display>(
         })
         .collect::<Vec<_>>()
 }
+
+/// Best-effort: make `path` readable only by the current user (`0700` for a
+/// directory, `0600` for a file). No-op on non-Unix platforms.
+pub fn restrict_permissions(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if !path.exists() {
+            return;
+        }
+        let mode = if path.is_dir() { 0o700 } else { 0o600 };
+        if let Err(err) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)) {
+            tracing::warn!(
+                "Failed to restrict permissions of {}: {err:#}",
+                path.display()
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}

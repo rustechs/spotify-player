@@ -40,7 +40,7 @@ pub async fn get_token_rspotify(session: &Session) -> Result<rspotify::Token> {
         refresh_token: None,
     };
 
-    tracing::info!("Got new token: {token:?}");
+    tracing::info!("Got new token (expires at {expires_at})");
 
     Ok(token)
 }

@@ -51,7 +51,9 @@ pub fn render_playback_window(
                     }
                 }?;
                 let progress = std::cmp::min(
-                    player.playback_progress().expect("non-empty playback"),
+                    player
+                        .playback_progress()
+                        .unwrap_or_else(chrono::Duration::zero),
                     duration,
                 );
                 Some(ActivePlayback {
@@ -564,7 +566,11 @@ fn construct_playback_text(
             },
             "{genres}" => match playable {
                 rspotify::model::PlayableItem::Track(full_track) => {
-                    let genre = match data.caches.genres.get(&full_track.artists[0].name) {
+                    let genre = match full_track
+                        .artists
+                        .first()
+                        .and_then(|artist| data.caches.genres.get(&artist.name))
+                    {
                         Some(genres) => &format_genres(genres, configs.app_config.genre_num),
                         None => "no genre",
                     };

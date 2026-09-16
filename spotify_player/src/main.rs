@@ -72,6 +72,9 @@ fn init_logging(
         .context("failed to create backtrace file")?;
     let backtrace_file = std::sync::Mutex::new(backtrace_file);
     std::panic::set_hook(Box::new(move |info| {
+        // Also surface panics in the log file and the in-TUI Logs page;
+        // the backtrace file alone is easy to miss.
+        tracing::error!("Panic: {info}");
         let mut file = backtrace_file.lock().unwrap();
         let backtrace = backtrace::Backtrace::new();
         writeln!(&mut file, "Got a panic: {info:#?}\n").unwrap();
@@ -180,7 +183,9 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
             let state = state.clone();
             let client_pub = client_pub.clone();
             move || {
-                client::start_player_event_watcher(&state, &client_pub);
+                run_supervised("player-event-watcher", || {
+                    client::start_player_event_watcher(&state, &client_pub);
+                });
             }
         })?;
 
@@ -196,7 +201,9 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
                 let client_pub = client_pub.clone();
                 let state = state.clone();
                 move || {
-                    event::start_event_handler(&state, &client_pub);
+                    run_supervised("terminal-event-handler", || {
+                        event::start_event_handler(&state, &client_pub);
+                    });
                 }
             })?;
 
@@ -245,6 +252,20 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
     }
 }
 
+/// Run a long-lived thread body, restarting it after a panic.
+///
+/// `parking_lot` locks do not poison, so the shared state stays usable; a panic
+/// on one tick must not silently disable playback refreshes or keyboard input.
+fn run_supervised(name: &str, mut body: impl FnMut()) {
+    loop {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut body)).is_ok() {
+            return;
+        }
+        tracing::error!("Thread `{name}` panicked; restarting it in 1s");
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
 fn main() -> Result<()> {
     // librespot depends on hyper-rustls which requires a crypto provider to be set up.
     // TODO: see if this can be fixed upstream
@@ -272,6 +293,8 @@ fn main() -> Result<()> {
     if !cache_audio_folder.exists() {
         std::fs::create_dir_all(&cache_audio_folder)?;
     }
+    // The cache folder holds the Web API token and librespot credentials.
+    utils::restrict_permissions(&cache_folder);
     let cache_image_folder = cache_folder.join("image");
     if !cache_image_folder.exists() {
         std::fs::create_dir_all(&cache_image_folder)?;

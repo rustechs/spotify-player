@@ -179,6 +179,7 @@ impl AppClient {
         auth::prompt_for_user_token(&mut api_client, false)
             .await
             .context("authenticate Spotify Web API client")?;
+        crate::utils::restrict_permissions(&configs.cache_folder.join("user_client_token.json"));
 
         Ok(Self {
             spotify: Arc::new(spotify::Spotify::new()),
@@ -275,11 +276,12 @@ impl AppClient {
                     {
                         Ok(Ok(())) => {}
                         Ok(Err(err)) => {
-                            tracing::error!("Failed to retrieve current playback: {err:#}");
-                            // Keep trying after rate-limit storms; give up only on hard failures.
-                            if !is_rate_limit_msg(&err) {
-                                return;
-                            }
+                            // Retry within the bounded attempt budget; a transient failure
+                            // here used to abort device selection entirely.
+                            tracing::error!(
+                                "Failed to retrieve current playback (attempt {}): {err:#}",
+                                attempt + 1
+                            );
                             continue;
                         }
                         Err(_) => {
@@ -539,6 +541,9 @@ impl AppClient {
 
         let session = self.auth_config.session();
         let creds = auth::get_creds(&self.auth_config, reauth, true).context("get credentials")?;
+        crate::utils::restrict_permissions(
+            &config::get_config().cache_folder.join("credentials.json"),
+        );
         self.spotify.set_session(session.clone()).await;
 
         #[allow(unused_mut)]
@@ -1060,7 +1065,7 @@ impl AppClient {
                     .user
                     .as_ref()
                     .map(|u| u.id.clone())
-                    .unwrap();
+                    .context("current user is not loaded yet")?;
                 self.create_new_playlist(
                     state,
                     user_id,
@@ -2368,23 +2373,21 @@ impl AppClient {
 
         // retrieve current artist for genres if not in cache
         let curr_artist = match &curr_item {
-            rspotify::model::PlayableItem::Track(full_track) => {
-                let cached = state
-                    .data
-                    .read()
-                    .caches
-                    .genres
-                    .contains_key(&full_track.artists[0].name);
-
-                if cached {
-                    None
-                } else {
-                    match &full_track.artists[0].id {
-                        Some(id) => self.artist(id.clone()).await.ok(),
-                        None => None,
+            // Local files can have no artists at all; skip the genre lookup then.
+            rspotify::model::PlayableItem::Track(full_track) => match full_track.artists.first() {
+                Some(artist) => {
+                    let cached = state.data.read().caches.genres.contains_key(&artist.name);
+                    if cached {
+                        None
+                    } else {
+                        match &artist.id {
+                            Some(id) => self.artist(id.clone()).await.ok(),
+                            None => None,
+                        }
                     }
                 }
-            }
+                None => None,
+            },
             rspotify::model::PlayableItem::Episode(_)
             | rspotify::model::PlayableItem::Unknown(_) => None,
         };
@@ -2399,14 +2402,15 @@ impl AppClient {
             }
         }
 
+        // Local files and some episodes have no artwork. That only skips the
+        // cover work below; it must not fail the playback refresh (it used to
+        // abort playback initialization).
         let url = match curr_item {
             rspotify::model::PlayableItem::Track(ref track) => {
                 crate::utils::get_track_album_image_url(track)
-                    .ok_or(anyhow::anyhow!("missing image"))?
             }
             rspotify::model::PlayableItem::Episode(ref episode) => {
                 crate::utils::get_episode_show_image_url(episode)
-                    .ok_or(anyhow::anyhow!("missing image"))?
             }
             rspotify::model::PlayableItem::Unknown(_) => return Ok(()),
         };
@@ -2441,32 +2445,36 @@ impl AppClient {
         .replace('/', ""); // remove invalid characters from the file's name
         let path = configs.cache_folder.join("image").join(filename);
 
-        if configs.app_config.enable_cover_image_cache {
-            self.retrieve_image(url, &path, true).await?;
-        }
-
-        #[cfg(feature = "image")]
-        if !state.data.read().caches.images.contains_key(url) {
-            let bytes = self.retrieve_image(url, &path, false).await?;
-
-            #[cfg(not(feature = "pixelate"))]
-            let image =
-                image::load_from_memory(&bytes).context("Failed to load image from memory")?;
-            #[cfg(feature = "pixelate")]
-            let mut image =
-                image::load_from_memory(&bytes).context("Failed to load image from memory")?;
-
-            #[cfg(feature = "pixelate")]
-            {
-                Self::pixelate_image(&mut image);
+        if let Some(url) = url {
+            if configs.app_config.enable_cover_image_cache {
+                self.retrieve_image(url, &path, true).await?;
             }
 
-            state
-                .data
-                .write()
-                .caches
-                .images
-                .insert(url.to_owned(), image, *TTL_CACHE_DURATION);
+            #[cfg(feature = "image")]
+            if !state.data.read().caches.images.contains_key(url) {
+                let bytes = self.retrieve_image(url, &path, false).await?;
+
+                #[cfg(not(feature = "pixelate"))]
+                let image =
+                    image::load_from_memory(&bytes).context("Failed to load image from memory")?;
+                #[cfg(feature = "pixelate")]
+                let mut image =
+                    image::load_from_memory(&bytes).context("Failed to load image from memory")?;
+
+                #[cfg(feature = "pixelate")]
+                {
+                    Self::pixelate_image(&mut image);
+                }
+
+                state
+                    .data
+                    .write()
+                    .caches
+                    .images
+                    .insert(url.to_owned(), image, *TTL_CACHE_DURATION);
+            }
+        } else {
+            tracing::debug!("Current item has no cover image; skipping cover retrieval");
         }
 
         // notify user about the playback's change if any

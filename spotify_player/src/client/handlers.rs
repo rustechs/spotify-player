@@ -134,11 +134,13 @@ fn handle_playback_change_event(
         player.buffered_playback.as_ref(),
         player.currently_playing(),
     ) {
-        (Some(playback), Some(rspotify::model::PlayableItem::Track(track))) => (
-            playback,
-            PlayableId::Track(track.id.clone().expect("null track_id")),
-            track.duration,
-        ),
+        (Some(playback), Some(rspotify::model::PlayableItem::Track(track))) => {
+            // Local files and ads have no Spotify id; there is nothing to track.
+            let Some(id) = track.id.clone() else {
+                return Ok(());
+            };
+            (playback, PlayableId::Track(id), track.duration)
+        }
         (Some(playback), Some(rspotify::model::PlayableItem::Episode(episode))) => (
             playback,
             PlayableId::Episode(episode.id.clone()),
@@ -163,7 +165,7 @@ fn handle_playback_change_event(
         Some(queue) => queue
             .currently_playing
             .as_ref()
-            .is_some_and(|queue_track| queue_track.id().expect("null track_id") != id),
+            .is_some_and(|queue_track| queue_track.id().is_none_or(|queue_id| queue_id != id)),
         None => true,
     };
     if needs_queue_fetch && handler_state.last_queue_fetch.elapsed() >= QUEUE_FETCH_INTERVAL {
