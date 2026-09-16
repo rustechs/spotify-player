@@ -365,6 +365,29 @@ impl Default for KeymapConfig {
     }
 }
 
+/// Warn when one bound sequence is a strict prefix of another: the shorter one
+/// fires as soon as it matches, so the longer chord can never be entered (e.g. a
+/// user `s t` chord kept from an older default keymap under the single-key `s`).
+fn warn_on_prefix_conflicts(keymaps: &[Keymap]) {
+    for shorter in keymaps {
+        for longer in keymaps {
+            if is_strict_prefix(&shorter.key_sequence.keys, &longer.key_sequence.keys) {
+                tracing::warn!(
+                    "Key sequence {:?} ({:?}) is a prefix of {:?} ({:?}); the longer chord is unreachable",
+                    shorter.key_sequence,
+                    shorter.command,
+                    longer.key_sequence,
+                    longer.command
+                );
+            }
+        }
+    }
+}
+
+fn is_strict_prefix<T: PartialEq>(shorter: &[T], longer: &[T]) -> bool {
+    longer.len() > shorter.len() && longer.starts_with(shorter)
+}
+
 impl KeymapConfig {
     pub fn new(path: &std::path::Path) -> Result<Self> {
         let mut config = Self::default();
@@ -408,6 +431,7 @@ impl KeymapConfig {
                         self.actions.push(action);
                     }
                 });
+                warn_on_prefix_conflicts(&self.keymaps);
             }
         }
         Ok(())
@@ -505,5 +529,18 @@ impl From<&str> for KeySequence {
     /// representation of a `KeySequence`.
     fn from(s: &str) -> Self {
         Self::from_str(s).unwrap_or_else(|| panic!("invalid key sequence {s}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_strict_prefix;
+
+    #[test]
+    fn strict_prefix_detects_unreachable_chords() {
+        assert!(is_strict_prefix(&['s'], &['s', 't']));
+        assert!(!is_strict_prefix(&['s', 't'], &['s']));
+        assert!(!is_strict_prefix(&['s'], &['s']));
+        assert!(!is_strict_prefix(&['o'], &['s', 't']));
     }
 }

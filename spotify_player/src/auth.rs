@@ -201,7 +201,8 @@ async fn prompt_for_web_api_token(
     let url = client
         .get_authorize_url(None)
         .with_context(|| format!("get authorize URL for {client_name}"))?;
-    let code = obtain_auth_code(&url, &client.get_oauth().redirect_uri)?;
+    let oauth = client.get_oauth();
+    let code = obtain_auth_code(&url, &oauth.redirect_uri, Some(&oauth.state))?;
     client
         .request_token(&code)
         .await
@@ -216,7 +217,7 @@ fn get_oauth_access_token(client_id: &str, redirect_uri: &str, scopes: &[&str]) 
     let state = random_url_safe(16);
     let auth_url = build_authorize_url(client_id, redirect_uri, scopes, &pkce.challenge, &state)?;
 
-    let code = obtain_auth_code(auth_url.as_str(), redirect_uri)?;
+    let code = obtain_auth_code(auth_url.as_str(), redirect_uri, Some(&state))?;
     exchange_code_for_token(client_id, redirect_uri, &code, &pkce.verifier)
 }
 
@@ -224,13 +225,17 @@ fn get_oauth_access_token(client_id: &str, redirect_uri: &str, scopes: &[&str]) 
 ///
 /// If `redirect_uri` is an HTTP loopback address with a port, a local server collects the code
 /// automatically; otherwise the user is prompted to paste the redirect URL on stdin.
-fn obtain_auth_code(auth_url: &str, redirect_uri: &str) -> Result<String> {
+fn obtain_auth_code(
+    auth_url: &str,
+    redirect_uri: &str,
+    expected_state: Option<&str>,
+) -> Result<String> {
     open::that_in_background(auth_url);
     println!("Browse to: {auth_url}");
 
     match redirect_socket_address(redirect_uri) {
-        Some(addr) => listen_for_auth_code(addr),
-        None => read_auth_code_from_stdin(),
+        Some(addr) => listen_for_auth_code(addr, expected_state),
+        None => read_auth_code_from_stdin(expected_state),
     }
 }
 
@@ -242,7 +247,7 @@ fn obtain_auth_code(auth_url: &str, redirect_uri: &str) -> Result<String> {
 /// and therefore fail with "Auth code param not found" when a prefetch arrives first — this server
 /// ignores any request that does not carry an auth `code` and keeps listening until the real
 /// redirect arrives.
-fn listen_for_auth_code(addr: SocketAddr) -> Result<String> {
+fn listen_for_auth_code(addr: SocketAddr, expected_state: Option<&str>) -> Result<String> {
     let listener =
         TcpListener::bind(addr).with_context(|| format!("bind OAuth callback server to {addr}"))?;
     tracing::info!("OAuth callback server listening on {addr}");
@@ -264,7 +269,7 @@ fn listen_for_auth_code(addr: SocketAddr) -> Result<String> {
 
         // The request line looks like `GET /login?code=...&state=... HTTP/1.1`.
         let request_target = request_line.split_whitespace().nth(1).unwrap_or_default();
-        if let Some(code) = code_from_redirect(request_target) {
+        if let Some(code) = code_from_redirect(request_target, expected_state) {
             respond(
                 &mut stream,
                 "200 OK",
@@ -283,13 +288,14 @@ fn listen_for_auth_code(addr: SocketAddr) -> Result<String> {
 }
 
 /// Prompt for the redirect URL on stdin and extract the auth `code`.
-fn read_auth_code_from_stdin() -> Result<String> {
+fn read_auth_code_from_stdin(expected_state: Option<&str>) -> Result<String> {
     println!("Enter the URL you were redirected to: ");
     let mut buffer = String::new();
     std::io::stdin()
         .read_line(&mut buffer)
         .context("read redirect URL from stdin")?;
-    code_from_redirect(buffer.trim()).context("no auth code found in the provided redirect URL")
+    code_from_redirect(buffer.trim(), expected_state)
+        .context("no auth code (with a matching state) found in the provided redirect URL")
 }
 
 fn respond(stream: &mut TcpStream, status: &str, body: &str) {
@@ -304,13 +310,25 @@ fn respond(stream: &mut TcpStream, status: &str, body: &str) {
 
 /// Extract the `code` query parameter from a redirect, accepting either a full URL or a bare
 /// request target (e.g. `/login?code=...`).
-fn code_from_redirect(redirect: &str) -> Option<String> {
+///
+/// When `expected_state` is given, a redirect whose `state` does not match is ignored: a stale
+/// or foreign callback must not end the listener before the real one arrives.
+fn code_from_redirect(redirect: &str, expected_state: Option<&str>) -> Option<String> {
     let url = Url::parse(redirect)
         .or_else(|_| Url::parse(&format!("http://localhost{redirect}")))
         .ok()?;
-    url.query_pairs()
+    let code = url
+        .query_pairs()
         .find(|(key, _)| key == "code")
-        .map(|(_, code)| code.into_owned())
+        .map(|(_, code)| code.into_owned())?;
+    if let Some(expected) = expected_state {
+        let state = url.query_pairs().find(|(key, _)| key == "state");
+        if state.as_ref().map(|(_, value)| value.as_ref()) != Some(expected) {
+            tracing::warn!("Ignoring an OAuth redirect whose `state` does not match this login");
+            return None;
+        }
+    }
+    Some(code)
 }
 
 /// Resolve the loopback socket address that an `http://host:port/...` redirect URI listens on.
@@ -419,11 +437,12 @@ mod test {
     fn code_from_redirect_extracts_code() {
         // Bare request target (as read from the HTTP request line) and full URL both work.
         assert_eq!(
-            code_from_redirect("/login?code=abc123&state=xyz").as_deref(),
+            code_from_redirect("/login?code=abc123&state=xyz", None).as_deref(),
             Some("abc123")
         );
         assert_eq!(
-            code_from_redirect("http://127.0.0.1:8989/login?code=abc123&state=xyz").as_deref(),
+            code_from_redirect("http://127.0.0.1:8989/login?code=abc123&state=xyz", None)
+                .as_deref(),
             Some("abc123")
         );
     }
@@ -432,11 +451,24 @@ mod test {
     fn code_from_redirect_ignores_stray_requests() {
         // The exact request that previously broke authentication: a browser prefetch with no code.
         assert_eq!(
-            code_from_redirect("/apple-touch-icon-precomposed.png"),
+            code_from_redirect("/apple-touch-icon-precomposed.png", None),
             None
         );
-        assert_eq!(code_from_redirect("/favicon.ico"), None);
-        assert_eq!(code_from_redirect("/login"), None);
+        assert_eq!(code_from_redirect("/favicon.ico", None), None);
+        assert_eq!(code_from_redirect("/login", None), None);
+    }
+
+    #[test]
+    fn code_from_redirect_checks_the_state_when_expected() {
+        assert_eq!(
+            code_from_redirect("/login?code=abc123&state=xyz", Some("xyz")).as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(
+            code_from_redirect("/login?code=abc123&state=other", Some("xyz")),
+            None
+        );
+        assert_eq!(code_from_redirect("/login?code=abc123", Some("xyz")), None);
     }
 
     #[test]

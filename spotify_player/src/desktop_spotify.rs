@@ -420,12 +420,6 @@ enum HideVisible {
     Hidden,
 }
 
-/// Tray hide must only search mapped visible windows so `windowclose` never
-/// targets hidden ghosts (login autostart `wmctrl hidden`, `KWin` no-focus minimize).
-fn hide_search_only_visible() -> bool {
-    true
-}
-
 /// The tray stub window is named `spotify`; closing it tears down the tray entry.
 fn is_spotify_main_ui_window_name(name: &str) -> bool {
     !name.trim().eq_ignore_ascii_case("spotify")
@@ -437,7 +431,7 @@ fn hide_visible_once(to_tray: bool) -> Result<HideVisible> {
     // a KWin no-focus rule): closing those leaves Spotify thinking the UI is
     // shown while nothing is actually visible ("Show Spotify" toggles to
     // "Minimize to Tray" without mapping a window).
-    let ids = ui_window_ids(hide_search_only_visible())?;
+    let ids = ui_window_ids(true)?;
     if ids.is_empty() {
         return Ok(HideVisible::NoneVisible);
     }
@@ -1358,11 +1352,6 @@ mod tests {
         let result = bus::name_has_owner("org.mpris.MediaPlayer2.spotify-player-wake-test-missing");
         assert!(result.is_ok());
         assert!(!result.unwrap());
-    }
-
-    #[test]
-    fn hide_search_only_visible_is_always_true() {
-        assert!(hide_search_only_visible());
     }
 
     #[test]

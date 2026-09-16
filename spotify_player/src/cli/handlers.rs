@@ -16,7 +16,18 @@ fn receive_response(socket: &UdpSocket) -> Result<Response> {
     let mut data = Vec::new();
     let mut buf = [0; 4096];
     loop {
-        let (n_bytes, _) = socket.recv_from(&mut buf)?;
+        let (n_bytes, _) = socket.recv_from(&mut buf).map_err(|err| {
+            if matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) {
+                anyhow::anyhow!(
+                    "timed out waiting for a reply from the running spotify_player instance"
+                )
+            } else {
+                err.into()
+            }
+        })?;
         if n_bytes == 0 {
             // end of chunk
             break;
@@ -153,6 +164,14 @@ fn try_connect_to_client(socket: &UdpSocket, configs: &config::Configs) -> Resul
     // send an empty buffer as a connection request to the client
     socket.send(&[])?;
     if let Err(err) = socket.recv(&mut [0; 1]) {
+        if matches!(
+            err.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ) {
+            anyhow::bail!(
+                "timed out waiting for the running spotify_player instance on port {port}; it may be busy, retry in a moment"
+            );
+        }
         if let std::io::ErrorKind::ConnectionRefused = err.kind() {
             // no running `spotify_player` instance found,
             // initialize a new client to handle the current CLI command
@@ -230,13 +249,22 @@ pub fn handle_cli_subcommand(cmd: &str, args: &ArgMatches) -> Result<()> {
                 // CLI wake has no authenticated client for recently-played fallback.
                 let nudge_uri =
                     crate::desktop_spotify::resolve_nudge_uri(desktop.nudge_uri.as_deref(), None);
-                rt.block_on(crate::desktop_spotify::ensure_awake(
-                    &desktop,
-                    nudge_uri.as_deref(),
-                    crate::desktop_spotify::NudgePolicy::SkipIfPlaying,
-                ))
-                .context("wake desktop Spotify")?;
-                println!("Desktop Spotify woke (MPRIS nudged).");
+                let outcome = rt
+                    .block_on(crate::desktop_spotify::ensure_awake(
+                        &desktop,
+                        nudge_uri.as_deref(),
+                        crate::desktop_spotify::NudgePolicy::SkipIfPlaying,
+                    ))
+                    .context("wake desktop Spotify")?;
+                println!(
+                    "{}",
+                    match (outcome.launched, outcome.minimized) {
+                        (true, true) => "Desktop Spotify started in the system tray and is ready.",
+                        (true, false) => "Desktop Spotify started and is ready.",
+                        (false, _) =>
+                            "Desktop Spotify is ready (already running; nudged unless it was playing).",
+                    }
+                );
                 std::process::exit(0);
             }
             #[cfg(not(target_os = "linux"))]
@@ -274,7 +302,11 @@ pub fn handle_cli_subcommand(cmd: &str, args: &ArgMatches) -> Result<()> {
 
     // send the request to the client's socket
     let request_buf = serde_json::to_vec(&request)?;
-    assert!(request_buf.len() <= MAX_REQUEST_SIZE);
+    anyhow::ensure!(
+        request_buf.len() <= MAX_REQUEST_SIZE,
+        "request is too large ({} bytes, max {MAX_REQUEST_SIZE})",
+        request_buf.len()
+    );
     socket.send(&request_buf)?;
 
     // receive and handle a response from the client's socket
@@ -284,7 +316,13 @@ pub fn handle_cli_subcommand(cmd: &str, args: &ArgMatches) -> Result<()> {
             std::process::exit(1);
         }
         Response::Ok(data) => {
-            println!("{}", String::from_utf8_lossy(&data).replace("\\n", "\n"));
+            let text = String::from_utf8_lossy(&data);
+            // JSON payloads must stay valid; only plain-text replies unescape newlines.
+            if text.trim_start().starts_with(['{', '[']) {
+                println!("{text}");
+            } else {
+                println!("{}", text.replace("\\n", "\n"));
+            }
             std::process::exit(0);
         }
     }

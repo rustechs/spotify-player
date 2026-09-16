@@ -80,7 +80,14 @@ pub async fn start_socket(
                     let request: Request = match serde_json::from_slice(&req_buf) {
                         Ok(v) => v,
                         Err(err) => {
+                            // Always answer, or the CLI waits out its full read timeout
+                            // (e.g. a newer CLI talking to an older running instance).
                             tracing::error!("Cannot deserialize the socket request: {err:#}");
+                            let response =
+                                Response::Err(format!("Bad request: {err:#}").into_bytes());
+                            if let Err(err) = send_response(response, &socket, dest_addr).await {
+                                tracing::warn!("Failed to send the socket response: {err:#}");
+                            }
                             return;
                         }
                     };
@@ -92,36 +99,44 @@ pub async fn start_socket(
                     );
 
                     async {
-                        let response = match tokio::time::timeout(
-                            SOCKET_REQUEST_TIMEOUT,
-                            handle_socket_request(&client, state.as_ref(), request),
-                        )
-                        .await
+                        // Time out the *wait*, not the work: cancelling a playlist
+                        // import/sync half way through its cache rewrite lost data.
+                        let work = tokio::task::spawn(
+                            async move {
+                                handle_socket_request(&client, state.as_ref(), request).await
+                            }
+                            .in_current_span(),
+                        );
+                        let response = match tokio::time::timeout(SOCKET_REQUEST_TIMEOUT, work)
+                            .await
                         {
-                            Ok(Ok(data)) => {
+                            Ok(Ok(Ok(data))) => {
                                 tracing::info!("Successfully handled the socket request.");
                                 Response::Ok(data)
                             }
-                            Ok(Err(err)) => {
+                            Ok(Ok(Err(err))) => {
                                 tracing::error!("Failed to handle socket request: {err:#}");
-                                let msg = format!("Bad request: {err:#}");
-                                Response::Err(msg.into_bytes())
+                                Response::Err(format!("Bad request: {err:#}").into_bytes())
+                            }
+                            Ok(Err(err)) => {
+                                tracing::error!("Socket request handler panicked: {err:#}");
+                                Response::Err(b"Internal error: request handler panicked".to_vec())
                             }
                             Err(_) => {
                                 tracing::error!(
-                                    "Timed out after {SOCKET_REQUEST_TIMEOUT:?} handling socket request"
+                                    "Timed out after {SOCKET_REQUEST_TIMEOUT:?} waiting for the socket request; it keeps running"
                                 );
                                 Response::Err(
                                     format!(
-                                        "Timed out after {SOCKET_REQUEST_TIMEOUT:?} handling request"
+                                        "Timed out after {SOCKET_REQUEST_TIMEOUT:?} waiting for the request; it is still running in the background"
                                     )
                                     .into_bytes(),
                                 )
                             }
                         };
-                        send_response(response, &socket, dest_addr)
-                            .await
-                            .unwrap_or_default();
+                        if let Err(err) = send_response(response, &socket, dest_addr).await {
+                            tracing::warn!("Failed to send the socket response: {err:#}");
+                        }
                     }
                     .instrument(span)
                     .await;
@@ -626,9 +641,28 @@ async fn handle_playlist_request(client: &AppClient, command: PlaylistCommand) -
             // get all playlists' import data represented as subdirectories with `import_to` name.
             // Inside each `import_to` subdirectory, an import `import_from -> import_to`
             // data is represented as a file with `import_from` name.
-            for dir in imports_dir.read_dir()? {
+            let entries = match imports_dir.read_dir() {
+                Ok(entries) => entries,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok("No playlist import data found.".to_string());
+                }
+                Err(err) => return Err(err).context("read the playlist imports folder"),
+            };
+            for dir in entries {
                 let to_dir = dir?.path();
-                let to_id = PlaylistId::from_id(to_dir.file_name().unwrap().to_str().unwrap())?;
+                // Only import folders belong here; skip stray files such as `.DS_Store`.
+                let Some(to_id) = to_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| PlaylistId::from_id(name.to_owned()).ok())
+                    .filter(|_| to_dir.is_dir())
+                else {
+                    tracing::warn!(
+                        "Skipping unexpected entry in the playlist imports folder: {}",
+                        to_dir.display()
+                    );
+                    continue;
+                };
 
                 // If a playlist id is specified, only consider sync imports of that playlist
                 if let Some(id) = &id {
@@ -645,8 +679,18 @@ async fn handle_playlist_request(client: &AppClient, command: PlaylistCommand) -
 
                 if pl_follow {
                     for i in to_dir.read_dir()? {
-                        let from_id =
-                            PlaylistId::from_id(i?.file_name().to_str().unwrap().to_owned())?;
+                        let entry = i?;
+                        let Some(from_id) = entry
+                            .file_name()
+                            .to_str()
+                            .and_then(|name| PlaylistId::from_id(name.to_owned()).ok())
+                        else {
+                            tracing::warn!(
+                                "Skipping unexpected playlist import entry: {}",
+                                entry.path().display()
+                            );
+                            continue;
+                        };
                         result +=
                             &playlist_import(client, from_id, to_id.clone_static(), delete).await?;
                         result += "\n";

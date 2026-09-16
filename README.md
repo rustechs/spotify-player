@@ -417,6 +417,8 @@ To enable [fuzzy search](https://en.wikipedia.org/wiki/Approximate_string_matchi
 - `search`: Search spotify
 - `connect`: Connect to a Spotify device
 - `wake-desktop`: Launch/nudge the official Spotify desktop app so Connect can see it (Linux; requires `[desktop_spotify] enable = true`)
+
+A CLI command waits up to 35 seconds for the running instance to reply. A request that takes longer (for example a large `playlist import`) keeps running in the background; the CLI reports the timeout and the outcome is in the application log.
 - `like`: Like currently playing track
 - `authenticate`: Authenticate the application
 - `playlist`: Playlist editing (new, delete, import, fork, etc)

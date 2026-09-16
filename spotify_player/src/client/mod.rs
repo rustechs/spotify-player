@@ -24,8 +24,12 @@ use librespot_core::SpotifyUri;
 #[cfg(feature = "streaming")]
 use parking_lot::Mutex;
 
+use reqwest::StatusCode;
 use rspotify::model::LibraryId;
-use rspotify::{http::Query, prelude::*};
+use rspotify::{
+    http::{HttpError, Query},
+    prelude::*,
+};
 
 mod handlers;
 mod middleware;
@@ -549,7 +553,7 @@ impl AppClient {
                             Err(err) => {
                                 tracing::warn!("Connection failed (device_id={id}): {err:#}");
                                 // Try the next candidate (404s, offline devices, etc.).
-                                if is_rate_limit_msg(&err) {
+                                if is_rate_limit(&err) {
                                     sleep_rate_limit(attempt, None, "transfer playback").await;
                                 }
                             }
@@ -726,7 +730,7 @@ impl AppClient {
                     .start_playback(p.clone(), active_device.as_deref())
                     .await;
                 if let Err(err) = start_result {
-                    if is_no_active_device_msg(&err) {
+                    if is_no_active_device(&err) {
                         if let Some(id) = self.wake_and_attach_for_no_active_device().await? {
                             active_device = Some(id);
                             self.start_playback(p.clone(), active_device.as_deref())
@@ -1171,7 +1175,7 @@ impl AppClient {
                         tracing::error!(
                             "Encountered an error when updating the playback state: {err:#}"
                         );
-                        if is_rate_limit_msg(&err) {
+                        if is_rate_limit(&err) {
                             sleep_rate_limit(attempt, None, "update playback").await;
                         }
                     }
@@ -1286,7 +1290,7 @@ impl AppClient {
                 .await?
         };
         if let Err(err) = self.resume_playback(active_device.as_deref(), None).await {
-            if is_no_active_device_msg(&err) {
+            if is_no_active_device(&err) {
                 if let Some(id) = self.wake_and_attach_for_no_active_device().await? {
                     active_device = Some(id);
                     self.resume_playback(active_device.as_deref(), None).await?;
@@ -1313,7 +1317,7 @@ impl AppClient {
                     if transfer_playback_err_is_retryable(&err)
                         && attempt + 1 < TRANSFER_PLAYBACK_MAX_ATTEMPTS =>
                 {
-                    if is_rate_limit_msg(&err) {
+                    if is_rate_limit(&err) {
                         sleep_rate_limit(attempt, None, "transfer playback").await;
                     } else {
                         let wait = Duration::from_millis(500 * u64::from(attempt + 1));
@@ -2296,7 +2300,7 @@ impl AppClient {
                 loop {
                     match self.current_playback2().await {
                         Ok(playback) => break playback,
-                        Err(err) if is_rate_limit_msg(&err) && attempt < 4 => {
+                        Err(err) if is_rate_limit(&err) && attempt < 4 => {
                             sleep_rate_limit(attempt, None, "current playback").await;
                             attempt += 1;
                         }
@@ -2690,31 +2694,78 @@ fn move_seed_track_to_front(tracks: &mut Vec<Track>, seed_track: Track) {
     tracks.insert(0, seed_track);
 }
 
-fn is_rate_limit_msg(err: &impl std::fmt::Display) -> bool {
-    let msg = format!("{err:#}").to_ascii_lowercase();
-    msg.contains("429")
-        || msg.contains("too many requests")
-        || msg.contains("api rate limit exceeded")
-        || msg.contains("rate limit")
+/// Structured view of an API failure: the HTTP status when rspotify carried one,
+/// with the message as a fallback for errors that never had a status.
+trait ApiError {
+    fn http_status(&self) -> Option<StatusCode>;
+    fn message(&self) -> String;
 }
 
-fn is_no_active_device_msg(err: &impl std::fmt::Display) -> bool {
-    let msg = format!("{err:#}").to_ascii_lowercase();
-    msg.contains("404") || msg.contains("no active device")
+impl ApiError for anyhow::Error {
+    fn http_status(&self) -> Option<StatusCode> {
+        self.chain().find_map(|cause| {
+            cause
+                .downcast_ref::<rspotify::ClientError>()
+                .and_then(client_error_status)
+        })
+    }
+
+    fn message(&self) -> String {
+        format!("{self:#}")
+    }
 }
 
-fn is_transient_server_err(err: &impl std::fmt::Display) -> bool {
-    let msg = format!("{err:#}").to_ascii_lowercase();
-    msg.contains("500")
-        || msg.contains("502")
-        || msg.contains("503")
-        || msg.contains("504")
-        || msg.contains("bad gateway")
-        || msg.contains("internal server error")
+impl ApiError for rspotify::ClientError {
+    fn http_status(&self) -> Option<StatusCode> {
+        client_error_status(self)
+    }
+
+    fn message(&self) -> String {
+        format!("{self:#}")
+    }
 }
 
-fn transfer_playback_err_is_retryable(err: &impl std::fmt::Display) -> bool {
-    is_rate_limit_msg(err) || is_transient_server_err(err)
+fn client_error_status(err: &rspotify::ClientError) -> Option<StatusCode> {
+    match err {
+        rspotify::ClientError::Http(http) => match http.as_ref() {
+            HttpError::StatusCode(response) => Some(response.status()),
+            HttpError::Client(_) => None,
+        },
+        _ => None,
+    }
+}
+
+/// Spotify 429. Substring matching on the whole error chain used to treat any
+/// "429" (for example inside an id) as a rate limit.
+fn is_rate_limit(err: &impl ApiError) -> bool {
+    if let Some(status) = err.http_status() {
+        return status == StatusCode::TOO_MANY_REQUESTS;
+    }
+    let msg = err.message().to_ascii_lowercase();
+    msg.contains("too many requests") || msg.contains("rate limit")
+}
+
+/// Spotify answers player commands with 404 `NO_ACTIVE_DEVICE`. The reason
+/// field is not on the typed error, so any 404 from a player call counts.
+fn is_no_active_device(err: &impl ApiError) -> bool {
+    if let Some(status) = err.http_status() {
+        return status == StatusCode::NOT_FOUND;
+    }
+    err.message()
+        .to_ascii_lowercase()
+        .contains("no active device")
+}
+
+fn is_transient_server_error(err: &impl ApiError) -> bool {
+    if let Some(status) = err.http_status() {
+        return status.is_server_error();
+    }
+    let msg = err.message().to_ascii_lowercase();
+    msg.contains("bad gateway") || msg.contains("internal server error")
+}
+
+fn transfer_playback_err_is_retryable(err: &impl ApiError) -> bool {
+    is_rate_limit(err) || is_transient_server_error(err)
 }
 
 const TRANSFER_PLAYBACK_MAX_ATTEMPTS: u32 = 3;
@@ -3160,12 +3211,13 @@ fn patch_missing_show_fields(value: &mut serde_json::Value) {
 mod tests {
     use super::{
         clear_memory_caches_on_new_session, cover_image_id_prefix, device_ids_after_wake,
-        is_transient_server_err, keep_playing_after_desktop_wake, move_seed_track_to_front,
-        order_transfer_device_ids, paging_query, parse_current_playback_response,
-        preferred_device_id, process_spotify_api_response, rate_limit_backoff,
-        should_launch_desktop_on_init, should_nudge_desktop_on_init, should_select_device,
-        should_wake_for_preferred, top_tracks_time_range_param, transfer_playback_err_is_retryable,
-        DesktopWakeTransferPolicy, DeviceIdsAfterWake, MAX_RETRY_AFTER,
+        is_no_active_device, is_rate_limit, is_transient_server_error,
+        keep_playing_after_desktop_wake, move_seed_track_to_front, order_transfer_device_ids,
+        paging_query, parse_current_playback_response, preferred_device_id,
+        process_spotify_api_response, rate_limit_backoff, should_launch_desktop_on_init,
+        should_nudge_desktop_on_init, should_select_device, should_wake_for_preferred,
+        top_tracks_time_range_param, transfer_playback_err_is_retryable, DesktopWakeTransferPolicy,
+        DeviceIdsAfterWake, HttpError, MAX_RETRY_AFTER,
     };
     use crate::state::{Device, Track};
     use rspotify::model::{PlayableItem, TrackId};
@@ -3275,40 +3327,40 @@ mod tests {
         );
     }
 
-    #[test]
-    fn transfer_playback_err_is_retryable_for_rate_limits_and_transient_5xx() {
-        assert!(transfer_playback_err_is_retryable(
-            &"http error: status code 429 Too Many Requests"
-        ));
-        assert!(transfer_playback_err_is_retryable(
-            &"http error: status code 500 Internal Server Error"
-        ));
-        assert!(transfer_playback_err_is_retryable(
-            &"http error: status code 502 Bad Gateway"
-        ));
-        assert!(!transfer_playback_err_is_retryable(
-            &"http error: status code 404 Not Found"
-        ));
-        assert!(!transfer_playback_err_is_retryable(
-            &"http error: status code 403 Forbidden"
-        ));
+    fn status_error(status: u16) -> rspotify::ClientError {
+        let response = http::Response::builder().status(status).body("").unwrap();
+        rspotify::ClientError::Http(Box::new(HttpError::StatusCode(reqwest::Response::from(
+            response,
+        ))))
     }
 
     #[test]
-    fn is_transient_server_err_matches_5xx_and_gateway_phrases() {
-        assert!(is_transient_server_err(
-            &"http error: status code 500 Internal Server Error"
-        ));
-        assert!(is_transient_server_err(
-            &"http error: status code 503 Service Unavailable"
-        ));
-        assert!(is_transient_server_err(&"upstream bad gateway"));
-        assert!(!is_transient_server_err(
-            &"http error: status code 404 Not Found"
-        ));
-        assert!(!is_transient_server_err(
-            &"http error: status code 429 Too Many Requests"
-        ));
+    fn api_errors_are_classified_by_http_status() {
+        assert!(is_rate_limit(&status_error(429)));
+        assert!(!is_rate_limit(&status_error(404)));
+        assert!(is_no_active_device(&status_error(404)));
+        assert!(!is_no_active_device(&status_error(429)));
+        assert!(is_transient_server_error(&status_error(502)));
+        assert!(!is_transient_server_error(&status_error(404)));
+        assert!(transfer_playback_err_is_retryable(&status_error(429)));
+        assert!(transfer_playback_err_is_retryable(&status_error(503)));
+        assert!(!transfer_playback_err_is_retryable(&status_error(403)));
+        // The status survives anyhow context layers.
+        let wrapped = anyhow::Error::from(status_error(404)).context("transfer playback");
+        assert!(is_no_active_device(&wrapped));
+        assert!(!is_rate_limit(&wrapped));
+    }
+
+    #[test]
+    fn digits_in_messages_no_longer_classify_errors() {
+        let err = anyhow::anyhow!("failed to play spotify:track:4290abc404: not found");
+        assert!(!is_rate_limit(&err));
+        assert!(!is_no_active_device(&err));
+        assert!(!is_transient_server_error(&err));
+        assert!(is_no_active_device(&anyhow::anyhow!(
+            "Player command failed: No active device found"
+        )));
+        assert!(is_rate_limit(&anyhow::anyhow!("API rate limit exceeded")));
     }
 
     #[test]

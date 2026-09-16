@@ -1,4 +1,8 @@
-use std::{io::Write, sync::OnceLock};
+use std::{
+    io::Write,
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 
@@ -42,11 +46,21 @@ impl ClipboardProvider for CommandProvider {
             stdin.write_all(contents.as_bytes())?;
         }
 
-        let output = child.wait_with_output()?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            anyhow::bail!("copy command failed");
+        // This runs on the event thread with the UI lock held, so never block on
+        // the helper indefinitely: some (`xsel`, `wl-copy`) keep serving the
+        // selection after reading stdin. Past the deadline the data has been
+        // written, so treat it as copied and leave the helper running.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match child.try_wait()? {
+                Some(status) if status.success() => return Ok(()),
+                Some(status) => anyhow::bail!("copy command exited with {status}"),
+                None if Instant::now() >= deadline => {
+                    tracing::debug!("copy command still running; assuming the clipboard was set");
+                    return Ok(());
+                }
+                None => std::thread::sleep(Duration::from_millis(10)),
+            }
         }
     }
 }
@@ -100,7 +114,7 @@ pub fn get_clipboard_provider() -> Box<dyn ClipboardProvider> {
     } else if env_var_is_set("DISPLAY") && binary_exists("xsel") {
         Box::new(CommandProvider {
             paste_command: Command::new("xsel", &["-o", "-b"]),
-            copy_command: Command::new("xsel", &["--nodetach", "-i", "-b"]),
+            copy_command: Command::new("xsel", &["-i", "-b"]),
         })
     } else {
         #[cfg(target_os = "windows")]
