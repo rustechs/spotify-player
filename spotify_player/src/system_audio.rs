@@ -127,11 +127,12 @@ fn capture_loop(bands: &Arc<Mutex<VisBands>>, source_cfg: &str) {
             continue;
         }
 
-        // Interleaved float32 LE stereo → mono.
-        processor.push_mono_samples(raw.chunks_exact(BYTES_PER_SAMPLE * 2).map(|frame| {
-            let l = f32::from_le_bytes([frame[0], frame[1], frame[2], frame[3]]);
-            let r = f32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]]);
-            0.5 * (l + r)
+        // Interleaved native-endian float32 stereo (`FLOAT32NE`) → mono.
+        let (frames, _) = raw.as_chunks::<{ BYTES_PER_SAMPLE * 2 }>();
+        processor.push_mono_samples(frames.iter().map(|frame| {
+            let l = f32::from_ne_bytes([frame[0], frame[1], frame[2], frame[3]]);
+            let r = f32::from_ne_bytes([frame[4], frame[5], frame[6], frame[7]]);
+            f32::midpoint(l, r)
         }));
 
         was_capturing = true;

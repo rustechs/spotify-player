@@ -445,7 +445,7 @@ fn ensure_minimize_to_tray_pref() {
 
 fn minimize_to_tray_pref_enabled() -> bool {
     spotify_user_prefs_paths().into_iter().any(|path| {
-        fs::read_to_string(&path).ok().is_some_and(|contents| {
+        fs::read_to_string(&path).is_ok_and(|contents| {
             contents
                 .lines()
                 .any(|line| line.trim() == "ui.minimize_to_tray=true")
@@ -1305,7 +1305,11 @@ mod tests {
 
     #[test]
     fn name_has_owner_false_is_not_error() {
-        // Smoke: dbus-send exists in CI/dev Linux; don't require Spotify running.
+        // Smoke test against the real session bus; skip where there is none
+        // (containers, CI runners without dbus) so `cargo test` stays hermetic.
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+            return;
+        }
         let result =
             mpris_name_has_owner("org.mpris.MediaPlayer2.spotify-player-wake-test-missing");
         assert!(result.is_ok());

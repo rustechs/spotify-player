@@ -86,7 +86,7 @@ cargo clippy --no-default-features --features rodio-backend,media-control,system
 cargo clippy --no-default-features -- -D warnings   # core paths, no features
 ```
 
-When fixing no-feature clippy warnings, you may need `#[allow(dead_code)]` / `#[allow(unused_variables)]` on items only used in feature-gated paths. If you touch `daemon`/`streaming` code, add `daemon` to the feature list above to lint those paths too.
+When fixing no-feature clippy warnings, you may need `#[allow(dead_code)]` / `#[allow(unused_variables)]` on items only used in feature-gated paths. On Linux, `./scripts/lint.sh` (and CI) also runs clippy with `daemon` added so the `daemon`/`streaming` paths are linted; `daemonize` is Unix-only, so that pass is skipped elsewhere.
 
 ## Conventions
 

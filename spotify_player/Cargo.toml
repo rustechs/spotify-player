@@ -3,6 +3,8 @@ name = "spotify_player"
 version = "0.24.1"
 authors = ["Thang Pham <phamducthang1234@gmail.com>"]
 edition = "2021"
+# `Duration::from_hours`/`from_mins` (1.91) and `<[T]>::as_chunks` (1.88).
+rust-version = "1.91"
 license = "MIT"
 description = "A Spotify player in the terminal with full feature parity"
 repository = "https://github.com/aome510/spotify-player"
