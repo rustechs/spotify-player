@@ -311,8 +311,8 @@ impl Command {
             Self::Shuffle => "toggle the shuffle mode",
             Self::Mute => "toggle playback volume between 0% and previous level",
             Self::SeekStart => "seek to track start",
-            Self::SeekForward { duration } => { return format!("seek forward by {}s", duration.unwrap_or(5)) },
-            Self::SeekBackward { duration } => { return format!("seek backward by {}s", duration.unwrap_or(5)) },
+            Self::SeekForward { duration } => { return format!("seek forward by {}s", duration.unwrap_or(crate::config::get_config().app_config.seek_duration_secs)) },
+            Self::SeekBackward { duration } => { return format!("seek backward by {}s", duration.unwrap_or(crate::config::get_config().app_config.seek_duration_secs)) },
             Self::Quit => "quit the application",
             Self::ClosePopup => "close a popup or dismiss the current toast",
             #[cfg(feature = "streaming")]

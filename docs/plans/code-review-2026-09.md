@@ -137,7 +137,7 @@ cargo test --no-default-features --features rodio-backend,media-control,system-a
 | **4. Desktop wake off the runtime** | B4 (first half), S1, S4, S5, mute-guard nit | M | done 2026-09-15 (also S2 atomic prefs write and S7 `pgrep -u`) | `grep -n "Command::new\|thread::sleep" desktop_spotify.rs` only inside the worker; manual: pressing `space` during a wake while `/` search keeps responding; `retrieve_current_playback` timing stays under 100 ms in Connect mode; only one hide watcher runs after an early launch. |
 | **5. In-process D-Bus** | B4 (second half) | M | done 2026-09-15 (`dbus` crate; `dbus-send` parsers removed; Dockerfile installs libdbus) | Add `dbus = "0.9"` as a Linux target dependency (already compiled via `souvlaki`); implement `NameHasOwner`, `Properties.GetAll`, `Player.Play/Pause/OpenUri` behind a small `MprisClient` trait so the behavioural tests use a fake; delete the `dbus-send` output parsers (~300 lines incl. tests) unless kept as an explicit fallback. Manual wake on X11 and Wayland. |
 | **6. Correctness hardening** | S2, S3, S7, S14, S15, S16 + remaining nits (`contains("true")`, constant helper, inverted name, `wake-desktop` message, `EAGAIN` text, keep-alive comment, `imports/` robustness, folder names, JSON `\n` replace, OAuth `state`, `C-l` popup, prefix-chord warning) | M | done 2026-09-15 | Unit tests for `classify_api_error(status, body)` (a 404 "playlist not found" must not trigger desktop wake), the pref writer (temp dir, atomic rename, no write when the process is running), and `playlist sync` with a stray file in `imports/`. |
-| **7. Docs consolidation** | S24, S25, docs-drift nits, `CLAUDE.md`/`checklist.md` cleanup | S | pending | One canonical "Desktop Spotify wake (Linux)" section with a decision table; README pointer; one-line field doc comments; fix the command-table drift; `typos`. |
+| **7. Docs consolidation** | S24, S25, docs-drift nits, `CLAUDE.md`/`checklist.md` cleanup | S | done 2026-09-15 | One canonical "Desktop Spotify wake (Linux)" section with a decision table; README pointer; one-line field doc comments; fix the command-table drift; `typos`. |
 | **8. Upstream sync** | B8 and the other 18 upstream commits | M | done 2026-09-15 (merged `upstream/master` at `5669455`; `CLAUDE.md` now imports the renamed `AGENTS.md`) | Merge `upstream/master` after phases 0–1 so it lands on a green tree. Expect conflicts in `client/mod.rs` (#1077 custom Web API client and #1076 rate-limit work overlap `http_get`/`sleep_rate_limit`; #1052 overlaps `find_available_device_ids`/`order_transfer_device_ids`), `ui/streaming.rs` (#1063/#1081 colours), `event/window.rs` (#1084), and `CLAUDE.md` → `AGENTS.md`. Afterwards re-evaluate whether the fork's rate-limit helpers can be dropped for upstream's, and bump `Cargo.toml` to 0.25.x. Full gate plus a manual pass of the fork's Connect-mode flows (wake, MPRIS fallback, toasts, system-audio visualizer). |
 
 Suggested order: 0 → 1 → 2 → 3 → 8 → 4 → 5 → 6 → 7. Phases 2 and 3 are independent of each other; 4 and 5 are sequential; 6 and 7 can run at any time after 1.
@@ -145,3 +145,28 @@ Suggested order: 0 → 1 → 2 → 3 → 8 → 4 → 5 → 6 → 7. Phases 2 and
 ## 4. Lock order and threading notes (for reviewers of phases 4–6)
 
 Observed order: `ui` → `player` → `data` → `vis_bands`. The UI thread takes `ui` for the whole draw ([`ui/mod.rs:47-77`](../../spotify_player/src/ui/mod.rs:47)) and reads `player`/`data`/`vis_bands` inside; the client handler takes `ui` only to push toasts and never nests ([`state/mod.rs:70-83`](../../spotify_player/src/state/mod.rs:70)); the player-event watcher releases `player` before `ui` and `ui` before `data` ([`client/handlers.rs:177-283`](../../spotify_player/src/client/handlers.rs:177)); `media_control` snapshots under `player` and drops it before D-Bus I/O ([`media_control.rs:37`](../../spotify_player/src/media_control.rs:37)); the streaming thread takes `player.write` then `vis_bands` ([`streaming.rs:273-281`](../../spotify_player/src/streaming.rs:273)); `flume::unbounded` means `send` under a lock never blocks. One inconsistency exists inside the two `ui`-holding threads only: `data → player` ([`ui/page.rs:321`](../../spotify_player/src/ui/page.rs:321) → `:1043`; [`event/window.rs:25`](../../spotify_player/src/event/window.rs:25) → `:332`) versus `player → data` ([`ui/page.rs:426-427`](../../spotify_player/src/ui/page.rs:426); [`event/mod.rs:552-553`](../../spotify_player/src/event/mod.rs:552)). It is harmless today because both threads hold `ui` first (serialized) and no other thread nests `player` with `data`; normalise to snapshot `player` first so a writer-fair `RwLock` cycle cannot appear later. Because `player` is a fair `RwLock`, a pending writer (`retrieve_current_playback`) blocks new readers, so the UI thread holding `ui` while waiting on `player.read()` is the remaining path by which a slow client task stalls keyboard input; phases 4–5 shorten that writer's lead-up by removing the `dbus-send` spawns that precede it. Any new code that needs `ui` and `player` must take `ui` first, and must never hold `ui` across process spawns (S16) or network calls.
+
+## 5. Execution summary (2026-09-15)
+
+All phases landed on branch `claude/code-review-plan-29aa6b`, one commit per phase, each followed by a green gate (`./scripts/lint.sh` and the CI-feature `cargo test`). Nothing was pushed and no PR was opened.
+
+| Phase | Commit | Gate |
+| --- | --- | --- |
+| 0. Unbreak CI and CD | `cbad758` | lint ok, 99 tests |
+| B8 cherry-pick (upstream #1084) | `31cf3d2` | with phase 1 |
+| 1. Stop the panics and the token leak | `4cbc345` | lint ok, 101 tests |
+| 2. Toast overlay correctness | `d747bed` | lint ok, 104 tests |
+| 3. Visualizer | `8271695` | lint ok, 107 tests |
+| 8. Upstream sync (merge `upstream/master` v0.25.1) | `e93b663` | lint ok, 126 tests, `cargo machete` ok |
+| 4. Desktop wake off the runtime | `f5e4876` | lint ok, 126 tests |
+| 5. In-process D-Bus | `8e6b9ab` | lint ok, 127 tests |
+| 6. Correctness hardening | `63b819b` | lint ok, 128 tests |
+| 7. Docs consolidation | this commit | lint ok, 128 tests, `typos` ok |
+
+Findings closed by the phases above: B1–B9, S1–S25, and every nit except the three left deliberately: `cover_image_id_prefix` still names MPRIS-sourced covers by track id (harmless duplicate cache file), the unused `lyric_finder/` crate is left in place as upstream has it, and the Windows `ConnectionReset` question on the CLI probe is unverified (no Windows machine).
+
+Open manual gates (no desktop Spotify or GUI session was available here):
+- Desktop wake end to end on X11 and Wayland: launch, silent registration nudge, tray hide (single watcher), Connect transfer, MPRIS overlay when Connect is empty, `wake-desktop` CLI output. Phases 4–5 rewrote this path around `spawn_blocking` and the `dbus` crate; the D-Bus calls are exercised only by the `name_has_owner` smoke test when a session bus exists.
+- Visualizer: bars filling a 190-column terminal, grid visible between bars, Hz labels over the right bands, no flash on pause, no jitter with system-audio capture plus local streaming.
+- Toast overlay over cover art with the `image` feature, toasts staying clear of popups.
+- `cd.yml` dry run via `workflow_dispatch` on the fork to confirm the Linux release jobs link `libpulse`.

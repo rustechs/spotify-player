@@ -124,10 +124,10 @@ tracing::debug!("{value:?}");
 
 - **New feature / config option** — describe it in `README.md` (`Features`, `Configuration`, …), document the field in `docs/config.md`, and update `examples/app.toml` if applicable.
 - **Changed / removed behaviour** — update affected tables, command descriptions, and usage examples in both files.
-- **New feature flag** — add it to the feature-flags table in `README.md`.
+- **New feature flag** — document it in the `README.md` requirements/features prose and in the feature-flags table of this file.
 - **New CLI subcommand** — document it under the CLI section of `README.md`.
 
-Keep `.github/copilot-instructions.md` and this `AGENTS.md` in sync when project structure, architecture, or conventions change significantly.
+Keep this `AGENTS.md` (imported by `CLAUDE.md`) in sync when project structure, architecture, or conventions change significantly.
 
 ### Adding a new `Command`
 

@@ -141,9 +141,8 @@ pub struct AppConfig {
     /// Especially useful with `enable_streaming = "Never"`.
     pub preferred_device: Option<String>,
 
-    /// Linux: launch/nudge the official desktop Spotify client on first session
-    /// (and playing reconnect) when preferred is missing from Connect or listed
-    /// but idle/paused (e.g. tray after autostart). Paused reconnect skips wake.
+    /// Linux: wake the official desktop client so Connect can use it as
+    /// `preferred_device`; see `DesktopSpotifyConfig`.
     pub desktop_spotify: DesktopSpotifyConfig,
 
     pub device: DeviceConfig,
@@ -250,47 +249,27 @@ pub struct DeviceConfig {
 
 #[derive(Debug, Deserialize, Serialize, ConfigParse, Clone)]
 #[serde(default)]
-/// Linux helpers for waking the official Spotify desktop Connect endpoint.
+/// Linux: launch/nudge the official desktop client so Connect can use it as
+/// `preferred_device`. The full decision table is in `docs/config.md`
+/// ("Desktop Spotify wake").
 pub struct DesktopSpotifyConfig {
-    /// When true, start Spotify if needed and MPRIS-nudge it during first-session
-    /// playback init (and via `spotify_player wake-desktop`, or when restoring a
-    /// playing session) when `preferred_device` is missing from Connect or listed
-    /// but not actively playing (or when no devices are listed if
-    /// `preferred_device` is unset). A paused mid-session reconnect skips that
-    /// nudge. If MPRIS is already Playing and Connect lists `preferred_device`,
-    /// first-session init still transfers to that device with keep-playing and never to
-    /// another speaker. If Connect has no current playback, the TUI still shows
-    /// the MPRIS track (title/artists/album/progress) so the window is not empty
-    /// while the desktop client is playing. Connect often reports volume 0% for
-    /// that client; MPRIS volume is used instead.
+    /// Run the wake (also required for `spotify_player wake-desktop`).
     pub enable: bool,
-    /// Executable used to launch the desktop client (`spotify`, absolute path, etc.).
+    /// Desktop client executable (`spotify`, an absolute path, etc.).
     pub command: String,
-    /// Extra args passed to `command` on launch.
+    /// Extra arguments passed to `command` on launch.
     pub args: Vec<String>,
-    /// MPRIS D-Bus well-known name for the desktop client.
+    /// MPRIS D-Bus well-known name of the desktop client.
     pub mpris_dest: String,
-    /// Optional URI for `OpenUri` when there is no loaded context
-    /// (`spotify:track:…` or `https://open.spotify.com/…`). If unset, recently
-    /// played is tried, then bare `Play`.
+    /// `OpenUri` target for the registration nudge; recently played, then a
+    /// bare `Play`, when unset.
     pub nudge_uri: Option<String>,
-    /// Pause immediately after the wake nudge so Connect can see the device
-    /// without leaving audio playing. The Play/OpenUri session is silenced
-    /// by muting Spotify's local Pulse/PipeWire sink-inputs so registration
-    /// is inaudible. MPRIS volume is left unchanged (zeroing it can stick
-    /// the stream at 0%). Mute is held until MPRIS reports paused (retries,
-    /// then a short background hold); inputs are unmuted after pause, or
-    /// after a timeout so mute cannot stick forever.
-    /// Defaults to `true`; play only after an explicit CLI/TUI command. Set
-    /// `false` to hear the automatically started playback.
+    /// Silence and pause the registration `Play` so the wake is inaudible.
     pub pause_after_nudge: bool,
-    /// Hide the official client to the system tray after launch or nudge (and
-    /// again after Connect transfer if the window remaps). Linux Spotify ignores
-    /// its `--minimized` flag; with Spotify's own "Minimize to the tray" setting
-    /// (`ui.minimize_to_tray`), closing the window parks it in the tray via
-    /// `xdotool`. Falls back to taskbar minimize when that pref is off.
+    /// Hide the client window to the system tray after launch, nudge and
+    /// transfer (needs `xdotool`; enables Spotify's `ui.minimize_to_tray`).
     pub start_minimized: bool,
-    /// How long to wait for MPRIS after launching Spotify.
+    /// Max wait for MPRIS after launching the client.
     pub ready_timeout_secs: u64,
 }
 
@@ -369,7 +348,7 @@ impl Command {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            theme: "dracula".to_owned(),
+            theme: "default".to_owned(),
             // Use ncspot's client ID as a fallback for user-provided client ID
             //
             // Most of the time, using ncspot's client ID is better than user-provided one

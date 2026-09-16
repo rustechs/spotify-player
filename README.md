@@ -245,7 +245,7 @@ After changing the client ID, re-run `spotify_player authenticate` to refresh th
 
 Control Spotify remotely with [Spotify Connect](https://support.spotify.com/us/article/spotify-connect/). Press **D** to list devices, then **enter** to connect.
 
-On Linux, when `enable_streaming = "Never"` and you control the official desktop client via `preferred_device`, that app is often missing from Connect until local playback starts — or already running idle/paused in the system tray after autostart. Enable `[desktop_spotify]` in `app.toml` so **first session** (and **playing reconnect**) visibly report, launch when needed, optionally hide to the system tray, and MPRIS-nudge Spotify whenever the preferred device is absent or not actively playing (even if another speaker such as Amazon Everywhere is listed; active audio on another speaker is left alone when preferred is already listed), then transfer to the woken client once Connect lists it. A later session reconnect while playback is paused does not OpenUri-nudge the idle tray client (that was starting music after API blips); reconnect still wakes when restoring a playing session. If the desktop client is already Playing via MPRIS, wake/OpenUri/Pause is skipped so existing audio keeps playing — init waits up to 15s for `preferred_device` to appear in Connect and transfers with keep-playing when it does; if Connect still omits it, playback is left unchanged until you start something (Enter/play), which then registers the desktop client (OpenUri on the current track without pausing audible playback) and retries transfer on transient API errors. If Connect lists `preferred_device`, first-session init still transfers to that device with keep-playing and never to another speaker. If Connect still has no current playback, the TUI playback window uses MPRIS metadata (track, artists, album, progress, cover URL) until Connect lists a session. Connect often reports 0% volume for that client; the TUI uses MPRIS volume instead so the playback row does not start at 0%. By default the registration Play is silenced via Pulse/PipeWire sink-input mute and mute is held until pause confirms, including retries and a short background hold (`pause_after_nudge = true`); unmute after pause or a timeout so mute cannot stick forever. Starting the desktop app does not begin audible playback; use `spotify_player playback play` or the TUI play command when you want audio. Or run `spotify_player wake-desktop`. See [docs/config.md](./docs/config.md#desktop-spotify-wake-linux).
+On Linux, when `enable_streaming = "Never"` and `preferred_device` names the official desktop client, that client is often missing from Connect until it has played something, or sits idle in the tray after login. Enable `[desktop_spotify]` in `app.toml` to launch it when needed, nudge it over MPRIS so Connect registers it (silently, paused right after), hide it to the tray, and transfer playback to it. A paused mid-session reconnect never starts music, and a client that is already playing is left alone. When Connect has no session, the playback window shows the client's MPRIS track. See [docs/config.md](./docs/config.md#desktop-spotify-wake-linux) for the full decision table, or run `spotify_player wake-desktop`.
 
 ### Streaming
 
@@ -472,7 +472,7 @@ List of supported commands:
 | `SelectPreviousOrScrollUp`      | select the previous item in a list/table or scroll up (supports vim-style count: 10k)              | `k`, `C-p`, `up`   |
 | `PageSelectNextOrScrollDown`    | select the next page item in a list/table or scroll a page down (supports vim-style count: 3C-f)   | `page_down`, `C-f` |
 | `PageSelectPreviousOrScrollUp`  | select the previous page item in a list/table or scroll a page up (supports vim-style count: 2C-b) | `page_up`, `C-b`   |
-| `SelectFirstOrScrollToTop`      | select the first item in a list/table or scroll to the top                                         | `g g`, `home`      |
+| `SelectFirstOrScrollToTop`      | select the first item in a list/table or scroll to the top                                         | `g g`              |
 | `SelectLastOrScrollToBottom`    | select the last item in a list/table or scroll to the bottom                                       | `G`, `end`         |
 | `ChooseSelected`                | choose the selected item                                                                           | `enter`            |
 | `RefreshPlayback`               | manually refresh the current playback                                                              | `C-r`              |
@@ -502,7 +502,7 @@ List of supported commands:
 | `Queue`                         | go to the queue page                                                                               | `z`                |
 | `OpenCommandHelp`               | go to the command help page                                                                        | `?`, `C-h`         |
 | `PreviousPage`                  | go to the previous page                                                                            | `backspace`, `C-q` |
-| `OpenLogs`                      | go the the application logs page                                                                   | `g o`              |
+| `OpenLogs`                      | go to the application logs page                                                                    | `g o`              |
 | `OpenSpotifyLinkFromClipboard`  | open a Spotify link from clipboard                                                                 | `O`                |
 | `SortTrackByTitle`              | sort the track table (if any) by track's title                                                     | `o t`              |
 | `SortTrackByArtists`            | sort the track table (if any) by track's artists                                                   | `o a`              |
@@ -511,7 +511,7 @@ List of supported commands:
 | `SortTrackByDuration`           | sort the track table (if any) by track's duration                                                  | `o d`              |
 | `SortLibraryAlphabetically`     | sort the library alphabetically                                                                    | `o l a`            |
 | `SortLibraryByRecent`           | sort the library (playlists and albums) by recently added items                                    | `o l r`            |
-| `ReverseOrder`                  | reverse the order of the track table (if any)                                                      | `o r`              |
+| `ReverseTrackOrder`             | reverse the order of the track table (if any)                                                      | `o r`              |
 | `MovePlaylistItemUp`            | move playlist item up one position                                                                 | `C-k`              |
 | `MovePlaylistItemDown`          | move playlist item down one position                                                               | `C-j`              |
 | `CreatePlaylist`                | create a new playlist                                                                              | `N`                |
@@ -529,6 +529,7 @@ List of available actions:
 - `GoToArtist`
 - `GoToAlbum`
 - `GoToRadio`
+- `GoToShow`
 - `AddToLibrary`
 - `AddToPlaylist`
 - `AddToQueue`
