@@ -120,25 +120,33 @@ impl Sink for VisualizationSink {
     }
 }
 
-/// Maps a normalised amplitude [0, 1] to an RGB colour.
-/// Quiet (0.0) → cool blue, medium → green, loud (1.0) → hot red.
-fn bar_color(t: f32) -> Color {
-    let (r, g, b) = if t < 0.5 {
-        let s = t * 2.0;
-        (
-            (30.0 + 20.0 * s) as u8,
-            (100.0 + 155.0 * s) as u8,
-            (255.0 * (1.0 - s * 0.5)) as u8,
-        )
+/// Linearly interpolates between two RGB colors; selects the nearest endpoint
+/// when either color is not an RGB color (e.g. an ANSI palette color).
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    match (a, b) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => Color::Rgb(
+            (f32::from(r1) + (f32::from(r2) - f32::from(r1)) * t) as u8,
+            (f32::from(g1) + (f32::from(g2) - f32::from(g1)) * t) as u8,
+            (f32::from(b1) + (f32::from(b2) - f32::from(b1)) * t) as u8,
+        ),
+        (a, b) => {
+            if t < 0.5 {
+                a
+            } else {
+                b
+            }
+        }
+    }
+}
+
+/// Maps a normalised amplitude `t` in [0, 1] to a color between the theme's
+/// `low` (quiet), `mid` (medium) and `high` (loud) visualization stops.
+fn bar_color(t: f32, low: Color, mid: Color, high: Color) -> Color {
+    if t < 0.5 {
+        lerp_color(low, mid, t * 2.0)
     } else {
-        let s = (t - 0.5) * 2.0;
-        (
-            (50.0 + 205.0 * s) as u8,
-            (255.0 * (1.0 - s)) as u8,
-            (128.0 * (1.0 - s)) as u8,
-        )
-    };
-    Color::Rgb(r, g, b)
+        lerp_color(mid, high, (t - 0.5) * 2.0)
+    }
 }
 
 fn axis_style(theme: &Theme) -> Style {
@@ -327,7 +335,8 @@ fn render_x_axis_labels(
 ///
 /// Bars are subsampled to the available rect width so they always fill the area
 /// cleanly. Heights use a sqrt (perceptual) curve so quiet signals stay visible.
-/// Each bar is coloured by its amplitude: cool blue (quiet) → green → hot red (loud).
+/// Each bar is coloured by its amplitude using the theme's `visualization`
+/// colors: `low` (quiet) → `mid` → `high` (loud).
 pub fn render_audio_visualization(
     frame: &mut Frame,
     state: &SharedState,
@@ -406,6 +415,7 @@ pub fn render_audio_visualization(
     // repeated on wide ones, so the axis labels always span the same width.
     let num_bars = usize::from(plot_rect.width).max(1);
     let max_val = u64::from(plot_rect.height) * 8;
+    let vis_colors = theme.visualization();
 
     let step = values.len() as f64 / num_bars as f64;
     let bar_values: Vec<(u64, f32)> = (0..num_bars)
@@ -423,7 +433,12 @@ pub fn render_audio_visualization(
             Bar::default()
                 .value(val)
                 .text_value("")
-                .style(Style::default().fg(bar_color(norm)))
+                .style(Style::default().fg(bar_color(
+                    norm,
+                    vis_colors.low,
+                    vis_colors.mid,
+                    vis_colors.high,
+                )))
         })
         .collect();
 

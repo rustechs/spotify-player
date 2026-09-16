@@ -61,6 +61,7 @@ fn update_control_metadata(
                     Some(MediaItemInfo {
                         title: episode.name.clone(),
                         album_or_show: episode.show.name.clone(),
+                        #[allow(deprecated)]
                         artist_or_publisher: episode.show.publisher.clone(),
                         duration: episode.duration.to_std().ok(),
                         cover_url: utils::get_episode_show_image_url(episode).map(str::to_owned),
