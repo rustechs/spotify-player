@@ -737,9 +737,10 @@ fn split_rect_for_playback_window(state: &SharedState, rect: Rect) -> (Rect, Rec
     // status, and the chart tightly. The cover overlaps the visualizer, so it
     // does not add height.
     #[cfg(feature = "streaming")]
-    let playback_width = if configs.app_config.enable_audio_visualization
-        && state.player.read().currently_playing().is_some()
-    {
+    let viz_active = configs.app_config.enable_audio_visualization
+        && state.player.read().currently_playing().is_some();
+    #[cfg(feature = "streaming")]
+    let playback_width = if viz_active {
         playback_format_line_count() as usize + super::streaming::VIS_HEIGHT as usize + 2
     } else {
         configs.app_config.layout.playback_window_height
@@ -750,9 +751,7 @@ fn split_rect_for_playback_window(state: &SharedState, rect: Rect) -> (Rect, Rec
 
     // Without visualization, the playback window must be tall enough for the cover.
     #[cfg(all(feature = "image", feature = "streaming"))]
-    let playback_width = if configs.app_config.enable_audio_visualization
-        && state.player.read().currently_playing().is_some()
-    {
+    let playback_width = if viz_active {
         playback_width
     } else {
         std::cmp::max(configs.app_config.cover_img_width + 1, playback_width)
@@ -763,9 +762,7 @@ fn split_rect_for_playback_window(state: &SharedState, rect: Rect) -> (Rect, Rec
 
     // add lines for top/bottom borders depending on the progress bar's position
     #[cfg(feature = "streaming")]
-    let num_lines = if configs.app_config.enable_audio_visualization
-        && state.player.read().currently_playing().is_some()
-    {
+    let num_lines = if viz_active {
         2
     } else {
         match configs.app_config.progress_bar_position {

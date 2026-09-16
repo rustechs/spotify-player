@@ -16,7 +16,7 @@ use libpulse_binding::{def::BufferAttr, sample, stream};
 use libpulse_simple_binding::Simple;
 use parking_lot::Mutex;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Capture sample rate. `PipeWire`'s Pulse compat commonly runs at 48 kHz.
 const CAPTURE_RATE: u32 = 48_000;
@@ -28,7 +28,10 @@ const READ_FRAMES: usize = 480;
 /// which leaves the visualizer draining buffered silence after playback starts.
 const CAPTURE_FRAGSIZE: u32 = (READ_FRAMES * CHANNELS as usize * BYTES_PER_SAMPLE) as u32;
 const RETRY_DELAY: Duration = Duration::from_millis(500);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const IDLE_POLL: Duration = Duration::from_millis(100);
+/// How often the `auto` source is re-resolved while a capture stream is open.
+const SOURCE_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Spawn a background thread that taps the Pulse/PipeWire default-sink monitor
 /// (or a configured source) and publishes FFT bands for the UI.
@@ -54,19 +57,55 @@ pub fn start(state: &SharedState) {
     }
 }
 
+/// Retry pacing for the capture thread: warn once per distinct error, then
+/// debug, doubling the wait up to `MAX_RETRY_DELAY` so an absent Pulse server
+/// or a bad source name does not flood the log for the life of the process.
+#[derive(Default)]
+struct Backoff {
+    delay: Option<Duration>,
+    last_error: Option<String>,
+}
+
+impl Backoff {
+    fn wait(&mut self, what: &str, err: &anyhow::Error) {
+        let msg = format!("{err:#}");
+        if self.last_error.as_deref() == Some(msg.as_str()) {
+            tracing::debug!("system-audio-vis: {what} failed again: {msg}");
+        } else {
+            tracing::warn!("system-audio-vis: {what} failed: {msg}; retrying with back-off");
+            self.last_error = Some(msg);
+        }
+        let delay = self.delay.unwrap_or(RETRY_DELAY);
+        std::thread::sleep(delay);
+        self.delay = Some(next_retry_delay(delay));
+    }
+
+    fn reset(&mut self) {
+        self.delay = None;
+        self.last_error = None;
+    }
+}
+
+fn next_retry_delay(current: Duration) -> Duration {
+    (current * 2).min(MAX_RETRY_DELAY)
+}
+
 fn capture_loop(bands: &Arc<Mutex<VisBands>>, source_cfg: &str) {
     let mut processor = BandProcessor::new(Arc::clone(bands), CAPTURE_RATE as f32);
     let mut simple: Option<Simple> = None;
     let mut current_source: Option<String> = None;
     let mut was_capturing = false;
     let mut raw = vec![0u8; READ_FRAMES * CHANNELS as usize * BYTES_PER_SAMPLE];
+    let mut backoff = Backoff::default();
+    let mut next_source_check = Instant::now();
 
     loop {
         if bands.lock().local_sink_active {
             if was_capturing {
                 simple = None;
                 current_source = None;
-                processor.reset();
+                // Buffer-only: the local sink owns the source flags from here on.
+                processor.reset_buffer();
                 was_capturing = false;
             }
             std::thread::sleep(IDLE_POLL);
@@ -77,33 +116,44 @@ fn capture_loop(bands: &Arc<Mutex<VisBands>>, source_cfg: &str) {
             processor.mark_warm_start();
         }
 
-        let desired_source = match resolve_source(source_cfg) {
-            Ok(s) => s,
-            Err(err) => {
-                tracing::warn!("system-audio-vis: failed to resolve capture source: {err:#}");
-                std::thread::sleep(RETRY_DELAY);
+        // Resolve the source only when (re)opening or on a coarse timer. With
+        // `auto` this shells out to `pactl`, which must not run per 10 ms read.
+        let resolved = if simple.is_none() || Instant::now() >= next_source_check {
+            next_source_check = Instant::now() + SOURCE_RECHECK_INTERVAL;
+            Some(resolve_source(source_cfg))
+        } else {
+            None
+        };
+        match resolved {
+            Some(Ok(desired_source))
+                if current_source.as_deref() != Some(desired_source.as_str()) =>
+            {
+                simple = None;
+                match open_capture(&desired_source) {
+                    Ok(s) => {
+                        tracing::info!("system-audio-vis: capturing from '{desired_source}'");
+                        simple = Some(s);
+                        current_source = Some(desired_source);
+                        processor.mark_warm_start();
+                        backoff.reset();
+                    }
+                    Err(err) => {
+                        current_source = None;
+                        backoff.wait(&format!("open '{desired_source}'"), &err);
+                        continue;
+                    }
+                }
+            }
+            Some(Err(err)) if simple.is_none() => {
+                backoff.wait("resolve capture source", &err);
                 continue;
             }
-        };
-
-        if current_source.as_deref() != Some(desired_source.as_str()) {
-            simple = None;
-            match open_capture(&desired_source) {
-                Ok(s) => {
-                    tracing::info!("system-audio-vis: capturing from '{desired_source}'");
-                    simple = Some(s);
-                    current_source = Some(desired_source);
-                    processor.mark_warm_start();
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        "system-audio-vis: failed to open '{desired_source}': {err:#}; retrying"
-                    );
-                    current_source = None;
-                    std::thread::sleep(RETRY_DELAY);
-                    continue;
-                }
+            Some(Err(err)) => {
+                tracing::debug!(
+                    "system-audio-vis: keeping the current source; re-resolve failed: {err:#}"
+                );
             }
+            _ => {}
         }
 
         let Some(ref stream) = simple else {
@@ -116,12 +166,12 @@ fn capture_loop(bands: &Arc<Mutex<VisBands>>, source_cfg: &str) {
         }
 
         if let Err(err) = stream.read(&mut raw) {
-            tracing::warn!("system-audio-vis: read failed: {err:#}; reopening stream");
             simple = None;
             current_source = None;
-            std::thread::sleep(RETRY_DELAY);
+            backoff.wait("read", &anyhow!("{err}"));
             continue;
         }
+        backoff.reset();
 
         if bands.lock().local_sink_active {
             continue;
@@ -200,4 +250,16 @@ fn resolve_source(configured: &str) -> Result<String> {
         return Err(anyhow!("empty default sink from pactl"));
     }
     Ok(format!("{sink}.monitor"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_retry_delay, Duration, MAX_RETRY_DELAY, RETRY_DELAY};
+
+    #[test]
+    fn retry_delay_doubles_up_to_the_cap() {
+        assert_eq!(next_retry_delay(RETRY_DELAY), Duration::from_secs(1));
+        assert_eq!(next_retry_delay(Duration::from_secs(20)), MAX_RETRY_DELAY);
+        assert_eq!(next_retry_delay(MAX_RETRY_DELAY), MAX_RETRY_DELAY);
+    }
 }
