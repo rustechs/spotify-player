@@ -83,6 +83,8 @@ optional = true
 clipboard-win = "5.4.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# In-process MPRIS/D-Bus client for the desktop Spotify integration (`desktop_spotify.rs`).
+dbus = "0.9"
 libpulse-binding = { version = "2.30", optional = true }
 libpulse-simple-binding = { version = "2.29", optional = true }
 

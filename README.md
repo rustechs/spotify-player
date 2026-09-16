@@ -70,7 +70,7 @@ A Spotify Premium account is **required**.
 ##### Linux
 
 - [Rust and cargo](https://www.rust-lang.org/tools/install) as the build dependencies
-- install `openssl`, `alsa-lib` (`streaming` feature), `libdbus` (`media-control` feature), `libpulse` (`system-audio-visualization` feature, enabled by default in this fork).
+- install `openssl`, `alsa-lib` (`streaming` feature), `libdbus` (Linux: always, for the desktop Spotify MPRIS integration and the `media-control` feature), `libpulse` (`system-audio-visualization` feature, enabled by default in this fork).
   - For example, on Debian based systems, run the below command to install application's dependencies:
 
     ```shell

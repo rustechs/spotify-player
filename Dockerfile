@@ -1,4 +1,6 @@
 FROM rust as builder
+# `dbus` (desktop Spotify MPRIS integration) links libdbus even with no features.
+RUN apt-get update && apt-get install -y --no-install-recommends libdbus-1-dev pkg-config && rm -rf /var/lib/apt/lists/*
 WORKDIR app
 COPY . .
 RUN cargo build --release --bin spotify_player --no-default-features
