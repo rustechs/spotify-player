@@ -178,7 +178,7 @@ When the wake runs, and what it does:
 | Mid-session reconnect while playback was paused | no | no | untouched | none (an API blip must never start music) |
 | Mid-session reconnect while playback was playing, or this process just launched the client | if not running | yes | as first session | as first session |
 | `preferred_device` unset | only when Connect lists no device | yes | as first session | generic device selection |
-| Play/resume command that fails with "no active device" | if not running | yes, on the current MPRIS track, without pausing audible playback | untouched | to `preferred_device`, then the command is retried |
+| Play/resume command that fails with "no active device" | if not running | yes; on the current MPRIS track without pausing when the client is already playing, otherwise as first session | untouched when already playing; otherwise silenced, paused right after | to `preferred_device`, then the command is retried |
 
 Independent of the wake: when Connect reports no current playback, the playback window shows the desktop client's MPRIS track (title, artists, album, progress, cover) until Connect lists a session, and when Connect lists the preferred client at 0% volume the MPRIS volume is shown instead so mouse-scroll never writes 0% back. Starting the desktop app never begins audible playback by itself; use the TUI play command or `spotify_player playback play`. `spotify_player wake-desktop` runs the same wake by hand.
 
