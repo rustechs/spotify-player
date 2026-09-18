@@ -162,7 +162,7 @@ All phases landed on branch `claude/code-review-plan-29aa6b`, one commit per pha
 | 5. In-process D-Bus | `8e6b9ab` | lint ok, 127 tests |
 | 6. Correctness hardening | `63b819b` | lint ok, 128 tests |
 | 7. Docs consolidation | `3bad151` | lint ok, 128 tests, `typos` ok |
-| Follow-up: plan status, open nits, merge notes | this commit | docs only; `typos` ok, `cargo check --locked` ok, debug binary smoke (`--help`, `features`, `generate bash`) ok |
+| Follow-up: plan status, open nits, merge notes | `ff5c69d` | docs only; `typos` ok, `cargo check --locked` ok, debug binary smoke (`--help`, `features`, `generate bash`) ok |
 
 Findings closed by the phases above: B1–B9 and S1–S25. Nits still open after execution:
 
@@ -180,3 +180,70 @@ Open manual gates (no desktop Spotify or GUI session was available here):
 - Visualizer: bars filling a 190-column terminal, grid visible between bars, Hz labels over the right bands, no flash on pause, no jitter with system-audio capture plus local streaming.
 - Toast overlay over cover art with the `image` feature, toasts staying clear of popups.
 - `cd.yml` dry run via `workflow_dispatch` on the fork to confirm the Linux release jobs link `libpulse`.
+
+## 6. Independent verification (2026-09-18)
+
+A second review pass re-checked every finding against the code at `ff5c69d` rather than against the execution notes. Each item below was re-opened and quoted before being recorded here. Findings not listed were confirmed closed.
+
+### 6.1 Gate re-run at `ff5c69d`
+
+| Check | Result |
+| --- | --- |
+| `./scripts/lint.sh` (fmt + clippy, CI features / no features / `daemon`) | pass |
+| `cargo test` with the CI feature set | 128 passed, 0 failed |
+| `cargo test` with `daemon` added (CI only lints this) | 128 passed, 0 failed |
+| `cargo test --no-default-features` (CI only lints this) | 121 passed, 0 failed |
+| `typos`, `cargo machete` | pass |
+| `cargo clippy --target x86_64-apple-darwin` / `x86_64-pc-windows-msvc` | **could not run** — `ring` needs an Apple SDK, and the MSVC target needs `lib.exe`. macOS and Windows stay compile-unverified. |
+| Documented option defaults vs `docs/config.md` | 66 of 66 comparable defaults match |
+
+Statically, the non-Linux surface looks sound: `mod desktop_spotify` is `#[cfg(target_os = "linux")]`, all 21 cross-module references sit inside Linux-gated blocks or functions, the four cross-platform `let mut` bindings in `initialize_playback` carry `#[allow(unused_mut)]`, and helpers reachable from tests use `#[cfg(any(test, target_os = "linux"))]`. That is an argument, not a compile.
+
+Lock order holds. There are only seven `ui.lock()` sites; `handle_page_change_event` scopes the `player` guard in its own block before taking `ui`, with the invariant written down at the call site, and `parking_lot` guards are not `Send`, so a spawned task cannot hold one across an `.await`.
+
+### 6.2 Findings the plan records as closed that are not
+
+| Finding | Verified state | Evidence |
+| --- | --- | --- |
+| **B4** run the wake off the runtime | **partial** | `launch_early_if_needed` is still a synchronous `pub fn` ([`desktop_spotify.rs:107`](../../spotify_player/src/desktop_spotify.rs:107)) called directly inside `tokio::task::spawn` at [`client/mod.rs:280`](../../spotify_player/src/client/mod.rs:280). It runs a D-Bus probe (2 s timeout), `pgrep`, `which`, the prefs read/write and `Command::spawn` on a runtime worker. The phase's stated gate (grep for `Command::new`/`thread::sleep` in `desktop_spotify.rs`) cannot see it, because the blocking is transitive. |
+| **B5** token no longer logged | **partial** | [`token.rs:43`](../../spotify_player/src/token.rs:43) is fixed, but [`main.rs:335`](../../spotify_player/src/main.rs:335) logs `Configurations: {:?}` at INFO on every start. `Configs` derives `Debug` and `AppConfig.proxy` ([`config/mod.rs:81`](../../spotify_player/src/config/mod.rs:81)) is an `Option<String>` that routinely carries `http://user:password@host`. It reaches both the log file and the in-TUI Logs page. |
+| **S3** classify API errors by status | **partial** | `is_no_active_device` ([`client/mod.rs:2750`](../../spotify_player/src/client/mod.rs:2750)) returns true for **any** 404; its own doc comment concedes the reason field is never read, and the test at `:3341` pins that behaviour. No `classify_api_error(status, body)` exists anywhere in the crate, so the phase-6 verification line "a 404 'playlist not found' must not trigger desktop wake" was never implemented. The original S3 scenario still stands, narrowed to 404s from the play/resume endpoints ([`:733`](../../spotify_player/src/client/mod.rs:733), [`:1293`](../../spotify_player/src/client/mod.rs:1293)). |
+| **S12** restrict cache permissions | **partial, and a no-op for the token** | [`client/mod.rs:239`](../../spotify_player/src/client/mod.rs:239) chmods `user_client_token.json`, but since the upstream merge the real caches are `{client_id}_token.json` and `{ncspot_id}_token.json` (`:142`, `:170`). `restrict_permissions` returns silently when the path is absent, so the chmod never fires. The credentials chmod at `:588` also runs before `session.connect` creates the file, so it only takes effect on the next launch. On this machine the cache directory is `0700` and `credentials.json` is `0664`, but that file predates the branch, so it shows the fix is unexercised here rather than failing; the token-cache claim rests on the filename mismatch alone. |
+| **S16** clipboard off the UI lock | **partial** | The planned fix (drop the guard, spawn, re-lock) was not implemented. `copy_link` still takes `ui: &mut UIStateGuard`, and the guard taken at [`event/mod.rs:197`](../../spotify_player/src/event/mod.rs:197) is live through the paste at `:832`. The copy path gained a 1 s `try_wait` bound; `get_contents` still uses `Command::output()` with **no** timeout ([`clipboard.rs:31`](../../spotify_player/src/event/clipboard.rs:31)), and neither `--selectionTimeout` nor the `--nodetach` change was made. A hung `xclip -o` freezes render and input together, with no recovery. |
+| **S23** back off on capture errors | **partial** | `backoff.reset()` at [`system_audio.rs:138`](../../spotify_player/src/system_audio.rs:138) fires after a successful *open*, before any successful read. If the source opens but every read fails, the loop re-warns at the base 500 ms delay forever: roughly 2 warnings and 2 `pactl` spawns per second, with no exponential growth. Moving the reset to after the first good read fixes it. |
+| **S25** mark `custom_queue` unimplemented | **partial** | `docs/config.md` is marked; [`examples/app.toml`](../../examples/app.toml) still ships a bare `custom_queue = true` with no note. |
+| **S1** one hide watcher | **closed, with a leak** | `will_launch_blocking(config)?` at [`desktop_spotify.rs:179`](../../spotify_player/src/desktop_spotify.rs:179) can return early **before** `StopHideWatcherOnDrop` is armed at `:192`, so a D-Bus failure there leaves a watcher from `launch_early_if_needed` minimizing the user's window for up to 45 s. |
+| **B7** keep the two audio sources apart | **closed, narrower race remains** | The capture thread's yield path correctly calls `reset_buffer`, so the original "rest of the track" corruption is gone. But `local_sink_active` is set only by the player-event handler ([`streaming.rs:279`](../../spotify_player/src/streaming.rs:279)), never by `VisualizationSink::start`/`write`, so on every resume both sources write until that event lands, and `sample_rate` is rewritten on every hop ([`vis.rs:305`](../../spotify_player/src/vis.rs:305)). |
+| Prefix-chord warning nit | **partial** | `warn_on_prefix_conflicts` is called at load ([`keymap.rs:434`](../../spotify_player/src/config/keymap.rs:434)) but scans `self.keymaps` only, never `self.actions`, while `has_matched_prefix` (`:457`) consults both — so a command that shadows an action chord stays both unreachable and unreported. The only test exercises the `is_strict_prefix` helper on `&[char]`; nothing calls `warn_on_prefix_conflicts`. |
+| Mute-guard nit | **partial** | The poll is now 200 ms and restore is limited to recorded indices, but the guard mutes every Spotify sink input it sees without reading pactl's `mute` field, so a stream the user muted deliberately is unmuted on restore, and `set_sink_input_volume_100` raises a deliberately 0 % stream to full volume. |
+
+### 6.3 Introduced by this work
+
+- **The panic hook can hang the app.** `tracing::error!("Panic: {info}")` ([`main.rs:77`](../../spotify_player/src/main.rs:77)) dispatches into `BufferLayer`, which locks the log buffer ([`log_layer.rs:37`](../../spotify_player/src/log_layer.rs:37)). That is the same `Arc<Mutex<..>>` the UI thread holds for the whole Logs-page render ([`ui/page.rs:1330`](../../spotify_player/src/ui/page.rs:1330)): `main.rs:331` and `:361` share one allocation. A panic during that render re-enters a non-reentrant `parking_lot` mutex on the same thread and parks forever, leaving the terminal in raw mode.
+- **`restrict_permissions` chmods whatever `--cache-folder` names**, on every run including every CLI subcommand, before logging is initialized ([`main.rs:294`](../../spotify_player/src/main.rs:294)), and follows symlinks. `spotify_player -C ~` would set the home directory to `0700`, and the warning on failure is discarded.
+- **The player-request channel is unbounded** ([`client/handlers.rs:61`](../../spotify_player/src/client/handlers.rs:61)) with no dedupe, so keys pressed during a stuck 75 s wake replay afterwards: five `space` presses become five `ResumePause` toggles. If the worker ever dies, `:73` logs one line and playback keys stop working permanently with no toast.
+- **`cd.yml` release guard.** `if: startsWith(github.ref, 'refs/tags/')` does not restrict the step to tag *pushes*: a `workflow_dispatch` run against a tag ref satisfies it and would publish release assets from a manual run. `github.event_name == 'push' && startsWith(...)` closes it.
+
+### 6.4 Arrived with the upstream merge, not from this work
+
+- The count-prefix seek multiply (`u16 * u16` at [`event/mod.rs:689`](../../spotify_player/src/event/mod.rs:689)) comes from upstream #1045 via `e93b663`. With the default 5 s step, a count above 13107 overflows: a panic on the event thread in debug builds, a silently wrong seek in release. `count_prefix` is an unbounded `usize` and is truncated by `as u16` first.
+- [`event/window.rs:303`](../../spotify_player/src/event/window.rs:303) `expect("filtered track should reference the source list")` is upstream's own code from #1084, verbatim in `5669455` and carried in by the cherry-pick `31cf3d2`. Sound today, a hard crash if `search_filtered_items` ever returns owned values.
+- `enable_mouse_scroll_volume` flipping to `false` and the `top_tracks_limit` cap, already recorded in §5.
+
+### 6.5 Confirmed sound
+
+Upstream's rate-limit work survived the merge intact: `client/middleware.rs` and `client/spotify.rs` are byte-identical to the upstream tip, so the `Retry-After` store, the GET retry loop and the ncspot fallback are all present. The removed `parse_retry_after_secs` was a fork helper superseded by that middleware, not a loss. B1, B6, B8, B9, S8, S9, S10, S11, S17, S18, S19, S20, S21, S22 and the OAuth `state` comparison were each re-opened and verified, including that the toast `Clear` test genuinely pre-fills the buffer and that a stray loopback request no longer aborts a login.
+
+### 6.6 CLI, auth and documentation
+
+`S13`, `S15` and the OAuth `state` fix are closed. The volume offset now computes in `i64` and converts with a fallible `u8::try_from`, covered by a test. The socket path replies with `Response::Err`, uses `anyhow::ensure!` instead of `assert!`, and both client timeouts print a sentence rather than an OS error. The `state` comparison reads the value from the client's own OAuth config, does not echo attacker-controlled input, and a stray loopback request still does not abort a login.
+
+Three things did not come out as recorded.
+
+- **No logging exists for CLI subcommands.** `init_logging` is called only in the no-subcommand branch ([`main.rs:331`](../../spotify_player/src/main.rs:331)); `handle_cli_subcommand` at `:364` runs with no subscriber installed. Every `tracing::` call on a CLI-only path is discarded, which silently hides the S14 timeout diagnostics, the `imports/` skip warnings and an OAuth `state` mismatch during `spotify_player authenticate`. It also makes [`README.md:421`](../../README.md) ("the outcome is in the application log") false whenever no instance is running.
+- **S14 is partial.** Detaching the handler with `tokio::task::spawn` does keep the work alive when a running instance owns the socket. In standalone mode the CLI calls `std::process::exit(1)` on the timeout reply ([`cli/handlers.rs:316`](../../spotify_player/src/cli/handlers.rs:316)), which tears down the detached task mid-rewrite: the message says the work continues, and it does not. The import bookkeeping is still non-transactional — `fs::read` then `remove_file` at [`cli/client.rs:869`](../../spotify_player/src/cli/client.rs:869), rewritten only 67 lines later — so any error in between loses it. The overlapping-`playlist sync` race the plan listed as a nit is still open and is tracked nowhere.
+- **Three decision-table claims are not supported by the code.** `wake_preferred_device_for_playback` ([`client/mod.rs:1339`](../../spotify_player/src/client/mod.rs:1339)) returns early when the preferred device is already listed, so the "no active device" row's launch-and-nudge columns are wrong for a listed-but-idle client: it transfers and nothing else. The same function returns `Ok(None)` immediately when `preferred_device` is unset, so that row does not hold on this path either; it describes first-session init only. And `docs/config.md` says `wake-desktop` "runs the same wake by hand", but the CLI passes no recently-played fallback URI, pins `NudgePolicy::SkipIfPlaying`, and performs no Connect transfer.
+
+**None of the three tests phase 6 promised were written.** `cargo test -- --list` has no `classify_api_error` test, no pref-writer test (temp dir, atomic rename, no write while Spotify runs) and no `playlist sync` stray-file test. The phase-6 verification column was recorded as satisfied without being executed, which is how the S3 gap above went unnoticed.
+
+The rest of the documentation work holds up. The README command table was re-derived from `keymap.rs` and `command.rs`: 62 rows against 62 bound commands, 80 bindings and all 26 multi-key chords, with no mismatch in either direction. The `${USER}` autostart fix, the folder-name collision, the `imports/` tolerance, the JSON newline guard and every named docs-drift item are closed. One new drift: [`examples/app.toml`](../../examples/app.toml) sets `ncspot_only_get_endpoints` with an extra `"search"` entry that is in neither the default nor the documentation.
