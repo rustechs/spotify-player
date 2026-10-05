@@ -1,6 +1,6 @@
 # Code review and recommended-changes plan (2026-09-13)
 
-**Status:** Approved 2026-09-15 ("go for it") and executed on branch `claude/code-review-plan-29aa6b`, one commit per phase (§3, §5). Independently verified 2026-09-18 (§6). The four pre-merge fixes from that verification landed 2026-10-04 (§6.7). The branch is pushed; no pull request is open.
+**Status:** Approved 2026-09-15 ("go for it") and executed on branch `claude/code-review-plan-29aa6b`, one commit per phase (§3, §5). Independently verified 2026-09-18 (§6). The four pre-merge fixes from that verification landed 2026-10-04 (§6.7). Rendered captures of the changed screens were added 2026-10-05 (§6.8).
 **Scope:** Full review of `rustechs/spotify-player` at `cecd00e` (branch `claude/code-review-plan-29aa6b`): 22.7k lines of Rust in `spotify_player/src`, plus docs, config examples, CI and manifests.
 **Method:** The fork delta (50 commits, +7086/−1008 lines since the `upstream/master` merge-base `5987777`) was read line by line. Inherited upstream code was reviewed in four parallel slices (CLI/auth/main; state/config/keymap; UI/event; streaming/audio/media-control) and every reported finding was re-verified by opening the cited lines before inclusion. Each finding cites `file:line`, gives a concrete failure scenario, and is tagged **FORK** (introduced here; fix here) or **UPSTREAM** (inherited; fix here and consider sending upstream).
 
@@ -264,3 +264,20 @@ One more leak turned up while fixing B5 and was not in the verification list. li
 Verification: `./scripts/lint.sh` passes, and `cargo test` passes with the CI feature set (138 tests) and with no features (131 tests). Ten tests are new. Four were mutation-checked: a blocking lock in `BufferLayer` hangs its test, and a raw `Debug`, a missing token chmod and a wrong credentials file name each fail theirs. Two tests guard against a repeat of S12. `authorized_web_api_token_cache_is_owner_only` checks the file the client itself reads, whatever it is named. `librespot_stores_credentials_in_the_credentials_file` fails if librespot renames its file.
 
 Not done here: the partial findings in §6.2 other than S12 and B5, the remaining items in §6.3, and everything in §6.6. Upstream has moved by one commit since the merge (`7dc9d17`, TLS backend features), which is not merged. macOS and Windows are still compile-unverified, and CI has not run on this branch: it triggers only on pull requests and on pushes to `main`.
+
+### 6.8 Visual evidence (2026-10-05)
+
+Four captures of the changed screens are in [`assets/code-review-2026-09/`](assets/code-review-2026-09/). They are not from a live session. A temporary test, not committed, drew the real `render_application` frame into ratatui's `TestBackend` with synthetic state: a fixture track, a synthetic 128-band spectrum and fabricated log lines. The cells were then painted to PNG with DejaVu Sans Mono and the VS Code dark terminal palette, so a real terminal's colours will differ.
+
+- [`toasts-over-page.png`](assets/code-review-2026-09/toasts-over-page.png), 120×34: three toast cards and the `4+` marker over the Logs page. The card interiors are blank; no page text shows through (B6).
+- [`toasts-with-shortcut-popup.png`](assets/code-review-2026-09/toasts-with-shortcut-popup.png), 120×34: the same stack with the shortcut-help popup open. The stack sits above the popup instead of covering it (S17).
+- [`visualizer-190-columns.png`](assets/code-review-2026-09/visualizer-190-columns.png), 190 columns: the bars span the whole plot instead of stopping at 128 columns, the grid shows only where no bar covers it, and the Hz labels follow the band layout with `1k` near the left (S20, S21).
+- [`visualizer-80-columns.png`](assets/code-review-2026-09/visualizer-80-columns.png), 80 columns: the same on a narrow terminal, where the bands are subsampled.
+
+![Toast stack over the Logs page](assets/code-review-2026-09/toasts-over-page.png)
+
+![Visualizer at 190 columns](assets/code-review-2026-09/visualizer-190-columns.png)
+
+These cover the layout claims among the open manual gates in §5. Still manual: the toast overlay over real cover art, since the test backend has no image protocol, the visualizer against real audio, and the desktop wake.
+
+The harness also surfaced one inherited defect. A track without a Spotify id is titled "Unknown Track" in the playback window ([`ui/playback.rs:511`](../../spotify_player/src/ui/playback.rs:511), upstream #962), so a local file shown through the MPRIS overlay loses its title. It is not fixed here.
