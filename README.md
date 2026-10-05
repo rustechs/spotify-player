@@ -571,6 +571,8 @@ On Unix the cache folder is created private to your user (`0700`), and the cache
 
 Logs are stored in `$APP_CACHE_FOLDER/spotify-player-*.log`. For debugging or issues, check the backtrace file in `$APP_CACHE_FOLDER/spotify-player-*.backtrace`.
 
+Each start writes its own pair of files, named after its local start time (to the second) and process id, for example `spotify-player-26-10-05-14-46-07-12345.log`. The names sort by start time, and a restart never overwrites an earlier run's files.
+
 Set the `RUST_LOG` environment variable to control [logging level](https://docs.rs/log/0.4.14/log/enum.Level.html). Default is `spotify_player=INFO`.
 
 ## Acknowledgement
