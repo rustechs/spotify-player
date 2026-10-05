@@ -30,6 +30,23 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use crate::config::apply_config_override;
 
+/// File name prefix shared by one start's log and backtrace files. Prefixes
+/// sort by start time; starts within the same second differ by process id.
+fn log_file_prefix(start: chrono::NaiveDateTime, pid: u32) -> String {
+    let time = start.format("%y-%m-%d-%H-%M-%S");
+    format!("spotify-player-{time}-{pid}")
+}
+
+/// Create `path`, failing if it already exists, so a start never overwrites
+/// an earlier start's log or backtrace file.
+fn create_new_file(path: &std::path::Path) -> Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("failed to create {}", path.display()))
+}
+
 fn init_logging(
     log_folder: &std::path::Path,
     log_buffer: Arc<Mutex<VecDeque<String>>>,
@@ -39,10 +56,7 @@ fn init_logging(
         return Ok(());
     }
 
-    let log_prefix = format!(
-        "spotify-player-{}",
-        chrono::Local::now().format("%y-%m-%d-%H-%M")
-    );
+    let log_prefix = log_file_prefix(chrono::Local::now().naive_local(), std::process::id());
 
     // initialize the application's logging
     if std::env::var("RUST_LOG").is_err() {
@@ -52,8 +66,7 @@ fn init_logging(
     if !log_folder.exists() {
         std::fs::create_dir_all(log_folder)?;
     }
-    let log_file = std::fs::File::create(log_folder.join(format!("{log_prefix}.log")))
-        .context("failed to create log file")?;
+    let log_file = create_new_file(&log_folder.join(format!("{log_prefix}.log")))?;
 
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_ansi(false)
@@ -68,8 +81,7 @@ fn init_logging(
         .init();
 
     // initialize the application's panic backtrace
-    let backtrace_file = std::fs::File::create(log_folder.join(format!("{log_prefix}.backtrace")))
-        .context("failed to create backtrace file")?;
+    let backtrace_file = create_new_file(&log_folder.join(format!("{log_prefix}.backtrace")))?;
     let backtrace_file = std::sync::Mutex::new(backtrace_file);
     std::panic::set_hook(Box::new(move |info| {
         // Also surface panics in the log file and the in-TUI Logs page;
@@ -368,5 +380,62 @@ fn main() -> Result<()> {
             start_app(&state)
         }
         Some((cmd, args)) => cli::handle_cli_subcommand(cmd, args),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(hour: u32, min: u32, sec: u32, milli: u32) -> chrono::NaiveDateTime {
+        chrono::NaiveDate::from_ymd_opt(2026, 10, 5)
+            .unwrap()
+            .and_hms_milli_opt(hour, min, sec, milli)
+            .unwrap()
+    }
+
+    #[test]
+    fn starts_in_the_same_minute_get_different_log_file_names() {
+        let first = log_file_prefix(at(14, 46, 7, 0), 4242);
+        assert_eq!(first, "spotify-player-26-10-05-14-46-07-4242");
+
+        // Quit, then respawned by a wrapper half a second later.
+        let respawned = log_file_prefix(at(14, 46, 7, 500), 4250);
+        assert_ne!(first, respawned);
+
+        // A later second differs even if the process id were reused.
+        let later = log_file_prefix(at(14, 46, 52, 0), 4242);
+        assert_ne!(first, later);
+    }
+
+    #[test]
+    fn log_file_names_sort_by_start_time() {
+        // The process id comes after the time, so a longer one does not
+        // move an earlier start behind a later one.
+        assert!(
+            log_file_prefix(at(14, 46, 59, 0), 123_456) < log_file_prefix(at(14, 47, 0, 0), 99)
+        );
+        assert!(log_file_prefix(at(9, 59, 59, 0), 1) < log_file_prefix(at(10, 0, 0, 0), 1));
+    }
+
+    #[test]
+    fn create_new_file_never_overwrites_an_existing_file() {
+        let folder = crate::utils::test_scratch_dir("log-files");
+        let path = folder.join("spotify-player-26-10-05-14-46-07-4242.log");
+        std::fs::write(&path, "earlier run").unwrap();
+
+        let err = create_new_file(&path).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "earlier run");
+
+        let fresh = folder.join("spotify-player-26-10-05-14-46-07-4250.log");
+        create_new_file(&fresh).unwrap();
+        assert!(fresh.exists());
+
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 }
