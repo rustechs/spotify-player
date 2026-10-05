@@ -54,6 +54,18 @@ impl PlayerState {
         Some(playback)
     }
 
+    /// The playback metadata that player commands act on: the buffered copy,
+    /// or the playback itself while that copy is missing.
+    ///
+    /// A new connection clears the buffered copy and the next playback fetch
+    /// refills it, which a rate limit can hold back for a minute. Commands
+    /// sent in that gap used to fail with "no playback found".
+    pub fn playback_metadata(&self) -> Option<PlaybackMetadata> {
+        self.buffered_playback
+            .clone()
+            .or_else(|| self.playback.as_ref().map(PlaybackMetadata::from_playback))
+    }
+
     pub fn currently_playing(&self) -> Option<&rspotify::model::PlayableItem> {
         self.playback.as_ref().and_then(|p| p.item.as_ref())
     }
@@ -124,7 +136,42 @@ fn estimate_progress(
 
 #[cfg(test)]
 mod tests {
-    use super::estimate_progress;
+    use super::{estimate_progress, PlayerState};
+
+    /// A paused session on a Connect device, as `/v1/me/player` returns it.
+    const PLAYBACK: &str = r#"{
+        "device": {
+            "id": "0000000000000000000000000000000000000000",
+            "is_active": true, "is_private_session": false, "is_restricted": false,
+            "name": "test-device", "type": "Computer", "volume_percent": 70
+        },
+        "repeat_state": "context", "shuffle_state": true, "context": null,
+        "timestamp": 1700000000000, "progress_ms": 61000, "is_playing": false,
+        "item": null, "currently_playing_type": "track",
+        "actions": {"disallows": {}}
+    }"#;
+
+    #[test]
+    fn playback_metadata_falls_back_to_the_playback_itself() {
+        let mut player = PlayerState::default();
+        assert!(player.playback_metadata().is_none(), "nothing is playing");
+
+        player.playback = Some(serde_json::from_str(PLAYBACK).unwrap());
+        let derived = player
+            .playback_metadata()
+            .expect("derived from the playback");
+        assert_eq!(derived.device_name, "test-device");
+        assert_eq!(derived.volume, Some(70));
+        assert!(!derived.is_playing);
+        assert!(derived.shuffle_state);
+
+        // Once the buffered copy exists it wins: it carries the optimistic
+        // result of the last command.
+        let mut buffered = derived;
+        buffered.is_playing = true;
+        player.buffered_playback = Some(buffered);
+        assert!(player.playback_metadata().unwrap().is_playing);
+    }
 
     #[test]
     fn estimate_progress_handles_null_progress_and_missing_timestamp() {
