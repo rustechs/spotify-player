@@ -4,7 +4,8 @@
 //! placement, resolution, onset, release and cost, and renders each variant
 //! through the real `render_audio_visualization` into ratatui's `TestBackend`.
 //!
-//! Run: `PROTO_OUT=<dir> cargo test [--release] ... vis_proto -- --ignored --nocapture`
+//! Round one: `PROTO_OUT=<dir> cargo test [--release] ... vis_proto -- --ignored --nocapture`
+//! Round two: the same with `level_rule_round2` as the filter.
 use std::{collections::VecDeque, sync::Arc, time::Instant};
 
 use parking_lot::Mutex;
@@ -353,24 +354,36 @@ fn cost_rounds(all: &[(&str, &str, Analysis)], pcm: &[f32], rounds: usize) -> Ve
 // ---------- rendering ----------
 
 fn test_state(out: &std::path::Path) -> SharedState {
-    let config_dir = out.join("config");
-    let cache_dir = out.join("cache");
-    std::fs::create_dir_all(&config_dir).unwrap();
-    std::fs::create_dir_all(&cache_dir).unwrap();
-    let mut configs = config::Configs::new(&config_dir, &cache_dir).unwrap();
-    config::apply_config_override(
-        &mut configs.app_config,
-        "enable_audio_visualization",
-        "true",
-    )
-    .unwrap();
-    config::set_config(configs);
-    Arc::new(State::new(false, Arc::new(Mutex::new(VecDeque::new()))))
+    // The config is a process-wide singleton, and both rounds may run in one process.
+    static STATE: std::sync::OnceLock<SharedState> = std::sync::OnceLock::new();
+    STATE
+        .get_or_init(|| {
+            let config_dir = out.join("config");
+            let cache_dir = out.join("cache");
+            std::fs::create_dir_all(&config_dir).unwrap();
+            std::fs::create_dir_all(&cache_dir).unwrap();
+            let mut configs = config::Configs::new(&config_dir, &cache_dir).unwrap();
+            config::apply_config_override(
+                &mut configs.app_config,
+                "enable_audio_visualization",
+                "true",
+            )
+            .unwrap();
+            config::set_config(configs);
+            Arc::new(State::new(false, Arc::new(Mutex::new(VecDeque::new()))))
+        })
+        .clone()
 }
 
-/// One image: every variant stacked, each drawn by the real renderer.
-fn render_scene(state: &SharedState, name: &str, pcm: &[f32], width: u16, out: &std::path::Path) {
-    let all = variants();
+/// One image: every given variant stacked, each drawn by the real renderer.
+fn render_scene(
+    state: &SharedState,
+    all: &[(&str, &str, Analysis)],
+    name: &str,
+    pcm: &[f32],
+    width: u16,
+    out: &std::path::Path,
+) {
     let rows = all.len() as u16 * (PANEL_ROWS + 2);
     let mut terminal = Terminal::new(TestBackend::new(width, rows)).unwrap();
     let theme = state.ui.lock().theme.clone();
@@ -389,6 +402,7 @@ fn render_scene(state: &SharedState, name: &str, pcm: &[f32], width: u16, out: &
                     dst.peak_envelope = src.peak_envelope;
                     dst.sample_rate = src.sample_rate;
                     dst.axis = src.axis;
+                    dst.pool_columns = src.pool_columns;
                     dst.is_active = true;
                     dst.updated_at = Instant::now();
                 }
@@ -511,8 +525,434 @@ fn vis_proto() {
     let bass_pair = two_tones(100.0, 150.0);
     let song = music(2.02);
     for width in [84_u16, 150] {
-        render_scene(&state, "octave-tones", &octaves, width, &out);
-        render_scene(&state, "bass-pair-100-150", &bass_pair, width, &out);
-        render_scene(&state, "music-like", &song, width, &out);
+        render_scene(&state, &all, "octave-tones", &octaves, width, &out);
+        render_scene(&state, &all, "bass-pair-100-150", &bass_pair, width, &out);
+        render_scene(&state, &all, "music-like", &song, width, &out);
     }
+}
+
+// ---------- round two: the level rule ----------
+
+/// Terminal width of the playback pane the frames are drawn for.
+const PANE_WIDTH: u16 = 84;
+
+fn round2_variants() -> Vec<(&'static str, &'static str, Analysis)> {
+    let sim = |a: Analysis| Analysis {
+        simulated_clock: true,
+        ..a
+    };
+    vec![
+        (
+            "current",
+            "today: 1024-sample window, linear to 4 kHz then log",
+            sim(Analysis::current()),
+        ),
+        (
+            "C",
+            "C, round one: RMS per bar, smoothed",
+            sim(Analysis::log_4096()),
+        ),
+        (
+            "C+sum",
+            "C+sum: power summed per bar, smoothed",
+            sim(Analysis::log_4096().with_sum()),
+        ),
+        (
+            "C+sum sharp",
+            "C+sum sharp: summed, not smoothed, tallest bar per column",
+            sim(Analysis::log_4096().with_sum().sharp()),
+        ),
+        (
+            "D",
+            "D, round one: RMS per bar, smoothed",
+            sim(Analysis::log_dual()),
+        ),
+        (
+            "D+sum",
+            "D+sum: power summed per bar, smoothed",
+            sim(Analysis::log_dual().with_sum()),
+        ),
+        (
+            "D+sum sharp",
+            "D+sum sharp: summed, not smoothed, tallest bar per column",
+            sim(Analysis::log_dual().with_sum().sharp()),
+        ),
+    ]
+}
+
+fn median(mut values: Vec<f32>) -> f32 {
+    values.sort_by(f32::total_cmp);
+    values[values.len() / 2]
+}
+
+fn spread(values: &[f32]) -> f32 {
+    let max = values.iter().copied().fold(f32::MIN, f32::max);
+    let min = values.iter().copied().fold(f32::MAX, f32::min);
+    max - min
+}
+
+fn max_dev_from_median(values: &[f32]) -> f32 {
+    let mid = median(values.to_vec());
+    values.iter().map(|v| (v - mid).abs()).fold(0.0, f32::max)
+}
+
+/// The 41 equal tones of criterion 10, evenly spaced in pitch.
+fn sweep_frequencies() -> Vec<f32> {
+    (0..41)
+        .map(|k| 60.0 * (12_000.0_f32 / 60.0).powf(k as f32 / 40.0))
+        .collect()
+}
+
+/// Peak reading of one steady tone, in dB against its true amplitude: on the
+/// bars, and on the plot columns the renderer draws from them under today's
+/// sampling rule and under the tallest-bar rule. A peak that is not drawn at
+/// all is reported as -60.
+struct ToneReading {
+    hz: f32,
+    bars: f32,
+    sampled: f32,
+    pooled: f32,
+}
+
+fn tone_reading(analysis: Analysis, hz: f32, columns: usize) -> ToneReading {
+    const AMP: f32 = 0.5;
+    let r = run(analysis, &tone(hz, AMP, 0.5));
+    let steady = &r.frames[samples(0.3) / HOP..];
+    let pos = bar_position(hz, analysis.axis);
+    let bar = (pos as usize).min(NUM_BANDS - 1);
+    let column = ((pos / NUM_BANDS as f32 * columns as f32) as usize).min(columns - 1);
+    let on_bars = |frame: &[f32; NUM_BANDS]| {
+        frame[bar.saturating_sub(2)..=(bar + 2).min(NUM_BANDS - 1)]
+            .iter()
+            .copied()
+            .fold(0.0, f32::max)
+    };
+    let on_columns = |frame: &[f32; NUM_BANDS], pool: bool| {
+        (column.saturating_sub(1)..=(column + 1).min(columns - 1))
+            .map(|c| super::streaming::column_value(frame, c, columns, pool))
+            .fold(0.0, f32::max)
+    };
+    let reading = |pick: &dyn Fn(&[f32; NUM_BANDS]) -> f32| {
+        db(median(steady.iter().map(pick).collect()), AMP).max(-60.0)
+    };
+    ToneReading {
+        hz,
+        bars: reading(&on_bars),
+        sampled: reading(&|frame| on_columns(frame, false)),
+        pooled: reading(&|frame| on_columns(frame, true)),
+    }
+}
+
+/// From one pink-noise run: the level of each octave from 62.5 Hz up against
+/// the 500 Hz to 1 kHz octave, in dB, and the mean hop-to-hop flicker
+/// (standard deviation over mean) of the bars between 2 and 8 kHz.
+fn pink_octaves_and_flicker(analysis: Analysis) -> (Vec<(f32, f32)>, f32) {
+    let r = run(analysis, &pink(3.0, 0.5, 1234));
+    let steady = &r.frames[samples(0.5) / HOP..];
+    let bars_in = |lo_hz: f32, hi_hz: f32| {
+        let lo = bar_position(lo_hz, analysis.axis) as usize;
+        let hi = (bar_position(hi_hz, analysis.axis) as usize).min(NUM_BANDS - 1);
+        lo..=hi
+    };
+    let rms_in = |lo_hz: f32, hi_hz: f32| {
+        let bars = bars_in(lo_hz, hi_hz);
+        let mut sum = 0.0_f64;
+        let mut count = 0_u64;
+        for frame in steady {
+            for v in &frame[bars.clone()] {
+                sum += f64::from(*v) * f64::from(*v);
+                count += 1;
+            }
+        }
+        (sum / count as f64).sqrt() as f32
+    };
+    let reference = rms_in(500.0, 1_000.0);
+    let octaves = (0..8)
+        .map(|k| {
+            let lo = 62.5 * 2.0_f32.powi(k);
+            (lo, db(rms_in(lo, lo * 2.0), reference))
+        })
+        .collect();
+    let bars = bars_in(2_000.0, 8_000.0);
+    let n = steady.len() as f64;
+    let mut flicker = 0.0_f64;
+    for b in bars.clone() {
+        let mean = steady.iter().map(|f| f64::from(f[b])).sum::<f64>() / n;
+        let var = steady
+            .iter()
+            .map(|f| (f64::from(f[b]) - mean).powi(2))
+            .sum::<f64>()
+            / n;
+        flicker += var.sqrt() / mean.max(1e-12);
+    }
+    (octaves, (flicker / bars.count() as f64) as f32)
+}
+
+/// What the bound criteria of round two read from one variant.
+struct Round2Row {
+    id: &'static str,
+    /// Equal tones at 1, 4 and 10 kHz against the 100 Hz tone, dB.
+    tones: [f32; 3],
+    tilt: f32,
+    sweep: Vec<ToneReading>,
+    placement_worst: f32,
+    valley_worst: f32,
+}
+
+#[test]
+#[ignore = "prototype harness; needs PROTO_OUT"]
+fn level_rule_round2() {
+    let out = std::path::PathBuf::from(std::env::var("PROTO_OUT").expect("PROTO_OUT"));
+    std::fs::create_dir_all(&out).unwrap();
+    let all = round2_variants();
+    let columns = super::streaming::plot_columns(PANE_WIDTH);
+    let sweep_hz = sweep_frequencies();
+
+    // ---- declared measurements, identical for every variant ----
+    let costs = cost_rounds(&all, &music(5.0), 15);
+    let mut rows = Vec::new();
+    let mut json_rows = Vec::new();
+    for ((id, label, analysis), (cost_best, cost_median)) in all.iter().zip(&costs) {
+        let placement: Vec<(f32, f32)> = [100.0_f32, 440.0, 1_000.0, 5_000.0, 10_000.0]
+            .iter()
+            .map(|&f| (f, placement_error(*analysis, f)))
+            .collect();
+        let valley = valley_db(*analysis, &two_tones(100.0, 150.0), 100.0, 150.0);
+        let tones = [
+            tone_level_db(*analysis, 1_000.0),
+            tone_level_db(*analysis, 4_000.0),
+            tone_level_db(*analysis, 10_000.0),
+        ];
+        let tilt = pink_tilt_db(*analysis);
+        let sweep: Vec<ToneReading> = sweep_hz
+            .iter()
+            .map(|&hz| tone_reading(*analysis, hz, columns))
+            .collect();
+        let (octaves, flicker) = pink_octaves_and_flicker(*analysis);
+        let (on_60, _) = onset_release_ms(*analysis, 60.0);
+        let (on_1k, _) = onset_release_ms(*analysis, 1_000.0);
+        let (on_5k, _) = onset_release_ms(*analysis, 5_000.0);
+        let on = |pick: fn(&ToneReading) -> f32| sweep.iter().map(pick).collect::<Vec<f32>>();
+        let (bars, sampled, pooled) = (on(|t| t.bars), on(|t| t.sampled), on(|t| t.pooled));
+        let worst_loss = |screen: &[f32]| {
+            bars.iter()
+                .zip(screen)
+                .map(|(b, s)| b - s)
+                .fold(f32::MIN, f32::max)
+        };
+        json_rows.push(serde_json::json!({
+            "id": id,
+            "label": label,
+            "placement_error_bars": placement.iter().map(|(f, e)| serde_json::json!({"hz": f, "bars": e})).collect::<Vec<_>>(),
+            "valley_db_100_150_worst_median": valley,
+            "valley_db_110_220_worst_median": valley_db(*analysis, &two_tones(110.0, 220.0), 110.0, 220.0),
+            "level_vs_100hz_tone_db": {"tone_1k": tones[0], "tone_4k": tones[1], "tone_10k": tones[2]},
+            "pink_tilt_db_1k2_2k_vs_350_600": tilt,
+            "pink_octave_db_vs_500_1k": octaves.iter().map(|(lo, level)| serde_json::json!({"from_hz": lo, "db": level})).collect::<Vec<_>>(),
+            "flicker_2k_8k": flicker,
+            "onset_ms": {"60": on_60, "1000": on_1k, "5000": on_5k},
+            "sweep_db_vs_true_amplitude": {
+                "hz": sweep_hz,
+                "bars": bars,
+                "columns_sampled": sampled,
+                "columns_tallest": pooled,
+                "bars_median": median(bars.clone()),
+                "bars_max_dev_from_median": max_dev_from_median(&bars),
+                "columns_sampled_max_dev_from_median": max_dev_from_median(&sampled),
+                "columns_tallest_max_dev_from_median": max_dev_from_median(&pooled),
+                "columns_sampled_worst_loss_vs_bars": worst_loss(&sampled),
+                "columns_tallest_worst_loss_vs_bars": worst_loss(&pooled),
+            },
+            "micros_per_hop_best_of_15": cost_best,
+            "micros_per_hop_median_of_15": cost_median,
+        }));
+        rows.push(Round2Row {
+            id,
+            tones,
+            tilt,
+            sweep,
+            placement_worst: placement.iter().map(|(_, e)| e.abs()).fold(0.0, f32::max),
+            valley_worst: valley.0,
+        });
+    }
+    let row = |id: &str| rows.iter().find(|r| r.id == id).unwrap();
+    let sweep_dev = |r: &Round2Row, lo_hz: f32, hi_hz: f32| {
+        let bars: Vec<f32> = r
+            .sweep
+            .iter()
+            .filter(|t| (lo_hz..=hi_hz).contains(&t.hz))
+            .map(|t| t.bars)
+            .collect();
+        max_dev_from_median(&bars)
+    };
+
+    // ---- harness self-test: each new oracle on one known fail and one known pass ----
+    // Width independence: round one measured C dropping by 10 dB from 1 to
+    // 10 kHz, and today's layout reading 1 and 4 kHz alike (one bin per bar).
+    assert!(spread(&row("C").tones) > 2.0, "self-test: C must fail 6");
+    let today = row("current").tones;
+    assert!(
+        (today[0] - today[1]).abs() <= 2.0,
+        "self-test: today's one-bin bars must read 1 and 4 kHz alike"
+    );
+    // Seam: round one measured 6 dB between D and C; A and B share one window.
+    assert!(
+        (row("D").tilt - row("C").tilt).abs() > 3.0,
+        "self-test: round-one D must fail 9"
+    );
+    let same_window =
+        (pink_tilt_db(Analysis::log_1024()) - pink_tilt_db(Analysis::log_1024_padded())).abs();
+    assert!(
+        same_window <= 3.0,
+        "self-test: A and B must pass 9, got {same_window}"
+    );
+    // Even levels: C under round one's rule must fail, today's one-bin range must pass.
+    assert!(
+        sweep_dev(row("C"), 0.0, f32::MAX) > 3.0,
+        "self-test: C must fail 10"
+    );
+    let one_bin = sweep_dev(row("current"), 200.0, 3_500.0);
+    assert!(
+        one_bin <= 3.0,
+        "self-test: one-bin bars must pass 10, got {one_bin}"
+    );
+    // Column rules: a spike in any one bar is always drawn by the tallest-bar
+    // rule and is skipped for some bars by sampling; with at least as many
+    // columns as bars the two rules agree.
+    let drawn = |bar: usize, cols: usize, pool: bool| {
+        let mut values = [0.0_f32; NUM_BANDS];
+        values[bar] = 1.0;
+        (0..cols).any(|c| super::streaming::column_value(&values, c, cols, pool) > 0.0)
+    };
+    assert!((0..NUM_BANDS).all(|b| drawn(b, columns, true)));
+    let skipped = (0..NUM_BANDS)
+        .filter(|&b| !drawn(b, columns, false))
+        .count();
+    assert!(
+        skipped > 0,
+        "self-test: sampling must skip bars at {columns} columns"
+    );
+    assert!((0..NUM_BANDS).all(|b| drawn(b, NUM_BANDS, false) && drawn(b, 2 * NUM_BANDS, false)));
+
+    // ---- the bound criteria, evaluated here so the verdict travels with the numbers ----
+    let within = |a: f32, b: f32, limit: f32| (a - b).abs() <= limit;
+    let pair = |c: &str, d: &str| (row(c), row(d));
+    let (c_sum, d_sum) = pair("C+sum", "D+sum");
+    let (c_sharp, d_sharp) = pair("C+sum sharp", "D+sum sharp");
+    let new = [c_sum, c_sharp, d_sum, d_sharp];
+    let per = |rows: &[&Round2Row], f: &dyn Fn(&Round2Row) -> (f32, bool)| {
+        rows.iter()
+            .map(|r| {
+                let (value, pass) = f(r);
+                (
+                    r.id.to_string(),
+                    serde_json::json!({"value": value, "pass": pass}),
+                )
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>()
+    };
+    let criteria = serde_json::json!({
+        "6_tones_1k_4k_10k_within_2_db": per(&[c_sum, d_sum], &|r| (spread(&r.tones), spread(&r.tones) <= 2.0)),
+        "7_tones_within_8_db_of_100_hz": per(&[c_sum, d_sum], &|r| {
+            let worst = r.tones.iter().map(|t| t.abs()).fold(0.0, f32::max);
+            (worst, worst <= 8.0)
+        }),
+        "8_c_and_d_within_1_db": {
+            "at_4k": {"value": c_sum.tones[1] - d_sum.tones[1], "pass": within(c_sum.tones[1], d_sum.tones[1], 1.0)},
+            "at_10k": {"value": c_sum.tones[2] - d_sum.tones[2], "pass": within(c_sum.tones[2], d_sum.tones[2], 1.0)},
+        },
+        "9_seam_within_3_db": {
+            "sum": {"value": d_sum.tilt - c_sum.tilt, "pass": within(d_sum.tilt, c_sum.tilt, 3.0)},
+            "sum_sharp": {"value": d_sharp.tilt - c_sharp.tilt, "pass": within(d_sharp.tilt, c_sharp.tilt, 3.0)},
+        },
+        "10_sweep_within_3_db_of_median": per(&[c_sharp, d_sharp], &|r| {
+            let dev = sweep_dev(r, 0.0, f32::MAX);
+            (dev, dev <= 3.0)
+        }),
+        "11a_placement_within_1_bar": per(&new, &|r| (r.placement_worst, r.placement_worst <= 1.0)),
+        "11b_valley_100_150_at_least_6_db": per(&new, &|r| (r.valley_worst, r.valley_worst >= 6.0)),
+    });
+    println!("{}", serde_json::to_string_pretty(&criteria).unwrap());
+
+    let report = serde_json::json!({
+        "round": 2,
+        "sample_rate": RATE,
+        "hop": HOP,
+        "hops_per_second": RATE / HOP as f32,
+        "release_build": !cfg!(debug_assertions),
+        "pane_width": PANE_WIDTH,
+        "plot_columns": columns,
+        "bars": NUM_BANDS,
+        "bars_skipped_by_sampling": skipped,
+        "criteria": criteria,
+        "variants": json_rows,
+    });
+    let name = if cfg!(debug_assertions) {
+        "r2-metrics-debug.json"
+    } else {
+        "r2-metrics-release.json"
+    };
+    std::fs::write(
+        out.join(name),
+        serde_json::to_string_pretty(&report).unwrap(),
+    )
+    .unwrap();
+
+    // ---- frames for the human gate ----
+    // Two panels draw bars already measured above through the tallest-bar
+    // column rule, so each step of the ladder has a picture.
+    let state = test_state(&out);
+    let panel = |id: &str| *all.iter().find(|(i, _, _)| *i == id).unwrap();
+    let tall = |a: Analysis| Analysis {
+        simulated_clock: true,
+        ..a.with_sum().tallest_columns()
+    };
+    let panels = [
+        panel("current"),
+        panel("D"),
+        panel("D+sum"),
+        (
+            "D+sum tall",
+            "D+sum, tallest bar per column",
+            tall(Analysis::log_dual()),
+        ),
+        (
+            "D+sum sharp",
+            "D+sum sharp: as above, not smoothed",
+            panel("D+sum sharp").2,
+        ),
+        (
+            "C+sum tall",
+            "C+sum, tallest bar per column: the single 4096-sample window",
+            tall(Analysis::log_4096()),
+        ),
+    ];
+    let mut octaves = silence(0.6);
+    for k in 0..9 {
+        add(&mut octaves, 0, &tone(62.5 * 2.0_f32.powi(k), 0.1, 0.6));
+    }
+    render_scene(
+        &state,
+        &panels,
+        "r2-octave-tones",
+        &octaves,
+        PANE_WIDTH,
+        &out,
+    );
+    render_scene(
+        &state,
+        &panels,
+        "r2-pink-noise",
+        &pink(2.0, 0.5, 77),
+        PANE_WIDTH,
+        &out,
+    );
+    render_scene(
+        &state,
+        &panels,
+        "r2-music-like",
+        &music(2.02),
+        PANE_WIDTH,
+        &out,
+    );
 }

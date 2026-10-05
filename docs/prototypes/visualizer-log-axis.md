@@ -132,4 +132,74 @@ Not bound: flicker, pink level per octave, the on-screen readings, onset and cos
 
 **Valid while / revalidate when:** as round one.
 
-**Round 2 not yet run.**
+### Harness self-test
+
+Each new oracle was checked on one case that must fail and one that must pass, inside the harness, before any verdict was read.
+
+- Width independence fails round-one C, where 1 and 10 kHz differ by 10.6 dB, and passes today's layout between 1 and 4 kHz, where a bar is one bin.
+- The seam oracle fails round-one D at 5.9 dB and passes A against B, which share a window.
+- Even levels fails round-one C at 12.4 dB and passes today's one-bin range from 200 Hz to 3.5 kHz.
+- Column rules: a spike in any one of the 128 bars is always drawn by the tallest-bar rule, is skipped for 51 of them by sampling at 77 columns, and the two rules agree once there are at least as many columns as bars.
+
+Round one's test was rerun after the code change: every value other than timing is identical to the committed file. Round two ran twice, the second time to add one frame panel, and the two runs agree on everything but timing.
+
+### Results
+
+Release build. Raw numbers: [`r2-metrics-release.json`](assets/visualizer-log-axis/r2-metrics-release.json), which also holds every tone of the sweep and the verdicts as the harness computed them.
+
+| Criterion | Measured | Verdict |
+| --- | --- | --- |
+| 6. 1, 4 and 10 kHz within 2 dB of each other | C+sum 0.7 dB, D+sum 1.2 dB | met |
+| 7. Those within 8 dB of 100 Hz | C+sum 2.7 dB, D+sum 2.7 dB | met |
+| 8. C+sum and D+sum within 1 dB | 0.9 dB at 4 kHz, 0.05 dB at 10 kHz | met, with little margin at 4 kHz |
+| 9. Seam within 3 dB | +sum 0.07 dB, +sum sharp 0.01 dB; round one 5.9 dB | met |
+| 10. 41 tones within 3 dB of their median | C+sum sharp 2.3 dB, D+sum sharp 2.1 dB | met |
+| 11. Placement within a bar, 100 + 150 Hz valley at least 6 dB | worst 0.63 bars, shallowest 12.9 dB | met |
+
+| | current | C | C+sum | C+sum sharp | D | D+sum | D+sum sharp |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Equal tone at 1 / 4 / 10 kHz against 100 Hz, dB | −0.3 / −0.3 / −12.0 | −8.3 / −14.8 / −18.9 | −2.1 / −2.7 / −2.7 | +2.9 / +3.1 / +3.1 | −2.8 / −7.9 / −12.8 | −1.5 / −1.7 / −2.7 | +0.8 / +2.1 / +3.1 |
+| 41 tones, furthest from their median, on bars, dB | 12.3 | 12.4 | 2.6 | 2.3 | 9.8 | 2.3 | 2.1 |
+| The same on screen, columns as today, dB | 16.4 | 16.8 | 6.3 | not drawn | 15.6 | 7.2 | not drawn |
+| The same on screen, tallest bar per column, dB | 12.3 | 12.4 | 2.6 | 2.3 | 9.8 | 2.3 | 2.1 |
+| Most a note loses between bar and column, as today, dB | 6.0 | 6.0 | 6.0 | all of it | 6.0 | 6.0 | all of it |
+| Pink tilt, dB | −5.8 | −5.5 | 0.0 | −0.1 | +0.5 | −0.1 | −0.1 |
+| Pink noise, 62 to 125 Hz against 500 Hz to 1 kHz, dB | +11.5 | +9.4 | +4.7 | +4.6 | +7.4 | +4.7 | +4.6 |
+| Pink noise, 8 to 16 kHz against 500 Hz to 1 kHz, dB | −11.7 | −11.8 | +0.2 | 0.0 | −7.8 | +0.1 | 0.0 |
+| Flicker between 2 and 8 kHz | 0.35 | 0.10 | 0.10 | 0.17 | 0.20 | 0.20 | 0.30 |
+| Valley, 100 + 150 Hz, dB | 0.0 | 12.9 | 12.9 | 16.7 | 12.9 | 12.9 | 16.7 |
+| Onset to half, 60 Hz / 1 kHz / 5 kHz, ms | 10.7 / 10.7 / 10.7 | 42.7 / 34.7 / 34.7 | 42.7 / 34.7 / 34.7 | 42.7 / 40.0 / 34.7 | 42.7 / 10.7 / 8.0 | 42.7 / 13.3 / 8.0 | 42.7 / 13.3 / 10.7 |
+| Cost per hop, µs, best / median | 3.2 / 3.8 | 27.3 / 32.3 | 27.2 / 33.1 | 26.8 / 32.8 | 21.5 / 26.2 | 21.5 / 26.2 | 21.4 / 26.2 |
+
+Flicker is the standard deviation of a bar from hop to hop on pink noise, divided by its mean. In the first of the two runs the medians for C and D were 55 to 69 µs with the same best rounds, the clock effect described in round one.
+
+Frames at 84 columns. Top to bottom: today; D as in round one; D+sum; the same bars with the tallest-bar column rule; D+sum sharp; C+sum with the tallest-bar rule.
+
+![Round two: nine tones an octave apart](assets/visualizer-log-axis/r2-octave-tones-84.png)
+
+In the third panel the 2 kHz tone is drawn about 6 dB lower than its neighbours although its bar is as tall as theirs: that bar is one of the 51 the renderer skips. The fourth panel draws the same bars with the tallest-bar rule.
+
+![Round two: pink noise](assets/visualizer-log-axis/r2-pink-noise-84.png)
+
+The block at the left edge is the test signal's energy below 60 Hz and is in every panel.
+
+![Round two: music-like mix](assets/visualizer-log-axis/r2-music-like-84.png)
+
+### Conclusion
+
+- **Summing the power under a bar does what was hoped.** A note reads the same whether its bar is narrow or wide: 1, 4 and 10 kHz agree within 0.7 dB in C and 1.2 dB in D, where round one had them 10 dB apart. The two windows agree with each other, so D's seam is gone: 0.07 dB against 5.9 dB. Pink noise reads level from 250 Hz to 16 kHz within 0.7 dB. Placement and bass resolution are untouched, and the rule costs nothing measurable.
+- **On screen the level rule is not enough by itself.** At 84 terminal columns the renderer draws 77 of the 128 bars, so a note whose bar is skipped is drawn from its smoothed neighbour, 6 dB low. That holds for today's build as well. With every column drawing the tallest bar it covers, nothing is lost and the 41 tones stay within 2.6 dB of their median on screen.
+- **Smoothing is then a question of look, not of level.** Smoothed and unsmoothed are equally even, 2.3 dB against 2.1 dB in D. Without smoothing a single high note is one column wide and 4 to 6 dB taller, bass notes separate by 16.7 dB instead of 12.9 dB, and the bars flicker half as much again, 0.30 against 0.20, which is still below today's 0.35. The one combination that must not ship is no smoothing with today's column sampling: one-bar peaks are then not drawn at all.
+- **D now meets every criterion bound in either round.** With the sum rule it keeps round one's results on placement, bass resolution and responsiveness, 13.3 ms at 1 kHz against the 15 ms bound, and its one failure, the seam, is gone. Its cost stays at 6.8 times today's, with the caveat on criterion 4 from round one. C still fails criterion 3, because that failure comes with its window.
+- **The droop was not caused by the log axis.** Today's layout has it wherever its bars are wider than a bin: above 4 kHz a note already reads 8 to 12 dB lower than the same note below 4 kHz. A log axis only makes more of the display depend on the rule.
+- **Bass keeps some extra weight.** Where a bar is narrower than a bin it still reads the interpolated bin, so pink noise rises towards the left edge: +4.7 dB in the octave from 62 to 125 Hz. Today's layout shows +11.5 dB there.
+
+Remaining unknowns: real music, including whether the smoothed or the sharp look is preferred; the 44.1 kHz path; a tick set for the log axis. Without smoothing a note in a wide bar reads about 3 dB above a 100 Hz note: 1.8 dB is the ratio between a summed lobe and its peak, which can be calibrated out, and the rest is the 100 Hz tone falling between two bins. That is inside criterion 10.
+
+### Disposition
+
+Prototype code stays on `proto/visualizer-log-axis`, still not meant for `main`. `SPOTIFY_PLAYER_VIS_PROTO` now also takes `C+sum`, `D+sum`, `C+tall`, `D+tall`, `C+sharp` and `D+sharp`; that switch has still not been exercised in a running app.
+
+Next: a human choice. The evidence supports building D with the power summed per bar and with every column drawing its tallest bar. Keeping the three-point smoothing is the smaller change from today and the calmer picture; dropping it is the sharper one, and both pass. A build would also need a tick set for the log axis, tests, and a check of the 44.1 kHz path, and could run the long transform less often to cut the cost. A live look with real music would settle the smoothing question before or during that work. Nothing here is promoted as it stands.
+
+**Review pending.**

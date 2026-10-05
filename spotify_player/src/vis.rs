@@ -62,6 +62,8 @@ pub struct VisBands {
     pub sample_rate: f32,
     /// PROTOTYPE: how `values` are laid out along the frequency axis.
     pub axis: AxisScale,
+    /// PROTOTYPE (round two): a column draws the tallest band it covers.
+    pub pool_columns: bool,
     /// Playable-item key the full-scale intro was armed for (track/episode id).
     /// Re-armed whenever the loaded item changes so bars flash with each new track.
     intro_item_key: Option<String>,
@@ -79,6 +81,7 @@ impl VisBands {
             local_sink_active: false,
             sample_rate: SAMPLE_RATE,
             axis: AxisScale::Bins,
+            pool_columns: false,
             intro_item_key: None,
             intro_started_at: None,
         }
@@ -168,6 +171,16 @@ pub struct LowBand {
     pub blend_to_hz: f32,
 }
 
+/// PROTOTYPE (round two): how a bar summarises the spectrum under it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LevelRule {
+    /// RMS of the bins under the bar: today's rule.
+    Rms,
+    /// Power summed under the bar. A bar narrower than one bin reads the
+    /// interpolated bin, exactly as under `Rms`, so the low end is unchanged.
+    SumPower,
+}
+
 /// PROTOTYPE: selectable analysis so layout variants can be compared.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Analysis {
@@ -177,6 +190,11 @@ pub struct Analysis {
     pub fft: usize,
     pub low: Option<LowBand>,
     pub axis: AxisScale,
+    pub level: LevelRule,
+    /// Three-point smoothing across bars, as today.
+    pub smooth: bool,
+    /// Renderer: a column draws the tallest bar it covers instead of sampling one.
+    pub pool_columns: bool,
     /// Offline harness: decay by exactly one hop per hop instead of wall-clock time.
     pub simulated_clock: bool,
 }
@@ -194,7 +212,34 @@ impl Analysis {
             fft: FFT_SIZE,
             low: None,
             axis: AxisScale::Bins,
+            level: LevelRule::Rms,
+            smooth: true,
+            pool_columns: false,
             simulated_clock: false,
+        }
+    }
+
+    /// Round two, first step: sum the power under each bar.
+    pub fn with_sum(self) -> Self {
+        Self {
+            level: LevelRule::SumPower,
+            ..self
+        }
+    }
+
+    /// Round two: every plot column draws the tallest bar it covers.
+    pub fn tallest_columns(self) -> Self {
+        Self {
+            pool_columns: true,
+            ..self
+        }
+    }
+
+    /// Round two, second step: no smoothing, and columns draw their tallest bar.
+    pub fn sharp(self) -> Self {
+        Self {
+            smooth: false,
+            ..self.tallest_columns()
         }
     }
 
@@ -235,13 +280,22 @@ impl Analysis {
         }
     }
 
-    /// PROTOTYPE: `SPOTIFY_PLAYER_VIS_PROTO=A|B|C|D` selects a variant at runtime.
+    /// PROTOTYPE: `SPOTIFY_PLAYER_VIS_PROTO` selects a variant at runtime:
+    /// `A`, `B`, `C`, `D` from round one, and from round two `C+sum`, `D+sum`
+    /// (level rule only), `C+tall`, `D+tall` (plus tallest-bar columns) and
+    /// `C+sharp`, `D+sharp` (plus no smoothing).
     pub fn from_env() -> Self {
         match std::env::var("SPOTIFY_PLAYER_VIS_PROTO").as_deref() {
             Ok("A") => Self::log_1024(),
             Ok("B") => Self::log_1024_padded(),
             Ok("C") => Self::log_4096(),
             Ok("D") => Self::log_dual(),
+            Ok("C+sum") => Self::log_4096().with_sum(),
+            Ok("D+sum") => Self::log_dual().with_sum(),
+            Ok("C+tall") => Self::log_4096().with_sum().tallest_columns(),
+            Ok("D+tall") => Self::log_dual().with_sum().tallest_columns(),
+            Ok("C+sharp") => Self::log_4096().with_sum().sharp(),
+            Ok("D+sharp") => Self::log_dual().with_sum().sharp(),
             _ => Self::current(),
         }
     }
@@ -482,12 +536,13 @@ impl BandProcessor {
                 low_edges,
                 high_weight,
             } => {
+                let rule = self.analysis.level;
                 for (b, out) in self.new_bands.iter_mut().enumerate() {
-                    let high = band_rms(&self.primary.mags, edges[b].0, edges[b].1);
+                    let high = band_level(&self.primary.mags, edges[b].0, edges[b].1, rule);
                     let w = high_weight[b];
                     *out = match &self.low {
                         Some(low) if w < 1.0 => {
-                            let l = band_rms(&low.mags, low_edges[b].0, low_edges[b].1);
+                            let l = band_level(&low.mags, low_edges[b].0, low_edges[b].1, rule);
                             l * (1.0 - w) + high * w
                         }
                         _ => high,
@@ -495,7 +550,9 @@ impl BandProcessor {
                 }
             }
         }
-        smooth_bands(&mut self.new_bands, &mut self.smooth_scratch);
+        if self.analysis.smooth {
+            smooth_bands(&mut self.new_bands, &mut self.smooth_scratch);
+        }
 
         // Apply decay since the last hop, then rise to any louder value.
         let mut g = self.bands.lock();
@@ -513,6 +570,7 @@ impl BandProcessor {
         g.peak_envelope = (g.peak_envelope * peak_decay).max(frame_peak);
         g.sample_rate = self.sample_rate;
         g.axis = self.analysis.axis;
+        g.pool_columns = self.analysis.pool_columns;
         g.updated_at = Instant::now();
         g.is_active = true;
         drop(g);
@@ -522,11 +580,12 @@ impl BandProcessor {
     }
 }
 
-/// RMS magnitude of a spectrum between two fractional bin positions, from the
-/// piecewise-linear interpolant of the power spectrum. A bar narrower than one
-/// bin degenerates to the interpolated magnitude at its position. Bin 0 (DC)
-/// is never read.
-fn band_rms(mags: &[f32], x_lo: f32, x_hi: f32) -> f32 {
+/// Level of a spectrum between two fractional bin positions, from the
+/// piecewise-linear interpolant of the power spectrum: its RMS, or under
+/// `LevelRule::SumPower` its summed power. A bar narrower than one bin reads
+/// the interpolated magnitude at its position under both rules. Bin 0 (DC) is
+/// never read.
+fn band_level(mags: &[f32], x_lo: f32, x_hi: f32, rule: LevelRule) -> f32 {
     let last = (mags.len() - 1) as f32;
     let lo = x_lo.clamp(1.0, last);
     let hi = x_hi.clamp(lo, last);
@@ -548,7 +607,11 @@ fn band_rms(mags: &[f32], x_lo: f32, x_hi: f32) -> f32 {
         area += 0.5 * (power_at(x) + power_at(next)) * (next - x);
         x = next;
     }
-    (area / (hi - lo)).sqrt()
+    let width = match rule {
+        LevelRule::Rms => hi - lo,
+        LevelRule::SumPower => (hi - lo).min(1.0),
+    };
+    (area / width).sqrt()
 }
 
 /// Precomputes the `(start, end)` FFT bin ranges for each log-scale band.

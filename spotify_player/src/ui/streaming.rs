@@ -154,6 +154,31 @@ fn axis_style(theme: &Theme) -> Style {
     Style::default().fg(accent.fg.unwrap_or(Color::Green))
 }
 
+/// PROTOTYPE (round two): how many plot columns a visualization `width` wide has.
+#[cfg(test)]
+pub(super) fn plot_columns(width: u16) -> usize {
+    let chart_width = width.saturating_sub(Y_AXIS_WIDTH + X_AXIS_UNIT_WIDTH);
+    usize::from(plot_area(Rect::new(0, 0, chart_width, VIS_HEIGHT)).width)
+}
+
+/// PROTOTYPE (round two): the band value drawn in plot column `column` of
+/// `columns`. Today a column samples one band, which skips bands once there
+/// are fewer columns than bands; with `pool` it draws the tallest it covers.
+pub(super) fn column_value(
+    values: &[f32; crate::vis::NUM_BANDS],
+    column: usize,
+    columns: usize,
+    pool: bool,
+) -> f32 {
+    let step = values.len() as f64 / columns as f64;
+    let idx = ((column as f64 * step) as usize).min(values.len() - 1);
+    if !pool {
+        return values[idx];
+    }
+    let end = (((column + 1) as f64 * step) as usize).clamp(idx + 1, values.len());
+    values[idx..end].iter().copied().fold(0.0, f32::max)
+}
+
 fn plot_area(chart_rect: Rect) -> Rect {
     // Inset left for the y-axis line and right for the x-axis end cap (┘).
     Rect {
@@ -375,6 +400,7 @@ pub fn render_audio_visualization(
     let guard = vis_lock.lock();
     let sample_rate = guard.sample_rate;
     let axis = guard.axis;
+    let pool_columns = guard.pool_columns;
     let intro_level = guard.intro_level();
     let mut values = if should_show_viz_bars(&guard, playback_is_playing) {
         let display_decay = decay_for_elapsed(guard.updated_at.elapsed());
@@ -420,11 +446,9 @@ pub fn render_audio_visualization(
     let max_val = u64::from(plot_rect.height) * 8;
     let vis_colors = theme.visualization();
 
-    let step = values.len() as f64 / num_bars as f64;
     let bar_values: Vec<(u64, f32)> = (0..num_bars)
         .map(|i| {
-            let idx = ((i as f64 * step) as usize).min(values.len() - 1);
-            let norm = values[idx];
+            let norm = column_value(&values, i, num_bars, pool_columns);
             let val = (norm * max_val as f32).round() as u64;
             let val = if norm > 0.0 { val.max(1) } else { 0 };
             (val, norm)
