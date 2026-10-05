@@ -189,9 +189,13 @@ pub fn render_playback_window(
         ])
         .split(inner);
         frame.render_widget(
-            Paragraph::new(format!("{} Loading...", SPINNER_FRAMES[frame_idx]))
-                .style(ui.theme.playback_metadata())
-                .alignment(Alignment::Center),
+            Paragraph::new(format!(
+                "{} {}",
+                SPINNER_FRAMES[frame_idx],
+                super::utils::loading_text(state)
+            ))
+            .style(ui.theme.playback_metadata())
+            .alignment(Alignment::Center),
             vertical_chunks[1],
         );
     } else {

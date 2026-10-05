@@ -1,6 +1,6 @@
 use super::{
-    config, Block, BorderType, Borders, Frame, List, ListItem, ListState, Rect, Span, Style, Table,
-    TableState,
+    config, Block, BorderType, Borders, Frame, List, ListItem, ListState, Rect, SharedState, Span,
+    Style, Table, TableState,
 };
 use unicode_bidi::BidiInfo;
 
@@ -175,4 +175,32 @@ pub fn format_genres(genres: &[String], genre_num: u8) -> String {
     }
 
     genre_str
+}
+
+/// What a page shows while its data is on the way. During a rate limit the
+/// requests behind the page are held until Spotify takes them again, so the
+/// page says how long that is instead of an open-ended "Loading...".
+pub fn loading_text(state: &SharedState) -> String {
+    loading_text_for(state.rate_limit_wait_secs())
+}
+
+fn loading_text_for(rate_limit_wait_secs: Option<u64>) -> String {
+    match rate_limit_wait_secs {
+        Some(secs) => format!("Rate limited by Spotify, retrying in {secs} s"),
+        None => "Loading...".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::loading_text_for;
+
+    #[test]
+    fn loading_text_names_an_active_rate_limit() {
+        assert_eq!(loading_text_for(None), "Loading...");
+        assert_eq!(
+            loading_text_for(Some(27)),
+            "Rate limited by Spotify, retrying in 27 s"
+        );
+    }
 }

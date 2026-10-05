@@ -8,6 +8,9 @@ pub const TOAST_QUEUE_CAP: usize = 10;
 /// Maximum number of full notification cards rendered at once.
 pub const TOAST_VISIBLE_COUNT: usize = 3;
 
+/// Every rate-limit notice starts with this, and at most one is queued.
+pub const RATE_LIMIT_TOAST_PREFIX: &str = "Spotify rate limit";
+
 const TOAST_MAX_WIDTH: u16 = 60;
 const TOAST_BODY_HEIGHT: u16 = 6;
 const TOAST_BODY_MIN_HEIGHT: u16 = 3;
@@ -86,6 +89,23 @@ impl ToastQueue {
         }
         self.items.push_back(toast);
         true
+    }
+
+    /// Push `toast`, unless a queued toast's message starts with `prefix`: then
+    /// that one takes the new text and its timer starts over. Repeated notices
+    /// of one condition stay a single card instead of filling the queue.
+    pub fn push_or_replace(&mut self, toast: Toast, prefix: &str) -> bool {
+        match self
+            .items
+            .iter_mut()
+            .find(|queued| queued.message.starts_with(prefix))
+        {
+            Some(queued) => {
+                *queued = toast;
+                true
+            }
+            None => self.push(toast),
+        }
     }
 
     /// Remove expired toasts from the front, then start the timer of every
@@ -364,6 +384,31 @@ mod tests {
             timeout: Duration::from_secs(3),
             expires_at: Some(expires_at),
         }
+    }
+
+    #[test]
+    fn rate_limit_notices_share_one_card() {
+        let timeout = Duration::from_secs(3);
+        let notice =
+            |text: &str| Toast::error(format!("{RATE_LIMIT_TOAST_PREFIX}: {text}"), timeout);
+        let mut queue = ToastQueue::default();
+        queue.push(Toast::success("Liked", timeout));
+        assert!(queue.push_or_replace(notice("volume was not sent."), RATE_LIMIT_TOAST_PREFIX));
+        queue.expire_due(Instant::now());
+        // A volume gesture sends many requests; eighteen rejections are one card.
+        for _ in 0..18 {
+            assert!(queue.push_or_replace(notice("volume was not sent."), RATE_LIMIT_TOAST_PREFIX));
+        }
+        assert!(queue.push_or_replace(notice("play/pause was not sent."), RATE_LIMIT_TOAST_PREFIX));
+        assert_eq!(queue.len(), 2);
+        let messages: Vec<&str> = queue.visible().map(|t| t.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            ["Liked", "Spotify rate limit: play/pause was not sent."]
+        );
+        // The card took a new message, so its time on screen starts over.
+        assert!(queue.visible().nth(1).unwrap().expires_at.is_none());
+        assert_eq!(queue.dropped_newest, 0);
     }
 
     fn error(msg: &str, expires_at: Instant) -> Toast {

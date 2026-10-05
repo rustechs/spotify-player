@@ -6,12 +6,15 @@ use tracing::Instrument;
 
 use crate::{
     config,
-    state::{ContextId, ContextPageType, ContextPageUIState, PageState, PlayableId, SharedState},
+    state::{
+        ContextId, ContextPageType, ContextPageUIState, PageState, PlayableId, SharedState,
+        RATE_LIMIT_TOAST_PREFIX,
+    },
 };
 
 use crate::utils::map_join;
 
-use super::ClientRequest;
+use super::{ClientRequest, PlayerRequest};
 
 struct PlayerEventHandlerState {
     get_context_timer: Instant,
@@ -31,6 +34,14 @@ const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// 45 s, plus the 15 s Connect registration wait). They run on their own worker,
 /// so this longer bound never delays other requests.
 const PLAYER_REQUEST_TIMEOUT: Duration = Duration::from_secs(75);
+
+/// A player command Spotify rejects with `429` is sent once more when the
+/// wait it asks for is no longer than this. A longer wait is only reported.
+const PLAYER_RETRY_MAX_WAIT: Duration = Duration::from_secs(5);
+/// `Retry-After` counts whole seconds; a resend on the dot is rejected again.
+const PLAYER_RETRY_MARGIN: Duration = Duration::from_millis(500);
+
+type RequestOutcome = Result<anyhow::Result<()>, tokio::time::error::Elapsed>;
 
 /// Minimum gap between track-end playback refreshes. The watcher runs every 100ms and
 /// used to enqueue `GetCurrentPlayback` on every tick once progress >= duration, which
@@ -98,22 +109,80 @@ async fn start_player_worker(
     client: &super::AppClient,
     player_sub: &flume::Receiver<ClientRequest>,
 ) {
-    while let Ok(request) = player_sub.recv_async().await {
+    // Requests taken off the channel while a resend was waiting, still to run.
+    let mut backlog = std::collections::VecDeque::new();
+    loop {
+        let request = match backlog.pop_front() {
+            Some(request) => request,
+            None => match player_sub.recv_async().await {
+                Ok(request) => request,
+                Err(_) => return,
+            },
+        };
         let span = tracing::info_span!("player_request", request = ?request);
-        let toast_request = request.clone();
-        let outcome = tokio::time::timeout(
-            PLAYER_REQUEST_TIMEOUT,
-            client.handle_request(state, request).instrument(span),
-        )
-        .await;
-        enqueue_request_toast(state, &toast_request, outcome, PLAYER_REQUEST_TIMEOUT);
+        let run = || {
+            tokio::time::timeout(
+                PLAYER_REQUEST_TIMEOUT,
+                client
+                    .handle_request(state, request.clone())
+                    .instrument(span.clone()),
+            )
+        };
+
+        let mut outcome = run().await;
+        if let (ClientRequest::Player(sent), Some(wait)) =
+            (&request, short_rate_limit_wait(&outcome))
+        {
+            state.push_rate_limit_toast(format!(
+                "{RATE_LIMIT_TOAST_PREFIX}: sending {} again in {} s",
+                sent.action(),
+                wait.as_secs().max(1)
+            ));
+            tokio::time::sleep(wait + PLAYER_RETRY_MARGIN).await;
+            backlog.extend(player_sub.drain());
+            backlog.retain(|queued| !repeats_toggle(queued, sent));
+            outcome = run().await;
+        }
+        enqueue_request_toast(state, &request, outcome, PLAYER_REQUEST_TIMEOUT);
+    }
+}
+
+/// How long to wait before sending a rejected player command once more:
+/// Spotify's `Retry-After`, when it is short enough to sit out.
+fn short_rate_limit_wait(outcome: &RequestOutcome) -> Option<Duration> {
+    let Ok(Err(err)) = outcome else {
+        return None;
+    };
+    super::rate_limit_retry_after(err).filter(|wait| *wait <= PLAYER_RETRY_MAX_WAIT)
+}
+
+/// Whether `queued` is the toggle `sent` pressed again while `sent` waited out
+/// a rate limit. The resend delivers what those presses asked for; sending
+/// them as well would undo it.
+fn repeats_toggle(queued: &ClientRequest, sent: &PlayerRequest) -> bool {
+    matches!(
+        queued,
+        ClientRequest::Player(request)
+            if sent.is_toggle()
+                && std::mem::discriminant(request) == std::mem::discriminant(sent)
+    )
+}
+
+/// Toast text for a command Spotify's rate limit rejected.
+fn rate_limit_message(action: &str, retry_after: Option<Duration>) -> String {
+    match retry_after {
+        Some(wait) => format!(
+            "{RATE_LIMIT_TOAST_PREFIX}: {action} was not sent. Try again in {} s.",
+            wait.as_secs().max(1)
+        ),
+        None => format!("{RATE_LIMIT_TOAST_PREFIX}: {action} was not sent."),
     }
 }
 
 fn enqueue_request_toast(
     state: &SharedState,
     request: &ClientRequest,
-    outcome: Result<anyhow::Result<()>, tokio::time::error::Elapsed>,
+    outcome: RequestOutcome,
     timeout: Duration,
 ) {
     match outcome {
@@ -124,13 +193,22 @@ fn enqueue_request_toast(
         }
         Ok(Err(err)) => {
             tracing::error!("Failed to handle client request: {err:#}");
-            if request.is_toastable() {
+            // Only what the user asked for; a failed background fetch stays in the log.
+            let Some(action) = request.action() else {
+                return;
+            };
+            if super::is_rate_limit(&err) {
+                state.push_rate_limit_toast(rate_limit_message(
+                    action,
+                    super::rate_limit_retry_after(&err),
+                ));
+            } else {
                 state.push_error_toast(format!("Failed: {err:#}"));
             }
         }
         Err(_) => {
             tracing::error!("Timed out after {timeout:?} handling client request");
-            if request.is_toastable() {
+            if request.action().is_some() {
                 state.push_error_toast(format!("Timed out after {timeout:?}"));
             }
         }
@@ -377,5 +455,68 @@ pub fn start_player_event_watcher(state: &SharedState, client_pub: &flume::Sende
         }
 
         std::thread::sleep(refresh_duration);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::HttpError;
+
+    fn rejected(status: u16, retry_after: Option<&str>) -> RequestOutcome {
+        let mut response = http::Response::builder().status(status);
+        if let Some(value) = retry_after {
+            response = response.header("retry-after", value);
+        }
+        let err = rspotify::ClientError::Http(Box::new(HttpError::StatusCode(
+            reqwest::Response::from(response.body("").unwrap()),
+        )));
+        Ok(Err(anyhow::Error::from(err).context("pause playback")))
+    }
+
+    #[test]
+    fn only_a_short_rate_limit_is_sat_out() {
+        assert_eq!(
+            short_rate_limit_wait(&rejected(429, Some("4"))),
+            Some(Duration::from_secs(4))
+        );
+        assert_eq!(
+            short_rate_limit_wait(&rejected(429, Some("5"))),
+            Some(PLAYER_RETRY_MAX_WAIT)
+        );
+        // Most waits Spotify asked for on 2026-10-05 were 26 to 28 s.
+        assert_eq!(short_rate_limit_wait(&rejected(429, Some("27"))), None);
+        assert_eq!(short_rate_limit_wait(&rejected(429, None)), None);
+        assert_eq!(short_rate_limit_wait(&rejected(404, Some("1"))), None);
+        assert_eq!(short_rate_limit_wait(&Ok(Ok(()))), None);
+    }
+
+    #[test]
+    fn presses_of_a_toggle_made_during_the_wait_are_not_sent_again() {
+        let queued = |request: PlayerRequest| ClientRequest::Player(request);
+        let toggle = PlayerRequest::ResumePause;
+        assert!(repeats_toggle(&queued(PlayerRequest::ResumePause), &toggle));
+        // Anything else pressed meanwhile still runs.
+        assert!(!repeats_toggle(&queued(PlayerRequest::NextTrack), &toggle));
+        assert!(!repeats_toggle(&queued(PlayerRequest::Shuffle), &toggle));
+        assert!(!repeats_toggle(&ClientRequest::GetCurrentPlayback, &toggle));
+        // Two presses of "next" mean two tracks.
+        assert!(!repeats_toggle(
+            &queued(PlayerRequest::NextTrack),
+            &PlayerRequest::NextTrack
+        ));
+    }
+
+    #[test]
+    fn rate_limit_message_says_what_was_lost_and_for_how_long() {
+        assert_eq!(
+            rate_limit_message("play/pause", Some(Duration::from_secs(27))),
+            "Spotify rate limit: play/pause was not sent. Try again in 27 s."
+        );
+        assert_eq!(
+            rate_limit_message("volume", None),
+            "Spotify rate limit: volume was not sent."
+        );
+        assert!(rate_limit_message("seek", None).starts_with(RATE_LIMIT_TOAST_PREFIX));
     }
 }

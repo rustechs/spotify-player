@@ -61,7 +61,42 @@ pub enum ClientRequest {
     },
 }
 
+impl PlayerRequest {
+    /// What the request does, in the words shown to the user.
+    pub fn action(&self) -> &'static str {
+        match self {
+            Self::NextTrack => "next track",
+            Self::PreviousTrack => "previous track",
+            Self::Resume | Self::Pause | Self::ResumePause => "play/pause",
+            Self::SeekTrack(_) => "seek",
+            Self::Repeat => "repeat",
+            Self::Shuffle => "shuffle",
+            Self::Volume(_) | Self::ToggleMute => "volume",
+            Self::TransferPlayback(..) => "device switch",
+            Self::StartPlayback(..) => "playback start",
+        }
+    }
+
+    /// Whether sending the request a second time undoes the first.
+    pub fn is_toggle(&self) -> bool {
+        matches!(
+            self,
+            Self::ResumePause | Self::Repeat | Self::Shuffle | Self::ToggleMute
+        )
+    }
+}
+
 impl ClientRequest {
+    /// What a request the user made does, in the words shown to them; `None`
+    /// for the requests the app makes on its own.
+    pub fn action(&self) -> Option<&'static str> {
+        match self {
+            Self::Player(request) => Some(request.action()),
+            _ if self.is_toastable() => Some("the change"),
+            _ => None,
+        }
+    }
+
     /// Requests whose outcome is shown as a toast: mutating library/queue/
     /// playlist actions, starting playback, and skip next/previous.
     pub fn is_toastable(&self) -> bool {
@@ -124,6 +159,35 @@ mod tests {
         AlbumId::from_id("4aawyAB9vmqN3uQ7FjRGTy")
             .unwrap()
             .into_static()
+    }
+
+    #[test]
+    fn requests_the_user_made_have_a_name_and_background_ones_do_not() {
+        assert_eq!(
+            ClientRequest::Player(PlayerRequest::ResumePause).action(),
+            Some("play/pause")
+        );
+        assert_eq!(
+            ClientRequest::Player(PlayerRequest::Volume(40)).action(),
+            Some("volume")
+        );
+        assert_eq!(
+            ClientRequest::AddPlayableToQueue(PlayableId::Track(track_id())).action(),
+            Some("the change")
+        );
+        assert_eq!(ClientRequest::GetCurrentPlayback.action(), None);
+        assert_eq!(ClientRequest::GetUserPlaylists.action(), None);
+    }
+
+    #[test]
+    fn only_requests_that_undo_themselves_are_toggles() {
+        assert!(PlayerRequest::ResumePause.is_toggle());
+        assert!(PlayerRequest::Shuffle.is_toggle());
+        assert!(PlayerRequest::Repeat.is_toggle());
+        assert!(PlayerRequest::ToggleMute.is_toggle());
+        assert!(!PlayerRequest::Pause.is_toggle());
+        assert!(!PlayerRequest::NextTrack.is_toggle());
+        assert!(!PlayerRequest::Volume(40).is_toggle());
     }
 
     #[test]

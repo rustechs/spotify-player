@@ -9,9 +9,10 @@ use crate::{
     state::{
         store_data_into_file_cache, Album, AlbumId, Artist, ArtistId, Category, Context, ContextId,
         Device, FileCacheKey, Item, ItemId, MemoryCaches, Playback, PlaybackMetadata, Playlist,
-        PlaylistFolderItem, PlaylistId, SearchResults, SharedState, Show, ShowId, Track, TrackId,
-        UserId, TTL_CACHE_DURATION, USER_LIKED_TRACKS_URI, USER_RECENTLY_PLAYED_TRACKS_URI,
-        USER_TOP_TRACKS_LONG_TERM_URI, USER_TOP_TRACKS_SHORT_TERM_URI, USER_TOP_TRACKS_URI,
+        PlaylistFolderItem, PlaylistId, RateLimitDeadline, SearchResults, SharedState, Show,
+        ShowId, Track, TrackId, UserId, TTL_CACHE_DURATION, USER_LIKED_TRACKS_URI,
+        USER_RECENTLY_PLAYED_TRACKS_URI, USER_TOP_TRACKS_LONG_TERM_URI,
+        USER_TOP_TRACKS_SHORT_TERM_URI, USER_TOP_TRACKS_URI,
     },
 };
 
@@ -116,8 +117,13 @@ impl Deref for AppClient {
 /// Build the Spotify Web API client from the configured client ID.
 ///
 /// The returned client is unauthenticated; call [`auth::prompt_for_user_token`] to obtain an
-/// access token.
-pub fn new_api_client() -> Result<WebApiClient> {
+/// access token. Rate limits met by the ncspot client are published to
+/// `rate_limit`, when given.
+pub fn new_api_client(rate_limit: Option<&RateLimitDeadline>) -> Result<WebApiClient> {
+    let with_deadline = |middleware: SpotifyApiMiddleware| match rate_limit {
+        Some(deadline) => middleware.reporting_to(Arc::clone(deadline)),
+        None => middleware,
+    };
     let configs = config::get_config();
 
     let id = configs.app_config.get_client_id()?;
@@ -143,10 +149,10 @@ pub fn new_api_client() -> Result<WebApiClient> {
 
     if id == auth::NCSPOT_CLIENT_ID {
         let config = build_config(&primary_cache_file);
-        let middleware = SpotifyApiMiddleware::new(
+        let middleware = with_deadline(SpotifyApiMiddleware::new(
             &config.api_base_url,
             configs.app_config.api_rate_limit_retries,
-        )?;
+        )?);
         let client = rspotify::AuthCodePkceSpotify::with_config(
             rspotify::Credentials { id, secret: None },
             build_oauth(configs.app_config.login_redirect_uri.clone()),
@@ -169,10 +175,10 @@ pub fn new_api_client() -> Result<WebApiClient> {
 
     let fallback_cache_file = format!("{}{}", auth::NCSPOT_CLIENT_ID, auth::TOKEN_CACHE_SUFFIX);
     let fallback_config = build_config(&fallback_cache_file);
-    let fallback_middleware = SpotifyApiMiddleware::new(
+    let fallback_middleware = with_deadline(SpotifyApiMiddleware::new(
         &fallback_config.api_base_url,
         configs.app_config.api_rate_limit_retries,
-    )?;
+    )?);
     let fallback = rspotify::AuthCodePkceSpotify::with_config(
         rspotify::Credentials {
             id: auth::NCSPOT_CLIENT_ID.to_string(),
@@ -227,12 +233,13 @@ fn paging_query<'a>(
 }
 
 impl AppClient {
-    /// Construct a new client
-    pub async fn new() -> Result<Self> {
+    /// Construct a new client. Rate limits it meets are published to
+    /// `rate_limit`, when given, for the UI to show.
+    pub async fn new(rate_limit: Option<&RateLimitDeadline>) -> Result<Self> {
         let configs = config::get_config();
         let auth_config = AuthConfig::new(configs)?;
 
-        let mut api_client = new_api_client()?;
+        let mut api_client = new_api_client(rate_limit)?;
         auth::prompt_for_user_token(&mut api_client, false)
             .await
             .context("authenticate Spotify Web API client")?;
@@ -2744,6 +2751,32 @@ fn client_error_status(err: &rspotify::ClientError) -> Option<StatusCode> {
     }
 }
 
+/// The wait Spotify asked for in the `Retry-After` header of a 429, when
+/// `err` is one and carries the header.
+fn rate_limit_retry_after(err: &anyhow::Error) -> Option<Duration> {
+    err.chain().find_map(|cause| {
+        let rspotify::ClientError::Http(http) = cause.downcast_ref::<rspotify::ClientError>()?
+        else {
+            return None;
+        };
+        let HttpError::StatusCode(response) = http.as_ref() else {
+            return None;
+        };
+        if response.status() != StatusCode::TOO_MANY_REQUESTS {
+            return None;
+        }
+        let seconds = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)?
+            .to_str()
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        Some(Duration::from_secs(seconds).min(MAX_RETRY_AFTER))
+    })
+}
+
 /// Spotify 429. Substring matching on the whole error chain used to treat any
 /// "429" (for example inside an id) as a rate limit.
 fn is_rate_limit(err: &impl ApiError) -> bool {
@@ -3255,13 +3288,14 @@ mod tests {
         is_no_active_device, is_rate_limit, is_transient_server_error,
         keep_playing_after_desktop_wake, move_seed_track_to_front, order_transfer_device_ids,
         paging_query, parse_current_playback_response, preferred_device_id,
-        process_spotify_api_response, rate_limit_backoff, should_launch_desktop_on_init,
-        should_nudge_desktop_on_init, should_select_device, should_wake_for_preferred,
-        top_tracks_time_range_param, transfer_playback_err_is_retryable, DesktopWakeTransferPolicy,
-        DeviceIdsAfterWake, HttpError, MAX_RETRY_AFTER,
+        process_spotify_api_response, rate_limit_backoff, rate_limit_retry_after,
+        should_launch_desktop_on_init, should_nudge_desktop_on_init, should_select_device,
+        should_wake_for_preferred, top_tracks_time_range_param, transfer_playback_err_is_retryable,
+        DesktopWakeTransferPolicy, DeviceIdsAfterWake, HttpError, MAX_RETRY_AFTER,
     };
     use crate::state::{Device, Track};
     use rspotify::model::{PlayableItem, TrackId};
+    use std::time::Duration;
 
     fn sample_track(id: &'static str, name: &str) -> Track {
         Track {
@@ -3373,6 +3407,37 @@ mod tests {
         rspotify::ClientError::Http(Box::new(HttpError::StatusCode(reqwest::Response::from(
             response,
         ))))
+    }
+
+    fn rate_limited(retry_after: Option<&str>) -> rspotify::ClientError {
+        let mut response = http::Response::builder().status(429);
+        if let Some(value) = retry_after {
+            response = response.header("retry-after", value);
+        }
+        rspotify::ClientError::Http(Box::new(HttpError::StatusCode(reqwest::Response::from(
+            response.body("").unwrap(),
+        ))))
+    }
+
+    #[test]
+    fn retry_after_is_read_from_a_rate_limit_response() {
+        let wait = |err: rspotify::ClientError| rate_limit_retry_after(&anyhow::Error::from(err));
+        assert_eq!(wait(rate_limited(Some("4"))), Some(Duration::from_secs(4)));
+        assert_eq!(
+            wait(rate_limited(Some(" 27 "))),
+            Some(Duration::from_secs(27))
+        );
+        // An absurd value cannot park a request for hours.
+        assert_eq!(wait(rate_limited(Some("86400"))), Some(MAX_RETRY_AFTER));
+        assert_eq!(wait(rate_limited(None)), None);
+        assert_eq!(wait(rate_limited(Some("soon"))), None);
+        assert_eq!(wait(status_error(404)), None, "only a 429 carries a wait");
+        // The header survives anyhow context layers.
+        let wrapped = anyhow::Error::from(rate_limited(Some("3"))).context("pause playback");
+        assert_eq!(
+            rate_limit_retry_after(&wrapped),
+            Some(Duration::from_secs(3))
+        );
     }
 
     #[test]

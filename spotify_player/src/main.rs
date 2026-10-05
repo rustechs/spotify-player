@@ -130,7 +130,7 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
     system_audio::start(state);
 
     // create a Spotify API client
-    let client = client::AppClient::new()
+    let client = client::AppClient::new(Some(&state.rate_limited_until))
         .await
         .context("construct app client")?;
     client

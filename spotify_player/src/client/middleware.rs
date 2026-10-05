@@ -11,6 +11,8 @@ use tokio::{
     time::Instant,
 };
 
+use crate::state::RateLimitDeadline;
+
 const GET_DEDUPLICATION_WINDOW: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug)]
@@ -73,6 +75,8 @@ struct RequestState {
 struct SpotifyApiRequestManager {
     state: Arc<Mutex<RequestState>>,
     max_retries: usize,
+    /// Where the end of the current rate limit is published for the UI.
+    deadline: Option<RateLimitDeadline>,
 }
 
 struct GetLeader {
@@ -97,6 +101,7 @@ impl SpotifyApiRequestManager {
         Self {
             state: Arc::new(Mutex::new(RequestState::default())),
             max_retries,
+            deadline: None,
         }
     }
 
@@ -169,6 +174,15 @@ impl SpotifyApiRequestManager {
         {
             state.retry_after_until = Some(retry_after_until);
         }
+        drop(state);
+
+        if let Some(deadline) = &self.deadline {
+            let until = retry_after_until.into_std();
+            let mut published = deadline.lock();
+            if published.is_none_or(|current| current < until) {
+                *published = Some(until);
+            }
+        }
     }
 
     async fn shared_result(
@@ -214,6 +228,12 @@ impl SpotifyApiMiddleware {
             api_base_url: Url::parse(api_base_url)?,
             requests: SpotifyApiRequestManager::new(max_retries),
         })
+    }
+
+    /// Publish the end of every rate limit this middleware meets to `deadline`.
+    pub(super) fn reporting_to(mut self, deadline: RateLimitDeadline) -> Self {
+        self.requests.deadline = Some(deadline);
+        self
     }
 
     /// Returns a normalized key for the given URL that guarantees consistent ordering of query parameters,
@@ -446,6 +466,25 @@ mod tests {
             HeaderValue::from_static("invalid"),
         );
         assert_eq!(SpotifyApiMiddleware::retry_after(&headers), None);
+    }
+
+    #[tokio::test]
+    async fn publishes_the_latest_rate_limit_deadline() {
+        let deadline = crate::state::RateLimitDeadline::default();
+        let mut requests = SpotifyApiRequestManager::new(2);
+        requests.deadline = Some(Arc::clone(&deadline));
+        let before = std::time::Instant::now();
+
+        requests.store_retry_after(Duration::from_secs(10)).await;
+        let first = deadline.lock().expect("a deadline after the first 429");
+        assert!(first >= before + Duration::from_secs(10));
+
+        // A shorter wait from a later response must not pull the deadline in.
+        requests.store_retry_after(Duration::from_secs(5)).await;
+        assert_eq!(*deadline.lock(), Some(first));
+
+        requests.store_retry_after(Duration::from_secs(20)).await;
+        assert!(deadline.lock().unwrap() > first);
     }
 
     #[tokio::test(start_paused = true)]

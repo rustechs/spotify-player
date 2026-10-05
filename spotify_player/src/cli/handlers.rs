@@ -180,7 +180,7 @@ fn try_connect_to_client(socket: &UdpSocket, configs: &config::Configs) -> Resul
 
             // create a Spotify API client
             let client = rt
-                .block_on(client::AppClient::new())
+                .block_on(client::AppClient::new(None))
                 .context("construct app client")?;
             rt.block_on(client.new_session(None, false))
                 .context("new session")?;
@@ -213,7 +213,7 @@ pub fn handle_cli_subcommand(cmd: &str, args: &ArgMatches) -> Result<()> {
     match cmd {
         "authenticate" => {
             // Force re-authentication of every Web API identity, followed by librespot.
-            let mut api_client = client::new_api_client()?;
+            let mut api_client = client::new_api_client(None)?;
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(crate::auth::prompt_for_user_token(&mut api_client, true))
                 .context("authenticate Spotify Web API client")?;

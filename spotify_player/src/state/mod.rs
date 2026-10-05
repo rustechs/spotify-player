@@ -22,6 +22,9 @@ pub use parking_lot::{Mutex, RwLock};
 /// Application's shared state
 pub type SharedState = Arc<State>;
 
+/// When Spotify's rate limit ends, as last reported by the Web API middleware.
+pub type RateLimitDeadline = Arc<Mutex<Option<std::time::Instant>>>;
+
 /// Application's state
 pub struct State {
     pub ui: Mutex<UIState>,
@@ -37,6 +40,15 @@ pub struct State {
     pub vis_bands: Option<Arc<Mutex<crate::vis::VisBands>>>,
 
     pub logs: Arc<Mutex<VecDeque<String>>>,
+
+    /// Written by the Web API middleware on every `429`, read by the UI.
+    pub rate_limited_until: RateLimitDeadline,
+}
+
+/// Whole seconds from `now` until `deadline`, rounded up; `None` once it has passed.
+fn seconds_until(deadline: Option<std::time::Instant>, now: std::time::Instant) -> Option<u64> {
+    let left = deadline?.checked_duration_since(now)?;
+    (!left.is_zero()).then(|| left.as_secs() + u64::from(left.subsec_nanos() > 0))
 }
 
 impl State {
@@ -64,7 +76,21 @@ impl State {
             },
 
             logs: log_buffer,
+            rate_limited_until: RateLimitDeadline::default(),
         }
+    }
+
+    /// Seconds until the Web API takes requests again, while Spotify's rate
+    /// limit is holding them back.
+    pub fn rate_limit_wait_secs(&self) -> Option<u64> {
+        seconds_until(*self.rate_limited_until.lock(), std::time::Instant::now())
+    }
+
+    pub fn push_rate_limit_toast(&self, message: impl Into<String>) {
+        if self.is_daemon {
+            return;
+        }
+        self.ui.lock().push_rate_limit_toast(message);
     }
 
     pub fn push_success_toast(&self, message: impl Into<String>) {
@@ -97,5 +123,31 @@ impl State {
     #[allow(dead_code)]
     pub fn should_use_custom_queue(&self) -> bool {
         self.is_streaming_enabled() && config::get_config().app_config.custom_queue
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::seconds_until;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn rate_limit_wait_counts_whole_seconds_up_and_ends_at_the_deadline() {
+        let now = Instant::now();
+        assert_eq!(seconds_until(None, now), None);
+        assert_eq!(
+            seconds_until(Some(now + Duration::from_secs(27)), now),
+            Some(27)
+        );
+        assert_eq!(
+            seconds_until(Some(now + Duration::from_millis(26_200)), now),
+            Some(27)
+        );
+        assert_eq!(
+            seconds_until(Some(now + Duration::from_millis(300)), now),
+            Some(1)
+        );
+        assert_eq!(seconds_until(Some(now), now), None);
+        assert_eq!(seconds_until(Some(now), now + Duration::from_secs(1)), None);
     }
 }

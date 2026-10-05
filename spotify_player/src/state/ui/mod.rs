@@ -103,6 +103,20 @@ impl UIState {
         self.push_error_toast_with_config(&config::get_config().app_config, message);
     }
 
+    /// Report that Spotify's rate limit rejected or delayed something.
+    /// `message` must start with [`RATE_LIMIT_TOAST_PREFIX`]: these notices
+    /// share one card, so a burst of rejected commands updates it rather than
+    /// stacking up.
+    pub fn push_rate_limit_toast(&mut self, message: impl Into<String>) {
+        let app_config = &config::get_config().app_config;
+        if !app_config.enable_toast {
+            return;
+        }
+        let timeout = std::time::Duration::from_secs(app_config.toast_success_timeout_secs);
+        self.toasts
+            .push_or_replace(Toast::error(message, timeout), RATE_LIMIT_TOAST_PREFIX);
+    }
+
     fn push_success_toast_with_config(
         &mut self,
         app_config: &config::AppConfig,
