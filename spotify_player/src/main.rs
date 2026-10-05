@@ -286,12 +286,14 @@ fn main() -> Result<()> {
         .get_one::<String>("cache-folder")
         .expect("cache-folder should have a default value")
         .into();
+    // The cache folder holds the Web API tokens and librespot credentials, so it
+    // is created private. A folder that already exists is the user's to manage.
+    utils::create_private_dir_all(&cache_folder)
+        .with_context(|| format!("create cache folder {}", cache_folder.display()))?;
     let cache_audio_folder = cache_folder.join("audio");
     if !cache_audio_folder.exists() {
         std::fs::create_dir_all(&cache_audio_folder)?;
     }
-    // The cache folder holds the Web API token and librespot credentials.
-    utils::restrict_permissions(&cache_folder);
     let cache_image_folder = cache_folder.join("image");
     if !cache_image_folder.exists() {
         std::fs::create_dir_all(&cache_image_folder)?;
@@ -330,6 +332,10 @@ fn main() -> Result<()> {
 
             init_logging(log_folder, log_buffer.clone())
                 .context("failed to initialize application's logging")?;
+
+            // Older versions left credential files with default permissions. Run
+            // once logging is up so a failure is recorded.
+            auth::restrict_cached_credentials(&config::get_config().cache_folder);
 
             // log the application's configurations
             tracing::info!("Configurations: {:?}", config::get_config());

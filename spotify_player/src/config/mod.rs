@@ -47,6 +47,37 @@ impl Configs {
     }
 }
 
+/// The `proxy` option. A proxy URL can embed `user:password@`, and the whole
+/// configuration is `Debug`-logged at startup, so `Debug` leaves the
+/// credentials out. Serialization keeps the value as written.
+#[derive(Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct ProxyUrl(String);
+
+impl std::fmt::Debug for ProxyUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&redact_url_credentials(&self.0), f)
+    }
+}
+
+/// `url` without its userinfo. A value that does not parse as a URL with a
+/// host is hidden entirely, since credentials cannot be told apart in it.
+fn redact_url_credentials(url: &str) -> String {
+    const HIDDEN: &str = "<redacted>";
+    match Url::parse(url) {
+        Ok(mut parsed) if parsed.has_host() => {
+            if parsed.username().is_empty() && parsed.password().is_none() {
+                return url.to_owned();
+            }
+            if parsed.set_password(None).is_err() || parsed.set_username("***").is_err() {
+                return HIDDEN.to_owned();
+            }
+            parsed.into()
+        }
+        _ => HIDDEN.to_owned(),
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, ConfigParse)]
 #[allow(clippy::struct_excessive_bools)]
 /// Application configurations
@@ -78,7 +109,7 @@ pub struct AppConfig {
     pub top_tracks_limit: usize,
 
     // session configs
-    pub proxy: Option<String>,
+    pub proxy: Option<ProxyUrl>,
     pub ap_port: Option<u16>,
 
     // duration configs
@@ -568,12 +599,28 @@ impl AppConfig {
         let proxy = self
             .proxy
             .as_ref()
-            .and_then(|proxy| match Url::parse(proxy) {
+            .and_then(|proxy| match Url::parse(&proxy.0) {
                 Err(err) => {
-                    tracing::warn!("failed to parse proxy url {proxy}: {err:#}");
+                    // The value itself stays out of the log: it can hold a password.
+                    tracing::warn!("failed to parse the configured proxy url: {err:#}");
                     None
                 }
-                Ok(url) => Some(url),
+                Ok(mut url) => {
+                    // `librespot` never authenticates to a proxy, yet it logs the
+                    // URL it is given, so the credentials must not reach it.
+                    if !url.username().is_empty() || url.password().is_some() {
+                        static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+                        WARN_ONCE.call_once(|| {
+                            tracing::warn!(
+                                "Credentials in the proxy url are not supported by the streaming client and are ignored"
+                            );
+                        });
+                        if url.set_username("").is_err() || url.set_password(None).is_err() {
+                            return None;
+                        }
+                    }
+                    Some(url)
+                }
             });
         SessionConfig {
             proxy,
@@ -649,4 +696,78 @@ pub fn apply_config_override(config: &mut AppConfig, key: &str, value: &str) -> 
     *config = config_value.try_into()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROXY: &str = "http://alice:hunter2@proxy.example:8080";
+
+    /// A config whose `proxy` was read the way `app.toml` is loaded.
+    fn config_with_proxy() -> AppConfig {
+        let mut config = AppConfig::default();
+        let file = format!("proxy = \"{PROXY}\"");
+        config
+            .parse(toml::from_str::<toml::Value>(&file).unwrap())
+            .unwrap();
+        config
+    }
+
+    #[test]
+    fn proxy_credentials_stay_out_of_debug_output() {
+        let debug = format!("{:?}", config_with_proxy());
+        assert!(!debug.contains("hunter2"), "{debug}");
+        assert!(!debug.contains("alice"), "{debug}");
+        assert!(debug.contains("proxy.example:8080"), "{debug}");
+    }
+
+    #[test]
+    fn proxy_value_survives_a_config_round_trip() {
+        let mut config = config_with_proxy();
+        // An override serializes the whole config to TOML and reads it back.
+        apply_config_override(&mut config, "ap_port", "443").unwrap();
+
+        let toml = toml::to_string(&config).unwrap();
+        assert!(toml.contains(PROXY), "{toml}");
+    }
+
+    #[test]
+    fn session_proxy_carries_no_credentials() {
+        let proxy = config_with_proxy().session_config().proxy;
+        assert_eq!(
+            proxy.expect("proxy is set").as_str(),
+            "http://proxy.example:8080/"
+        );
+
+        let mut plain = AppConfig::default();
+        apply_config_override(&mut plain, "proxy", "http://proxy.example:8080").unwrap();
+        assert_eq!(
+            plain.session_config().proxy.expect("proxy is set").as_str(),
+            "http://proxy.example:8080/"
+        );
+    }
+
+    #[test]
+    fn redact_url_credentials_hides_what_it_cannot_parse() {
+        assert_eq!(
+            redact_url_credentials("http://proxy.example:8080"),
+            "http://proxy.example:8080"
+        );
+        assert_eq!(
+            redact_url_credentials(PROXY),
+            "http://***@proxy.example:8080/"
+        );
+        // A user name alone can be an access token.
+        assert_eq!(
+            redact_url_credentials("socks5://token@10.0.0.1:1080"),
+            "socks5://***@10.0.0.1:1080"
+        );
+        // Without a scheme the parser takes `alice` for one and finds no host.
+        assert_eq!(
+            redact_url_credentials("alice:hunter2@proxy.example:8080"),
+            "<redacted>"
+        );
+        assert_eq!(redact_url_credentials("not a url"), "<redacted>");
+    }
 }

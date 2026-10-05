@@ -139,7 +139,7 @@ pub fn new_api_client() -> Result<WebApiClient> {
         scopes: scopes.clone(),
         ..Default::default()
     };
-    let primary_cache_file = format!("{id}_token.json");
+    let primary_cache_file = format!("{id}{}", auth::TOKEN_CACHE_SUFFIX);
 
     if id == auth::NCSPOT_CLIENT_ID {
         let config = build_config(&primary_cache_file);
@@ -167,7 +167,7 @@ pub fn new_api_client() -> Result<WebApiClient> {
         build_config(&primary_cache_file),
     );
 
-    let fallback_cache_file = format!("{}_token.json", auth::NCSPOT_CLIENT_ID);
+    let fallback_cache_file = format!("{}{}", auth::NCSPOT_CLIENT_ID, auth::TOKEN_CACHE_SUFFIX);
     let fallback_config = build_config(&fallback_cache_file);
     let fallback_middleware = SpotifyApiMiddleware::new(
         &fallback_config.api_base_url,
@@ -236,7 +236,6 @@ impl AppClient {
         auth::prompt_for_user_token(&mut api_client, false)
             .await
             .context("authenticate Spotify Web API client")?;
-        crate::utils::restrict_permissions(&configs.cache_folder.join("user_client_token.json"));
 
         Ok(Self {
             spotify: Arc::new(spotify::Spotify::new()),
@@ -585,9 +584,6 @@ impl AppClient {
 
         let session = self.auth_config.session();
         let creds = auth::get_creds(&self.auth_config, reauth, true).context("get credentials")?;
-        crate::utils::restrict_permissions(
-            &config::get_config().cache_folder.join("credentials.json"),
-        );
         self.spotify.set_session(session.clone()).await;
 
         #[allow(unused_mut)]
@@ -610,6 +606,13 @@ impl AppClient {
                 .await
                 .context("connect to a session")?;
         }
+        // Both connect paths above make `librespot` store its reusable
+        // credentials, which it creates with the default umask.
+        crate::utils::restrict_permissions(
+            &config::get_config()
+                .cache_folder
+                .join(auth::CREDENTIALS_FILE),
+        );
 
         tracing::info!("Used a new session for Spotify client.");
 

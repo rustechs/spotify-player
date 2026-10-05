@@ -15,6 +15,12 @@ pub const SPOTIFY_CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
 pub const NCSPOT_CLIENT_ID: &str = "d420a117a32841c2b3474932e49fb54b";
 pub const NCSPOT_REDIRECT_URI: &str = "http://127.0.0.1:8989/login";
 
+/// File-name suffix of a Web API token cache; there is one
+/// `{client_id}_token.json` per client id.
+pub const TOKEN_CACHE_SUFFIX: &str = "_token.json";
+/// File `librespot` keeps its reusable credentials in, inside the cache folder.
+pub const CREDENTIALS_FILE: &str = "credentials.json";
+
 const SPOTIFY_AUTHORIZE_URL: &str = "https://accounts.spotify.com/authorize";
 const SPOTIFY_TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 
@@ -89,6 +95,32 @@ impl AuthConfig {
     }
 }
 
+/// Make every credential file already cached in `cache_folder` owner-only.
+///
+/// Files written from now on are restricted where they are written; this
+/// covers what older versions left behind with default permissions, including
+/// token caches of client ids that are no longer configured.
+pub fn restrict_cached_credentials(cache_folder: &std::path::Path) {
+    let entries = match std::fs::read_dir(cache_folder) {
+        Ok(entries) => entries,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to list the cache folder {}: {err:#}",
+                cache_folder.display()
+            );
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let is_credential = name == CREDENTIALS_FILE || name.ends_with(TOKEN_CACHE_SUFFIX);
+        if is_credential && entry.path().is_file() {
+            crate::utils::restrict_permissions(&entry.path());
+        }
+    }
+}
+
 /// Get Spotify credentials to authenticate the application
 ///
 /// # Args
@@ -146,6 +178,18 @@ pub async fn prompt_for_user_token(
 }
 
 async fn prompt_for_web_api_token(
+    client: &mut crate::client::PkceWebApiClient,
+    force: bool,
+    client_name: &str,
+) -> Result<()> {
+    authorize_web_api_client(client, force, client_name).await?;
+    // Every successful path leaves a token cache on disk. It holds a long-lived
+    // refresh token and `rspotify` creates it with the default umask.
+    crate::utils::restrict_permissions(&client.get_config().cache_path);
+    Ok(())
+}
+
+async fn authorize_web_api_client(
     client: &mut crate::client::PkceWebApiClient,
     force: bool,
     client_name: &str,
@@ -432,6 +476,100 @@ fn random_url_safe(n: usize) -> String {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// The token cache that gets restricted is the file the client itself reads,
+    /// whatever it is named.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn authorized_web_api_token_cache_is_owner_only() {
+        use crate::utils::{test_mode, test_scratch_dir};
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = test_scratch_dir("token-cache");
+        let cache_path = dir.join("any-name.json");
+        // A cached token that is still valid, so no request is made.
+        rspotify::Token {
+            access_token: "access".to_string(),
+            expires_at: Some(chrono::Utc::now() + chrono::TimeDelta::hours(1)),
+            refresh_token: Some("refresh".to_string()),
+            ..Default::default()
+        }
+        .write_cache(&cache_path)
+        .unwrap();
+        std::fs::set_permissions(&cache_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let mut client =
+            crate::client::PkceWebApiClient::new(rspotify::AuthCodePkceSpotify::with_config(
+                rspotify::Credentials {
+                    id: "client-id".to_string(),
+                    secret: None,
+                },
+                rspotify::OAuth::default(),
+                rspotify::Config {
+                    token_cached: true,
+                    cache_path: cache_path.clone(),
+                    ..Default::default()
+                },
+            ));
+        prompt_for_web_api_token(&mut client, false, "test client")
+            .await
+            .unwrap();
+
+        assert_eq!(test_mode(&cache_path), 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `CREDENTIALS_FILE` has to track the name `librespot` picks.
+    #[test]
+    fn librespot_stores_credentials_in_the_credentials_file() {
+        let dir = crate::utils::test_scratch_dir("librespot-credentials");
+        let cache = Cache::new(Some(dir.clone()), None, None, None).unwrap();
+        cache.save_credentials(&Credentials::with_access_token("token"));
+
+        assert!(dir.join(CREDENTIALS_FILE).is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restrict_cached_credentials_touches_only_credential_files() {
+        use crate::utils::{test_mode, test_scratch_dir};
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = test_scratch_dir("cached-credentials");
+        let credential_files = [
+            CREDENTIALS_FILE.to_string(),
+            format!("{NCSPOT_CLIENT_ID}{TOKEN_CACHE_SUFFIX}"),
+            // The cache name used before one file per client id.
+            "user_client_token.json".to_string(),
+        ];
+        let other_files = ["Playlists_cache.json", "spotify-player.log"];
+        for name in credential_files
+            .iter()
+            .map(String::as_str)
+            .chain(other_files)
+        {
+            let path = dir.join(name);
+            std::fs::write(&path, "{}").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        // A folder whose name looks like a token cache must keep its search bit.
+        let lookalike = dir.join(format!("folder{TOKEN_CACHE_SUFFIX}"));
+        std::fs::create_dir(&lookalike).unwrap();
+        std::fs::set_permissions(&lookalike, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        restrict_cached_credentials(&dir);
+
+        for name in &credential_files {
+            assert_eq!(test_mode(&dir.join(name)), 0o600, "{name}");
+        }
+        for name in other_files {
+            assert_eq!(test_mode(&dir.join(name)), 0o644, "{name}");
+        }
+        assert_eq!(test_mode(&lookalike), 0o755);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn code_from_redirect_extracts_code() {

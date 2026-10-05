@@ -565,6 +565,8 @@ See [configuration documentation](https://github.com/aome510/spotify-player/blob
 
 By default, cache files are stored in `$HOME/.cache/spotify-player` (logs, credentials, audio cache, etc.). Change this with `-C <FOLDER_PATH>` or `--cache-folder <FOLDER_PATH>`.
 
+On Unix the cache folder is created private to your user (`0700`), and the cached credential files (`credentials.json` and the `*_token.json` files) are kept owner-only (`0600`). A folder that already exists keeps its permissions.
+
 ### Logging
 
 Logs are stored in `$APP_CACHE_FOLDER/spotify-player-*.log`. For debugging or issues, check the backtrace file in `$APP_CACHE_FOLDER/spotify-player-*.backtrace`.
