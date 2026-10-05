@@ -214,6 +214,9 @@ pub async fn new_connection(
                         // librespot defaults to 44100 Hz; adjust here if
                         // PlayerConfig::sample_rate is changed in the future.
                         44_100.0,
+                        config::get_config()
+                            .app_config
+                            .enable_audio_visualization_smoothing,
                     ))
                 } else {
                     real

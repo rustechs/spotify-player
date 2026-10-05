@@ -287,7 +287,7 @@ cargo install spotify_player --no-default-features
 
 Real-time audio visualization is displayed in the playback window as a frequency-band bar chart (128 bands spaced evenly in pitch, from 40 Hz on the left to 20 kHz on the right) with dB and Hz axis labels, a themed grid, the progress bar directly below the chart, and repeat/shuffle/volume/device spread across a full-width row under the bar while music is streamed locally via the integrated [librespot](https://github.com/librespot-org/librespot) player.
 
-Set `enable_audio_visualization` to `true` in your config to enable this feature. The bars are colored by amplitude using the active theme's `visualization` component style (`low`/`mid`/`high` colors); see [config docs](./docs/config.md).
+Set `enable_audio_visualization` to `true` in your config to enable this feature. Each bar is blended with its two neighbours for a calmer picture; set `enable_audio_visualization_smoothing` to `false` for sharper, more restless bars. The bars are colored by amplitude using the active theme's `visualization` component style (`low`/`mid`/`high` colors); see [config docs](./docs/config.md).
 
 With the `system-audio-visualization` feature (enabled by default in this fork on Linux), set `enable_system_audio_visualization` to `true` to also drive the bars from the PipeWire/Pulse default-sink monitor when playback is on an external Spotify Connect device (for example desktop Spotify playing local/lossless files). While a track is loaded, the visualization area stays reserved (including pause, where bars idle at zero); it is hidden only when there is no current track.
 

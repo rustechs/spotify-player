@@ -92,10 +92,15 @@ impl VisualizationSink {
     ///
     /// `sample_rate` should match the actual librespot audio format sample rate
     /// (44100 or 48000 Hz) so that hop-based decay timings are accurate.
-    pub fn new(inner: Box<dyn Sink>, bands: Arc<Mutex<VisBands>>, sample_rate: f32) -> Self {
+    pub fn new(
+        inner: Box<dyn Sink>,
+        bands: Arc<Mutex<VisBands>>,
+        sample_rate: f32,
+        smoothing: bool,
+    ) -> Self {
         Self {
             inner,
-            processor: BandProcessor::new(bands, sample_rate),
+            processor: BandProcessor::new(bands, sample_rate, smoothing),
         }
     }
 }

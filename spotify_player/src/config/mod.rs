@@ -151,6 +151,11 @@ pub struct AppConfig {
     #[cfg(feature = "streaming")]
     pub enable_audio_visualization: bool,
 
+    /// Blend each visualization band with its two neighbours. `false` draws
+    /// thinner, taller peaks and a more restless picture.
+    #[cfg(feature = "streaming")]
+    pub enable_audio_visualization_smoothing: bool,
+
     /// When true (and `enable_audio_visualization` is true), capture the
     /// PipeWire/Pulse default-sink monitor so the spectrum visualizer works
     /// while controlling an external Spotify Connect device.
@@ -470,6 +475,8 @@ impl Default for AppConfig {
 
             #[cfg(feature = "streaming")]
             enable_audio_visualization: false,
+            #[cfg(feature = "streaming")]
+            enable_audio_visualization_smoothing: true,
 
             #[cfg(feature = "system-audio-visualization")]
             enable_system_audio_visualization: false,

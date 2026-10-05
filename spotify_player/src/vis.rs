@@ -242,6 +242,8 @@ pub struct BandProcessor {
     /// Actual audio sample rate in Hz — used for precise hop-based decay
     /// calculation, since librespot / Pulse can run at 44100 or 48000 Hz.
     sample_rate: f32,
+    /// Whether each band is blended with its two neighbours.
+    smoothing: bool,
     new_bands: [f32; NUM_BANDS],
     smooth_scratch: [f32; NUM_BANDS],
 }
@@ -251,7 +253,8 @@ impl BandProcessor {
     ///
     /// `sample_rate` should match the PCM source (44100 or 48000 Hz): it sets
     /// where each band reads the spectrum and how fast the bars decay.
-    pub fn new(bands: Arc<Mutex<VisBands>>, sample_rate: f32) -> Self {
+    /// `smoothing` is the `enable_audio_visualization_smoothing` setting.
+    pub fn new(bands: Arc<Mutex<VisBands>>, sample_rate: f32, smoothing: bool) -> Self {
         let layout = (0..NUM_BANDS)
             .map(|band| {
                 let (lo, hi) = (band_edge_hz(band), band_edge_hz(band + 1));
@@ -274,6 +277,7 @@ impl BandProcessor {
             long: Spectrum::new(LONG_WINDOW),
             layout,
             sample_rate,
+            smoothing,
             new_bands: [0.0f32; NUM_BANDS],
             smooth_scratch: [0.0f32; NUM_BANDS],
         }
@@ -341,7 +345,9 @@ impl BandProcessor {
             }
             *out = level;
         }
-        smooth_bands(&mut self.new_bands, &mut self.smooth_scratch);
+        if self.smoothing {
+            smooth_bands(&mut self.new_bands, &mut self.smooth_scratch);
+        }
 
         // Apply wall-clock decay since the last hop, then rise to any louder value.
         // Use self.sample_rate for precision (may be 44100 or 48000 Hz).
@@ -459,7 +465,12 @@ mod tests {
     /// The fresh bands of every hop over `pcm`, after a pre-roll of silence so
     /// that no hop reads a zero-padded window.
     fn frames(rate: f32, pcm: &[f32]) -> Vec<[f32; NUM_BANDS]> {
-        let mut processor = BandProcessor::new(Arc::new(Mutex::new(VisBands::new())), rate);
+        frames_with(rate, pcm, true)
+    }
+
+    fn frames_with(rate: f32, pcm: &[f32], smoothing: bool) -> Vec<[f32; NUM_BANDS]> {
+        let mut processor =
+            BandProcessor::new(Arc::new(Mutex::new(VisBands::new())), rate, smoothing);
         processor.push_mono_samples(vec![0.0; LONG_WINDOW]);
         pcm.as_chunks::<HOP_SIZE>()
             .0
@@ -670,9 +681,24 @@ mod tests {
     }
 
     #[test]
+    fn smoothing_spreads_a_lone_note_over_its_neighbours() {
+        // At 8 kHz a band is far wider than a tone's main lobe, so the tone
+        // sits in one band, or two when it straddles an edge.
+        let pcm = tone(48_000.0, 8_000.0, 0.5, 0.2);
+        let lit = |smoothing: bool| {
+            let all = frames_with(48_000.0, &pcm, smoothing);
+            let frame = all.last().unwrap();
+            let peak = frame.iter().copied().fold(0.0, f32::max);
+            frame.iter().filter(|&&level| level >= 0.3 * peak).count()
+        };
+        assert!(lit(false) <= 2, "sharp: {} bands", lit(false));
+        assert!(lit(true) >= 3, "smooth: {} bands", lit(true));
+    }
+
+    #[test]
     fn bars_appear_with_the_first_hop_and_silence_stays_flat() {
         let bands = Arc::new(Mutex::new(VisBands::new()));
-        let mut processor = BandProcessor::new(Arc::clone(&bands), 48_000.0);
+        let mut processor = BandProcessor::new(Arc::clone(&bands), 48_000.0, true);
         processor.push_mono_samples(vec![0.0; HOP_SIZE - 1]);
         assert!(!bands.lock().is_active, "less than one hop of samples");
         processor.push_mono_samples(vec![0.0; LONG_WINDOW]);
@@ -687,7 +713,8 @@ mod tests {
 
     #[test]
     fn history_stays_one_long_window_deep() {
-        let mut processor = BandProcessor::new(Arc::new(Mutex::new(VisBands::new())), 48_000.0);
+        let mut processor =
+            BandProcessor::new(Arc::new(Mutex::new(VisBands::new())), 48_000.0, true);
         for _ in 0..40 {
             processor.push_mono_samples(vec![0.0; 480]);
             assert!(processor.analysed <= LONG_WINDOW);

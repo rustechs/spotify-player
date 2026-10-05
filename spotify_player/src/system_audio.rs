@@ -46,10 +46,11 @@ pub fn start(state: &SharedState) {
         return;
     };
     let source = configs.app_config.system_audio_source.clone();
+    let smoothing = configs.app_config.enable_audio_visualization_smoothing;
 
     if let Err(err) = std::thread::Builder::new()
         .name("system-audio-vis".to_string())
-        .spawn(move || capture_loop(&bands, &source))
+        .spawn(move || capture_loop(&bands, &source, smoothing))
     {
         tracing::error!("Failed to spawn system-audio visualization thread: {err:#}");
     } else {
@@ -90,8 +91,8 @@ fn next_retry_delay(current: Duration) -> Duration {
     (current * 2).min(MAX_RETRY_DELAY)
 }
 
-fn capture_loop(bands: &Arc<Mutex<VisBands>>, source_cfg: &str) {
-    let mut processor = BandProcessor::new(Arc::clone(bands), CAPTURE_RATE as f32);
+fn capture_loop(bands: &Arc<Mutex<VisBands>>, source_cfg: &str, smoothing: bool) {
+    let mut processor = BandProcessor::new(Arc::clone(bands), CAPTURE_RATE as f32, smoothing);
     let mut simple: Option<Simple> = None;
     let mut current_source: Option<String> = None;
     let mut was_capturing = false;
