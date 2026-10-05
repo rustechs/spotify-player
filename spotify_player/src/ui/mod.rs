@@ -34,6 +34,8 @@ pub mod single_line_input;
 pub mod streaming;
 mod toast;
 pub mod utils;
+#[cfg(all(test, feature = "streaming"))]
+mod vis_proto_harness;
 
 /// Run the application UI
 pub fn run(state: &SharedState, mut terminal: Terminal) -> Result<()> {

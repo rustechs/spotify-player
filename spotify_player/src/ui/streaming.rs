@@ -1,8 +1,8 @@
 use crate::config::Theme;
 use crate::state::SharedState;
 use crate::vis::{
-    db_to_norm, decay_for_elapsed, freq_to_x_fraction, peak_decay_for_elapsed, BandProcessor,
-    VisBands,
+    db_to_norm, decay_for_elapsed, freq_to_x_fraction, peak_decay_for_elapsed, AxisScale,
+    BandProcessor, VisBands,
 };
 use librespot_playback::{
     audio_backend::{Sink, SinkResult},
@@ -180,8 +180,8 @@ fn format_db_label(db: i32) -> String {
     }
 }
 
-fn freq_tick_x(plot_rect: Rect, freq_hz: f32, sample_rate: f32) -> u16 {
-    let fraction = freq_to_x_fraction(freq_hz, sample_rate);
+fn freq_tick_x(plot_rect: Rect, freq_hz: f32, sample_rate: f32, axis: AxisScale) -> u16 {
+    let fraction = freq_to_x_fraction(freq_hz, sample_rate, axis);
     plot_rect.x + (fraction * f32::from(plot_rect.width.saturating_sub(1))).round() as u16
 }
 
@@ -246,6 +246,7 @@ fn render_grid_lines(
     plot_rect: Rect,
     max_val: u64,
     sample_rate: f32,
+    axis: AxisScale,
     style: Style,
     bars: &BarCoverage,
 ) {
@@ -264,7 +265,7 @@ fn render_grid_lines(
     }
 
     for freq in FREQ_TICKS_HZ {
-        let x = freq_tick_x(plot_rect, freq, sample_rate);
+        let x = freq_tick_x(plot_rect, freq, sample_rate, axis);
         if x <= plot_rect.x || x >= plot_rect.right() {
             continue;
         }
@@ -310,13 +311,14 @@ fn render_x_axis_labels(
     chart_rect: Rect,
     hz_margin: Rect,
     sample_rate: f32,
+    axis: AxisScale,
     style: Style,
 ) {
     let buf = frame.buffer_mut();
     let label_y = chart_rect.bottom().saturating_sub(1);
 
     for freq in FREQ_TICKS_HZ {
-        let x = freq_tick_x(plot_rect, freq, sample_rate);
+        let x = freq_tick_x(plot_rect, freq, sample_rate, axis);
         let label = format_freq_hz(freq);
         let label_x = x.saturating_sub(label.len() as u16 / 2);
         let axis_cap_x = chart_rect.right().saturating_sub(1);
@@ -372,6 +374,7 @@ pub fn render_audio_visualization(
 
     let guard = vis_lock.lock();
     let sample_rate = guard.sample_rate;
+    let axis = guard.axis;
     let intro_level = guard.intro_level();
     let mut values = if should_show_viz_bars(&guard, playback_is_playing) {
         let display_decay = decay_for_elapsed(guard.updated_at.elapsed());
@@ -461,6 +464,7 @@ pub fn render_audio_visualization(
         plot_rect,
         max_val,
         sample_rate,
+        axis,
         axis_style,
         &coverage,
     );
@@ -471,6 +475,7 @@ pub fn render_audio_visualization(
         chart_rect,
         hz_margin,
         sample_rate,
+        axis,
         axis_style,
     );
 }
