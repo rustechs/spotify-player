@@ -6,6 +6,7 @@ const DEFAULT_CACHE_FOLDER: &str = ".cache/spotify-player";
 const APP_CONFIG_FILE: &str = "app.toml";
 const THEME_CONFIG_FILE: &str = "theme.toml";
 const KEYMAP_CONFIG_FILE: &str = "keymap.toml";
+pub(crate) const DEFAULT_NCSPOT_ONLY_GET_ENDPOINTS: &[&str] = &["me/playlists", "playlists/"];
 
 use anyhow::{anyhow, Result};
 use config_parser2::{config_parser_impl, ConfigParse, ConfigParser};
@@ -46,6 +47,37 @@ impl Configs {
     }
 }
 
+/// The `proxy` option. A proxy URL can embed `user:password@`, and the whole
+/// configuration is `Debug`-logged at startup, so `Debug` leaves the
+/// credentials out. Serialization keeps the value as written.
+#[derive(Deserialize, Serialize)]
+#[serde(transparent)]
+pub struct ProxyUrl(String);
+
+impl std::fmt::Debug for ProxyUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&redact_url_credentials(&self.0), f)
+    }
+}
+
+/// `url` without its userinfo. A value that does not parse as a URL with a
+/// host is hidden entirely, since credentials cannot be told apart in it.
+fn redact_url_credentials(url: &str) -> String {
+    const HIDDEN: &str = "<redacted>";
+    match Url::parse(url) {
+        Ok(mut parsed) if parsed.has_host() => {
+            if parsed.username().is_empty() && parsed.password().is_none() {
+                return url.to_owned();
+            }
+            if parsed.set_password(None).is_err() || parsed.set_username("***").is_err() {
+                return HIDDEN.to_owned();
+            }
+            parsed.into()
+        }
+        _ => HIDDEN.to_owned(),
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, ConfigParse)]
 #[allow(clippy::struct_excessive_bools)]
 /// Application configurations
@@ -53,6 +85,7 @@ pub struct AppConfig {
     pub theme: String,
     pub client_id: String,
     pub client_id_command: Option<Command>,
+    pub ncspot_only_get_endpoints: Vec<String>,
 
     pub client_port: u16,
 
@@ -73,14 +106,18 @@ pub struct AppConfig {
     pub notify_transient: bool,
 
     pub tracks_playback_limit: usize,
+    pub top_tracks_limit: usize,
 
     // session configs
-    pub proxy: Option<String>,
+    pub proxy: Option<ProxyUrl>,
     pub ap_port: Option<u16>,
 
     // duration configs
     pub app_refresh_duration_in_ms: u64,
     pub playback_refresh_duration_in_ms: u64,
+
+    // Spotify Web API rate-limit retries
+    pub api_rate_limit_retries: usize,
 
     pub page_size_in_rows: usize,
 
@@ -135,9 +172,8 @@ pub struct AppConfig {
     /// Especially useful with `enable_streaming = "Never"`.
     pub preferred_device: Option<String>,
 
-    /// Linux: launch/nudge the official desktop Spotify client on first session
-    /// (and playing reconnect) when preferred is missing from Connect or listed
-    /// but idle/paused (e.g. tray after autostart). Paused reconnect skips wake.
+    /// Linux: wake the official desktop client so Connect can use it as
+    /// `preferred_device`; see `DesktopSpotifyConfig`.
     pub desktop_spotify: DesktopSpotifyConfig,
 
     pub device: DeviceConfig,
@@ -244,47 +280,27 @@ pub struct DeviceConfig {
 
 #[derive(Debug, Deserialize, Serialize, ConfigParse, Clone)]
 #[serde(default)]
-/// Linux helpers for waking the official Spotify desktop Connect endpoint.
+/// Linux: launch/nudge the official desktop client so Connect can use it as
+/// `preferred_device`. The full decision table is in `docs/config.md`
+/// ("Desktop Spotify wake").
 pub struct DesktopSpotifyConfig {
-    /// When true, start Spotify if needed and MPRIS-nudge it during first-session
-    /// playback init (and via `spotify_player wake-desktop`, or when restoring a
-    /// playing session) when `preferred_device` is missing from Connect or listed
-    /// but not actively playing (or when no devices are listed if
-    /// `preferred_device` is unset). A paused mid-session reconnect skips that
-    /// nudge. If MPRIS is already Playing and Connect lists `preferred_device`,
-    /// first-session init still transfers to that device with keep-playing and never to
-    /// another speaker. If Connect has no current playback, the TUI still shows
-    /// the MPRIS track (title/artists/album/progress) so the window is not empty
-    /// while the desktop client is playing. Connect often reports volume 0% for
-    /// that client; MPRIS volume is used instead.
+    /// Run the wake (also required for `spotify_player wake-desktop`).
     pub enable: bool,
-    /// Executable used to launch the desktop client (`spotify`, absolute path, etc.).
+    /// Desktop client executable (`spotify`, an absolute path, etc.).
     pub command: String,
-    /// Extra args passed to `command` on launch.
+    /// Extra arguments passed to `command` on launch.
     pub args: Vec<String>,
-    /// MPRIS D-Bus well-known name for the desktop client.
+    /// MPRIS D-Bus well-known name of the desktop client.
     pub mpris_dest: String,
-    /// Optional URI for `OpenUri` when there is no loaded context
-    /// (`spotify:track:…` or `https://open.spotify.com/…`). If unset, recently
-    /// played is tried, then bare `Play`.
+    /// `OpenUri` target for the registration nudge; recently played, then a
+    /// bare `Play`, when unset.
     pub nudge_uri: Option<String>,
-    /// Pause immediately after the wake nudge so Connect can see the device
-    /// without leaving audio playing. The Play/OpenUri session is silenced
-    /// by muting Spotify's local Pulse/PipeWire sink-inputs so registration
-    /// is inaudible. MPRIS volume is left unchanged (zeroing it can stick
-    /// the stream at 0%). Mute is held until MPRIS reports paused (retries,
-    /// then a short background hold); inputs are unmuted after pause, or
-    /// after a timeout so mute cannot stick forever.
-    /// Defaults to `true`; play only after an explicit CLI/TUI command. Set
-    /// `false` to hear the automatically started playback.
+    /// Silence and pause the registration `Play` so the wake is inaudible.
     pub pause_after_nudge: bool,
-    /// Hide the official client to the system tray after launch or nudge (and
-    /// again after Connect transfer if the window remaps). Linux Spotify ignores
-    /// its `--minimized` flag; with Spotify's own "Minimize to the tray" setting
-    /// (`ui.minimize_to_tray`), closing the window parks it in the tray via
-    /// `xdotool`. Falls back to taskbar minimize when that pref is off.
+    /// Hide the client window to the system tray after launch, nudge and
+    /// transfer (needs `xdotool`; enables Spotify's `ui.minimize_to_tray`).
     pub start_minimized: bool,
-    /// How long to wait for MPRIS after launching Spotify.
+    /// Max wait for MPRIS after launching the client.
     pub ready_timeout_secs: u64,
 }
 
@@ -363,7 +379,7 @@ impl Command {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            theme: "dracula".to_owned(),
+            theme: "default".to_owned(),
             // Use ncspot's client ID as a fallback for user-provided client ID
             //
             // Most of the time, using ncspot's client ID is better than user-provided one
@@ -373,6 +389,10 @@ impl Default for AppConfig {
             // [spotify API changes]: https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api
             client_id: NCSPOT_CLIENT_ID.to_string(),
             client_id_command: None,
+            ncspot_only_get_endpoints: DEFAULT_NCSPOT_ONLY_GET_ENDPOINTS
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
 
             client_port: 8080,
 
@@ -381,6 +401,7 @@ impl Default for AppConfig {
             log_folder: None,
 
             tracks_playback_limit: 50,
+            top_tracks_limit: 100,
 
             playback_format: String::from(
                 "{status} {track} • {artists} {liked}\n{album} • {genres}",
@@ -409,6 +430,7 @@ impl Default for AppConfig {
             app_refresh_duration_in_ms: 32,
             // Event-driven by default; polling burns Web API quota and can 429-wedge the TUI.
             playback_refresh_duration_in_ms: 0,
+            api_rate_limit_retries: 2,
 
             page_size_in_rows: 20,
 
@@ -474,7 +496,7 @@ impl Default for AppConfig {
             sort_artist_albums_by_type: false,
 
             volume_scroll_step: 5,
-            enable_mouse_scroll_volume: true,
+            enable_mouse_scroll_volume: false,
 
             custom_queue: true,
 
@@ -577,12 +599,28 @@ impl AppConfig {
         let proxy = self
             .proxy
             .as_ref()
-            .and_then(|proxy| match Url::parse(proxy) {
+            .and_then(|proxy| match Url::parse(&proxy.0) {
                 Err(err) => {
-                    tracing::warn!("failed to parse proxy url {proxy}: {err:#}");
+                    // The value itself stays out of the log: it can hold a password.
+                    tracing::warn!("failed to parse the configured proxy url: {err:#}");
                     None
                 }
-                Ok(url) => Some(url),
+                Ok(mut url) => {
+                    // `librespot` never authenticates to a proxy, yet it logs the
+                    // URL it is given, so the credentials must not reach it.
+                    if !url.username().is_empty() || url.password().is_some() {
+                        static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+                        WARN_ONCE.call_once(|| {
+                            tracing::warn!(
+                                "Credentials in the proxy url are not supported by the streaming client and are ignored"
+                            );
+                        });
+                        if url.set_username("").is_err() || url.set_password(None).is_err() {
+                            return None;
+                        }
+                    }
+                    Some(url)
+                }
             });
         SessionConfig {
             proxy,
@@ -658,4 +696,78 @@ pub fn apply_config_override(config: &mut AppConfig, key: &str, value: &str) -> 
     *config = config_value.try_into()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROXY: &str = "http://alice:hunter2@proxy.example:8080";
+
+    /// A config whose `proxy` was read the way `app.toml` is loaded.
+    fn config_with_proxy() -> AppConfig {
+        let mut config = AppConfig::default();
+        let file = format!("proxy = \"{PROXY}\"");
+        config
+            .parse(toml::from_str::<toml::Value>(&file).unwrap())
+            .unwrap();
+        config
+    }
+
+    #[test]
+    fn proxy_credentials_stay_out_of_debug_output() {
+        let debug = format!("{:?}", config_with_proxy());
+        assert!(!debug.contains("hunter2"), "{debug}");
+        assert!(!debug.contains("alice"), "{debug}");
+        assert!(debug.contains("proxy.example:8080"), "{debug}");
+    }
+
+    #[test]
+    fn proxy_value_survives_a_config_round_trip() {
+        let mut config = config_with_proxy();
+        // An override serializes the whole config to TOML and reads it back.
+        apply_config_override(&mut config, "ap_port", "443").unwrap();
+
+        let toml = toml::to_string(&config).unwrap();
+        assert!(toml.contains(PROXY), "{toml}");
+    }
+
+    #[test]
+    fn session_proxy_carries_no_credentials() {
+        let proxy = config_with_proxy().session_config().proxy;
+        assert_eq!(
+            proxy.expect("proxy is set").as_str(),
+            "http://proxy.example:8080/"
+        );
+
+        let mut plain = AppConfig::default();
+        apply_config_override(&mut plain, "proxy", "http://proxy.example:8080").unwrap();
+        assert_eq!(
+            plain.session_config().proxy.expect("proxy is set").as_str(),
+            "http://proxy.example:8080/"
+        );
+    }
+
+    #[test]
+    fn redact_url_credentials_hides_what_it_cannot_parse() {
+        assert_eq!(
+            redact_url_credentials("http://proxy.example:8080"),
+            "http://proxy.example:8080"
+        );
+        assert_eq!(
+            redact_url_credentials(PROXY),
+            "http://***@proxy.example:8080/"
+        );
+        // A user name alone can be an access token.
+        assert_eq!(
+            redact_url_credentials("socks5://token@10.0.0.1:1080"),
+            "socks5://***@10.0.0.1:1080"
+        );
+        // Without a scheme the parser takes `alice` for one and finds no host.
+        assert_eq!(
+            redact_url_credentials("alice:hunter2@proxy.example:8080"),
+            "<redacted>"
+        );
+        assert_eq!(redact_url_credentials("not a url"), "<redacted>");
+    }
 }

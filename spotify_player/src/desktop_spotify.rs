@@ -38,18 +38,27 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use parking_lot::Mutex;
 use rspotify::model::{
     Actions, CurrentPlaybackContext, CurrentlyPlayingType, Device, DeviceType, FullTrack, Image,
     PlayableItem, RepeatState, SimplifiedAlbum, SimplifiedArtist, TrackId, Type,
 };
 
 use crate::config::DesktopSpotifyConfig;
+use dbus::arg::PropMap;
 
-const DBUS_DEST_BUS: &str = "org.freedesktop.DBus";
-const DBUS_OBJECT: &str = "/org/freedesktop/DBus";
 const MPRIS_OBJECT: &str = "/org/mpris/MediaPlayer2";
 const MPRIS_PLAYER: &str = "org.mpris.MediaPlayer2.Player";
 static EARLY_LAUNCH: AtomicBool = AtomicBool::new(false);
+/// The single background watcher that re-hides Spotify's window (see `start_hide_watcher`).
+static HIDE_WATCHER: Mutex<Option<HideWatcher>> = Mutex::new(None);
+const HIDE_WATCH_POLL: Duration = Duration::from_millis(250);
+/// MPRIS reads go over the session bus; cache them briefly so the playback
+/// poll and `update_playback` bursts do not each make a handful of round trips.
+const MPRIS_CACHE_TTL: Duration = Duration::from_secs(1);
+static MPRIS_PLAYBACK_CACHE: Mutex<Option<(Instant, Option<CurrentPlaybackContext>)>> =
+    Mutex::new(None);
+static MPRIS_VOLUME_CACHE: Mutex<Option<(Instant, Option<u32>)>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WakeOutcome {
@@ -67,9 +76,27 @@ pub enum NudgePolicy {
     RegisterConnect,
 }
 
+/// Run D-Bus / `xdotool` / `pactl` process spawns off the async runtime.
+async fn run_blocking<T: Send + 'static>(
+    what: &'static str,
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .with_context(|| format!("{what} task panicked"))
+}
+
 /// Whether waking Spotify will need to start a new desktop process.
-pub fn will_launch(config: &DesktopSpotifyConfig) -> Result<bool> {
-    Ok(!mpris_name_has_owner(&config.mpris_dest)? && !spotify_process_running())
+pub async fn will_launch(config: &DesktopSpotifyConfig) -> Result<bool> {
+    let config = config.clone();
+    run_blocking("desktop Spotify probe", move || {
+        will_launch_blocking(&config)
+    })
+    .await?
+}
+
+fn will_launch_blocking(config: &DesktopSpotifyConfig) -> Result<bool> {
+    Ok(!bus::name_has_owner(&config.mpris_dest)? && !spotify_process_running())
 }
 
 /// Start Spotify immediately, before playback/device Web API initialization.
@@ -84,15 +111,13 @@ pub fn launch_early_if_needed(config: &DesktopSpotifyConfig) -> Result<bool> {
     if EARLY_LAUNCH.load(Ordering::Acquire) {
         return Ok(true);
     }
-    if !will_launch(config)? {
+    if !will_launch_blocking(config)? {
         return Ok(false);
     }
 
     if config.start_minimized {
         ensure_minimize_to_tray_pref();
-        tokio::spawn(async {
-            keep_hiding(Duration::from_secs(45), false).await;
-        });
+        start_hide_watcher(Duration::from_secs(45), false);
     }
     launch(config)?;
     EARLY_LAUNCH.store(true, Ordering::Release);
@@ -110,7 +135,32 @@ pub fn mpris_current_track_uri(dest: &str) -> Option<String> {
 
 /// Ensure the desktop Spotify client is running and has an active playback
 /// session so it appears as a Connect device.
+///
+/// Everything in here blocks (D-Bus round trips, `xdotool`, `pactl`) and sleeps,
+/// so the work runs on a blocking thread, never on a runtime worker.
 pub async fn ensure_awake(
+    config: &DesktopSpotifyConfig,
+    nudge_uri: Option<&str>,
+    nudge_policy: NudgePolicy,
+) -> Result<WakeOutcome> {
+    let config = config.clone();
+    let nudge_uri = nudge_uri.map(str::to_owned);
+    run_blocking("desktop Spotify wake", move || {
+        ensure_awake_blocking(&config, nudge_uri.as_deref(), nudge_policy)
+    })
+    .await?
+}
+
+/// Stops the taskbar-minimize watcher on every exit path of the wake, including errors.
+struct StopHideWatcherOnDrop;
+
+impl Drop for StopHideWatcherOnDrop {
+    fn drop(&mut self) {
+        stop_hide_watcher();
+    }
+}
+
+fn ensure_awake_blocking(
     config: &DesktopSpotifyConfig,
     nudge_uri: Option<&str>,
     nudge_policy: NudgePolicy,
@@ -126,24 +176,22 @@ pub async fn ensure_awake(
     let launched_early = EARLY_LAUNCH.swap(false, Ordering::AcqRel);
     // Re-check even after an early launch: if that process exited during auth,
     // relaunch here instead of waiting the full MPRIS timeout.
-    let needs_launch = will_launch(config)?;
+    let needs_launch = will_launch_blocking(config)?;
     let launched = launched_early || needs_launch;
 
     // Spotify's `--minimized` flag is Windows-only. Closing the window too early
     // (before the tray icon is up) can quit the client, so: taskbar-minimize
-    // while waiting for MPRIS, then close-to-tray once MPRIS is ready.
-    if launched && config.start_minimized {
+    // while waiting for MPRIS, then close-to-tray once MPRIS is ready. The pref
+    // is only edited before this process starts Spotify itself.
+    if needs_launch && config.start_minimized {
         ensure_minimize_to_tray_pref();
     }
-    let flash_watch = if launched && config.start_minimized {
-        Some(tokio::spawn(async {
-            keep_hiding(Duration::from_secs(45), false).await;
-        }))
-    } else {
-        None
-    };
+    if launched && config.start_minimized {
+        start_hide_watcher(Duration::from_secs(45), false);
+    }
+    let _stop_watcher = StopHideWatcherOnDrop;
 
-    if !mpris_name_has_owner(dest)? {
+    if !bus::name_has_owner(dest)? {
         if needs_launch {
             tracing::info!(
                 "Preferred device unavailable; automatically starting Spotify desktop via `{}`",
@@ -156,11 +204,9 @@ pub async fn ensure_awake(
                 config.ready_timeout_secs
             );
         }
-        wait_for_mpris(config, Duration::from_secs(config.ready_timeout_secs)).await?;
+        wait_for_mpris(config, Duration::from_secs(config.ready_timeout_secs))?;
     }
-    if let Some(watch) = flash_watch {
-        watch.abort();
-    }
+    stop_hide_watcher();
 
     let connect_nudge_uri;
     let nudge_uri = match nudge_policy {
@@ -172,11 +218,12 @@ pub async fn ensure_awake(
         NudgePolicy::SkipIfPlaying => nudge_uri,
     };
 
-    if mpris_is_playing(dest) && nudge_policy == NudgePolicy::SkipIfPlaying {
+    let playing = mpris_is_playing_blocking(dest);
+    if playing && nudge_policy == NudgePolicy::SkipIfPlaying {
         tracing::info!(
             "Desktop Spotify is already playing (MPRIS); skipping wake nudge so local playback is left alone"
         );
-    } else if mpris_is_playing(dest) && nudge_policy == NudgePolicy::RegisterConnect {
+    } else if playing && nudge_policy == NudgePolicy::RegisterConnect {
         tracing::info!(
             "Desktop Spotify is playing locally but Connect is missing the preferred device; registering without pausing playback"
         );
@@ -190,7 +237,7 @@ pub async fn ensure_awake(
         // Prefer tray hide once MPRIS (and usually the tray icon) is up.
         // Also run when we only nudged an already-running instance — Connect
         // transfer / OpenUri can map a window that was parked in the tray.
-        hide_window().await
+        hide_window_blocking()
     } else {
         false
     };
@@ -224,13 +271,13 @@ fn resolve_command(command: &str) -> Result<String> {
         .with_context(|| format!("desktop Spotify command `{command}` not found on PATH"))
 }
 
-async fn wait_for_mpris(config: &DesktopSpotifyConfig, timeout: Duration) -> Result<()> {
+fn wait_for_mpris(config: &DesktopSpotifyConfig, timeout: Duration) -> Result<()> {
     let dest = config.mpris_dest.as_str();
     let start = Instant::now();
     let poll = Duration::from_millis(400);
     let mut relaunched = false;
     loop {
-        let mpris_ready = mpris_name_has_owner(dest)?;
+        let mpris_ready = bus::name_has_owner(dest)?;
         if mpris_ready {
             tracing::info!("Desktop Spotify MPRIS ready ({dest})");
             return Ok(());
@@ -246,7 +293,7 @@ async fn wait_for_mpris(config: &DesktopSpotifyConfig, timeout: Duration) -> Res
         if start.elapsed() >= timeout {
             anyhow::bail!("timed out after {timeout:?} waiting for desktop Spotify MPRIS ({dest})");
         }
-        tokio::time::sleep(poll).await;
+        thread::sleep(poll);
     }
 }
 
@@ -265,6 +312,12 @@ fn should_relaunch_for_mpris(
 /// alive and parks it in the `StatusNotifier` tray. Callers repeat this after a
 /// Connect transfer, which can raise the window again.
 pub async fn hide_window() -> bool {
+    run_blocking("desktop Spotify hide", hide_window_blocking)
+        .await
+        .unwrap_or(false)
+}
+
+fn hide_window_blocking() -> bool {
     if which::which("xdotool").is_err() {
         tracing::warn!("`xdotool` is unavailable; cannot hide the Spotify window");
         return false;
@@ -317,22 +370,46 @@ pub async fn hide_window() -> bool {
             tracing::warn!("No Spotify window found to hide");
             return false;
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        thread::sleep(Duration::from_millis(200));
     }
 }
 
-/// Poll and hide Spotify whenever a real UI window maps.
+struct HideWatcher {
+    stop: Arc<AtomicBool>,
+}
+
+/// Start (or replace) the single background watcher that hides Spotify's
+/// window whenever a real UI window maps, for at most `max`.
 ///
+/// Only one watcher runs at a time: an early launch followed by `ensure_awake`
+/// used to leave two loops re-minimizing a window the user had just opened.
 /// `prefer_tray` selects close-to-tray (`windowclose`) vs taskbar minimize.
-async fn keep_hiding(max: Duration, prefer_tray: bool) {
+fn start_hide_watcher(max: Duration, prefer_tray: bool) {
     if which::which("xdotool").is_err() {
         return;
     }
-    let to_tray = prefer_tray && minimize_to_tray_pref_enabled();
-    let deadline = Instant::now() + max;
-    while Instant::now() < deadline {
-        let _ = hide_visible_once(to_tray);
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    stop_hide_watcher();
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    let spawned = thread::Builder::new()
+        .name("spotify-hide-watch".to_string())
+        .spawn(move || {
+            let to_tray = prefer_tray && minimize_to_tray_pref_enabled();
+            let deadline = Instant::now() + max;
+            while Instant::now() < deadline && !flag.load(Ordering::Relaxed) {
+                let _ = hide_visible_once(to_tray);
+                thread::sleep(HIDE_WATCH_POLL);
+            }
+        });
+    match spawned {
+        Ok(_) => *HIDE_WATCHER.lock() = Some(HideWatcher { stop }),
+        Err(err) => tracing::warn!("Failed to start the Spotify hide watcher: {err:#}"),
+    }
+}
+
+fn stop_hide_watcher() {
+    if let Some(watcher) = HIDE_WATCHER.lock().take() {
+        watcher.stop.store(true, Ordering::Relaxed);
     }
 }
 
@@ -341,12 +418,6 @@ enum HideVisible {
     NoneVisible,
     HidSome,
     Hidden,
-}
-
-/// Tray hide must only search mapped visible windows so `windowclose` never
-/// targets hidden ghosts (login autostart `wmctrl hidden`, `KWin` no-focus minimize).
-fn hide_search_only_visible() -> bool {
-    true
 }
 
 /// The tray stub window is named `spotify`; closing it tears down the tray entry.
@@ -360,7 +431,7 @@ fn hide_visible_once(to_tray: bool) -> Result<HideVisible> {
     // a KWin no-focus rule): closing those leaves Spotify thinking the UI is
     // shown while nothing is actually visible ("Show Spotify" toggles to
     // "Minimize to Tray" without mapping a window).
-    let ids = ui_window_ids(hide_search_only_visible())?;
+    let ids = ui_window_ids(true)?;
     if ids.is_empty() {
         return Ok(HideVisible::NoneVisible);
     }
@@ -445,7 +516,7 @@ fn ensure_minimize_to_tray_pref() {
 
 fn minimize_to_tray_pref_enabled() -> bool {
     spotify_user_prefs_paths().into_iter().any(|path| {
-        fs::read_to_string(&path).ok().is_some_and(|contents| {
+        fs::read_to_string(&path).is_ok_and(|contents| {
             contents
                 .lines()
                 .any(|line| line.trim() == "ui.minimize_to_tray=true")
@@ -504,7 +575,10 @@ fn set_prefs_bool(path: &Path, key: &str, value: bool) -> Result<bool> {
         if !out.ends_with('\n') {
             out.push('\n');
         }
-        fs::write(path, out).with_context(|| format!("write {}", path.display()))?;
+        // Write-then-rename so a crash mid-write cannot truncate Spotify's prefs.
+        let tmp = path.with_file_name("prefs.spotify-player.tmp");
+        fs::write(&tmp, out).with_context(|| format!("write {}", tmp.display()))?;
+        fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))?;
     }
     Ok(changed)
 }
@@ -520,15 +594,15 @@ fn nudge(dest: &str, nudge_uri: Option<&str>, pause_after: bool) -> Result<()> {
     // immediately afterward, so the user does not hear the registration Play.
     let pulse_mute = pause_after.then(PulseMuteGuard::start);
     if pause_after {
-        let _ = mpris_call(dest, "Pause");
+        let _ = bus::player_call(dest, "Pause");
     }
 
     if let Some(uri) = uri {
         tracing::info!("Nudging desktop Spotify via OpenUri ({uri})");
-        mpris_open_uri(dest, &uri)?;
+        bus::open_uri(dest, &uri)?;
     } else {
         tracing::info!("Nudging desktop Spotify via Play (no nudge URI)");
-        mpris_call(dest, "Play")?;
+        bus::player_call(dest, "Play")?;
     }
 
     if pause_after {
@@ -563,94 +637,113 @@ pub fn normalize_spotify_uri(uri: &str) -> String {
     uri.to_string()
 }
 
-fn mpris_name_has_owner(dest: &str) -> Result<bool> {
-    let output = Command::new("dbus-send")
-        .args([
-            "--session",
-            "--print-reply=literal",
-            &format!("--dest={DBUS_DEST_BUS}"),
-            DBUS_OBJECT,
-            "org.freedesktop.DBus.NameHasOwner",
-            &format!("string:{dest}"),
-        ])
-        .output()
-        .context("failed to run dbus-send (is D-Bus available?)")?;
+/// In-process session-bus client. One shared connection serves the blocking
+/// callers; it is dropped on any error so the next call reconnects (bus restart).
+mod bus {
+    use super::{MPRIS_OBJECT, MPRIS_PLAYER};
+    use anyhow::{Context, Result};
+    use dbus::arg::PropMap;
+    use dbus::blocking::stdintf::org_freedesktop_dbus::Properties;
+    use dbus::blocking::SyncConnection;
+    use dbus::strings::BusName;
+    use parking_lot::Mutex;
+    use std::time::Duration;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("dbus-send NameHasOwner failed: {stderr}");
+    const TIMEOUT: Duration = Duration::from_secs(2);
+    static CONNECTION: Mutex<Option<SyncConnection>> = Mutex::new(None);
+
+    fn with_connection<T>(
+        f: impl FnOnce(&SyncConnection) -> std::result::Result<T, dbus::Error>,
+    ) -> Result<T> {
+        let mut guard = CONNECTION.lock();
+        let conn = match guard.as_ref() {
+            Some(conn) => conn,
+            None => guard
+                .insert(SyncConnection::new_session().context("connect to the D-Bus session bus")?),
+        };
+        match f(conn) {
+            Ok(value) => Ok(value),
+            Err(err) => {
+                *guard = None;
+                Err(err.into())
+            }
+        }
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.contains("boolean true") || stdout.contains("true"))
-}
-
-fn mpris_call(dest: &str, method: &str) -> Result<()> {
-    let status = Command::new("dbus-send")
-        .args([
-            "--session",
-            "--type=method_call",
-            &format!("--dest={dest}"),
-            MPRIS_OBJECT,
-            &format!("{MPRIS_PLAYER}.{method}"),
-        ])
-        .status()
-        .with_context(|| format!("failed to call MPRIS {method}"))?;
-
-    if !status.success() {
-        anyhow::bail!("MPRIS {method} failed with status {status}");
-    }
-    Ok(())
-}
-
-fn mpris_open_uri(dest: &str, uri: &str) -> Result<()> {
-    let status = Command::new("dbus-send")
-        .args([
-            "--session",
-            "--type=method_call",
-            &format!("--dest={dest}"),
-            MPRIS_OBJECT,
-            &format!("{MPRIS_PLAYER}.OpenUri"),
-            &format!("string:{uri}"),
-        ])
-        .status()
-        .context("failed to call MPRIS OpenUri")?;
-
-    if !status.success() {
-        anyhow::bail!("MPRIS OpenUri failed with status {status}");
-    }
-    Ok(())
-}
-
-const DBUS_PROPERTIES: &str = "org.freedesktop.DBus.Properties";
-
-fn mpris_get_playback_status(dest: &str) -> Result<String> {
-    let output = Command::new("dbus-send")
-        .args([
-            "--session",
-            "--print-reply=literal",
-            "--type=method_call",
-            &format!("--dest={dest}"),
-            MPRIS_OBJECT,
-            &format!("{DBUS_PROPERTIES}.Get"),
-            &format!("string:{MPRIS_PLAYER}"),
-            "string:PlaybackStatus",
-        ])
-        .output()
-        .context("failed to read MPRIS PlaybackStatus")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("MPRIS Get PlaybackStatus failed: {stderr}");
+    fn bus_name(dest: &str) -> Result<BusName<'_>> {
+        BusName::new(dest).map_err(|err| anyhow::anyhow!("invalid MPRIS bus name `{dest}`: {err}"))
     }
 
-    parse_mpris_playback_status_reply(&String::from_utf8_lossy(&output.stdout))
-        .map(str::to_string)
-        .context("could not parse MPRIS PlaybackStatus")
+    pub fn name_has_owner(dest: &str) -> Result<bool> {
+        with_connection(|conn| {
+            let proxy = conn.with_proxy("org.freedesktop.DBus", "/org/freedesktop/DBus", TIMEOUT);
+            let (has_owner,): (bool,) =
+                proxy.method_call("org.freedesktop.DBus", "NameHasOwner", (dest,))?;
+            Ok(has_owner)
+        })
+    }
+
+    pub fn player_call(dest: &str, method: &str) -> Result<()> {
+        let name = bus_name(dest)?;
+        with_connection(|conn| {
+            conn.with_proxy(name, MPRIS_OBJECT, TIMEOUT)
+                .method_call(MPRIS_PLAYER, method, ())
+        })
+        .with_context(|| format!("MPRIS {method}"))
+    }
+
+    pub fn open_uri(dest: &str, uri: &str) -> Result<()> {
+        let name = bus_name(dest)?;
+        with_connection(|conn| {
+            conn.with_proxy(name, MPRIS_OBJECT, TIMEOUT).method_call(
+                MPRIS_PLAYER,
+                "OpenUri",
+                (uri,),
+            )
+        })
+        .context("MPRIS OpenUri")
+    }
+
+    pub fn playback_status(dest: &str) -> Result<String> {
+        let name = bus_name(dest)?;
+        with_connection(|conn| {
+            conn.with_proxy(name, MPRIS_OBJECT, TIMEOUT)
+                .get(MPRIS_PLAYER, "PlaybackStatus")
+        })
+        .context("MPRIS PlaybackStatus")
+    }
+
+    pub fn volume(dest: &str) -> Result<f64> {
+        let name = bus_name(dest)?;
+        with_connection(|conn| {
+            conn.with_proxy(name, MPRIS_OBJECT, TIMEOUT)
+                .get(MPRIS_PLAYER, "Volume")
+        })
+        .context("MPRIS Volume")
+    }
+
+    /// All `org.mpris.MediaPlayer2.Player` properties in one round trip.
+    pub fn player_properties(dest: &str) -> Result<PropMap> {
+        let name = bus_name(dest)?;
+        with_connection(|conn| {
+            conn.with_proxy(name, MPRIS_OBJECT, TIMEOUT)
+                .get_all(MPRIS_PLAYER)
+        })
+        .context("MPRIS player properties")
+    }
+
+    pub fn metadata(dest: &str) -> Result<PropMap> {
+        let name = bus_name(dest)?;
+        with_connection(|conn| {
+            conn.with_proxy(name, MPRIS_OBJECT, TIMEOUT)
+                .get(MPRIS_PLAYER, "Metadata")
+        })
+        .context("MPRIS Metadata")
+    }
 }
 
 fn mpris_is_silent(dest: &str) -> bool {
-    mpris_get_playback_status(dest)
+    bus::playback_status(dest)
         .ok()
         .as_deref()
         .is_some_and(playback_status_is_silent)
@@ -660,9 +753,18 @@ fn mpris_is_silent(dest: &str) -> bool {
 ///
 /// Connect often omits that client from `/v1/me/player` even while the GUI is
 /// already playing. Callers must treat this as local active playback and must
-/// not OpenUri/Pause it as a "wake".
-pub fn mpris_is_playing(dest: &str) -> bool {
-    mpris_get_playback_status(dest)
+/// not OpenUri/Pause it as a "wake". `false` when the probe fails.
+pub async fn mpris_is_playing(dest: &str) -> bool {
+    let dest = dest.to_owned();
+    run_blocking("MPRIS status probe", move || {
+        mpris_is_playing_blocking(&dest)
+    })
+    .await
+    .unwrap_or(false)
+}
+
+fn mpris_is_playing_blocking(dest: &str) -> bool {
+    bus::playback_status(dest)
         .ok()
         .as_deref()
         .is_some_and(playback_status_is_playing)
@@ -692,37 +794,45 @@ struct MprisNowPlaying {
 /// Connect `/v1/me/player` often returns null while the official client is
 /// already Playing (or paused on a loaded track) via MPRIS. Use that metadata
 /// for the playback window until Connect lists a session.
+///
+/// Blocking (D-Bus round trips); the result is cached for `MPRIS_CACHE_TTL`,
+/// so a cached `progress` can lag by up to that much.
 pub fn current_playback_from_mpris(
     dest: &str,
     device_name: &str,
 ) -> Result<Option<CurrentPlaybackContext>> {
-    Ok(mpris_now_playing(dest)?.map(|now| playback_context_from_mpris(now, device_name)))
+    cached(&MPRIS_PLAYBACK_CACHE, || {
+        Ok(mpris_now_playing(dest)?.map(|now| playback_context_from_mpris(now, device_name)))
+    })
+}
+
+/// Serve `compute`'s last value while it is younger than `MPRIS_CACHE_TTL`;
+/// errors are not cached.
+fn cached<T: Clone>(
+    cache: &Mutex<Option<(Instant, T)>>,
+    compute: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if let Some((at, value)) = cache.lock().as_ref() {
+        if at.elapsed() < MPRIS_CACHE_TTL {
+            return Ok(value.clone());
+        }
+    }
+    let value = compute()?;
+    *cache.lock() = Some((Instant::now(), value.clone()));
+    Ok(value)
 }
 
 fn mpris_now_playing(dest: &str) -> Result<Option<MprisNowPlaying>> {
-    let status = mpris_get_playback_status(dest)?;
+    let props = bus::player_properties(dest)?;
+    let status = prop_str(&props, "PlaybackStatus").unwrap_or_default();
     if status.eq_ignore_ascii_case("Stopped") {
         return Ok(None);
     }
-    let metadata_reply = mpris_get_property_reply(dest, "Metadata")?;
-    let parsed = parse_mpris_metadata_reply(&metadata_reply);
-    let position_us = mpris_get_property_reply(dest, "Position")
-        .ok()
-        .as_deref()
-        .and_then(parse_int_after_token_any)
-        .unwrap_or(0);
-    let volume_percent = mpris_get_property_reply(dest, "Volume")
-        .ok()
-        .as_deref()
-        .and_then(parse_volume_percent);
-    let shuffle = mpris_get_property_reply(dest, "Shuffle")
-        .ok()
-        .as_deref()
-        .is_some_and(|s| s.contains("true"));
-    let repeat = mpris_get_property_reply(dest, "LoopStatus")
-        .ok()
-        .as_deref()
-        .map_or(RepeatState::Off, parse_loop_status);
+    let parsed = parse_mpris_metadata(&bus::metadata(dest)?);
+    let position_us = prop_i64(&props, "Position").unwrap_or(0);
+    let volume_percent = prop_f64(&props, "Volume").map(volume_to_percent);
+    let shuffle = prop_bool(&props, "Shuffle").unwrap_or(false);
+    let repeat = prop_str(&props, "LoopStatus").map_or(RepeatState::Off, |s| parse_loop_status(&s));
     Ok(now_playing_from_parsed(
         &status,
         parsed,
@@ -859,95 +969,54 @@ struct ParsedMprisMetadata {
     track_number: Option<u32>,
 }
 
-fn parse_mpris_metadata_reply(stdout: &str) -> ParsedMprisMetadata {
-    let mut parsed = ParsedMprisMetadata::default();
-    for (key, value) in metadata_dict_entries(stdout) {
-        match key.as_str() {
-            "xesam:title" => {
-                parsed.title = first_quoted(&value).unwrap_or_default().to_string();
-            }
-            "xesam:album" => {
-                parsed.album = first_quoted(&value).unwrap_or_default().to_string();
-            }
-            "xesam:artist" => {
-                parsed.artists = quoted_strings(&value);
-            }
-            "mpris:length" => {
-                parsed.length_us = parse_int_after_token_any(&value).unwrap_or(0);
-            }
-            "mpris:trackid" | "mpris:trackId" => {
-                parsed.track_id = first_quoted(&value).and_then(spotify_track_id_from_mpris_text);
-            }
-            "xesam:url" => {
-                if parsed.track_id.is_none() {
-                    parsed.track_id =
-                        first_quoted(&value).and_then(spotify_track_id_from_mpris_text);
-                }
-            }
-            "mpris:artUrl" => {
-                parsed.art_url = first_quoted(&value).map(str::to_string);
-            }
-            "xesam:trackNumber" => {
-                parsed.track_number = parse_int_after_token_any(&value).map(|n| n as u32);
-            }
-            _ => {}
-        }
+fn parse_mpris_metadata(map: &PropMap) -> ParsedMprisMetadata {
+    let text = |key: &str| prop_str(map, key);
+    let artists = map
+        .get("xesam:artist")
+        .and_then(|v| v.0.as_iter())
+        .map(|items| {
+            items
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    ParsedMprisMetadata {
+        title: text("xesam:title").unwrap_or_default(),
+        artists,
+        album: text("xesam:album").unwrap_or_default(),
+        length_us: prop_i64(map, "mpris:length").unwrap_or(0),
+        track_id: text("mpris:trackid")
+            .as_deref()
+            .and_then(spotify_track_id_from_mpris_text)
+            .or_else(|| {
+                text("xesam:url")
+                    .as_deref()
+                    .and_then(spotify_track_id_from_mpris_text)
+            }),
+        art_url: text("mpris:artUrl"),
+        track_number: prop_i64(map, "xesam:trackNumber").map(|n| n as u32),
     }
-    parsed
 }
 
-fn metadata_dict_entries(stdout: &str) -> Vec<(String, String)> {
-    let mut entries = Vec::new();
-    let mut rest = stdout;
-    while let Some(idx) = rest.find("dict entry(") {
-        rest = &rest[idx + "dict entry(".len()..];
-        let (this, next) = match rest.find("dict entry(") {
-            Some(n) => rest.split_at(n),
-            None => (rest, ""),
-        };
-        if let Some(key) = first_quoted(this) {
-            let after_key = this
-                .split_once(&format!("\"{key}\""))
-                .map(|(_, rest)| rest.to_string())
-                .unwrap_or_default();
-            entries.push((key.to_string(), after_key));
-        }
-        rest = next;
-    }
-    entries
+fn prop_str(map: &PropMap, key: &str) -> Option<String> {
+    map.get(key).and_then(|v| v.0.as_str()).map(str::to_owned)
 }
 
-fn first_quoted(s: &str) -> Option<&str> {
-    let start = s.find('"')?;
-    let rest = &s[start + 1..];
-    let end = rest.find('"')?;
-    Some(&rest[..end])
+fn prop_i64(map: &PropMap, key: &str) -> Option<i64> {
+    let value = map.get(key)?;
+    value
+        .0
+        .as_i64()
+        .or_else(|| value.0.as_u64().and_then(|u| i64::try_from(u).ok()))
 }
 
-fn quoted_strings(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = s;
-    while let Some(start) = rest.find('"') {
-        rest = &rest[start + 1..];
-        match rest.find('"') {
-            Some(end) => {
-                out.push(rest[..end].to_string());
-                rest = &rest[end + 1..];
-            }
-            None => break,
-        }
-    }
-    out
+fn prop_f64(map: &PropMap, key: &str) -> Option<f64> {
+    map.get(key).and_then(|v| v.0.as_f64())
 }
 
-fn parse_int_after_token_any(s: &str) -> Option<i64> {
-    for token in ["int64", "uint64", "int32"] {
-        if let Some(idx) = s.find(token) {
-            let num = s[idx + token.len()..].split_whitespace().next()?;
-            return num.parse().ok();
-        }
-    }
-    None
+fn prop_bool(map: &PropMap, key: &str) -> Option<bool> {
+    map.get(key)
+        .and_then(|v| dbus::arg::cast::<bool>(&*v.0).copied())
 }
 
 /// Prefer a non-zero MPRIS percent when Connect reports 0 or missing volume.
@@ -961,22 +1030,16 @@ pub(crate) fn overlay_connect_volume(
     }
 }
 
-/// Desktop client's MPRIS Volume as a percent (0–100).
+/// Desktop client's MPRIS Volume as a percent (0–100). Blocking; cached briefly.
 pub(crate) fn mpris_volume_percent(dest: &str) -> Option<u32> {
-    mpris_get_property_reply(dest, "Volume")
-        .ok()
-        .as_deref()
-        .and_then(parse_volume_percent)
+    cached(&MPRIS_VOLUME_CACHE, || {
+        Ok(bus::volume(dest).ok().map(volume_to_percent))
+    })
+    .unwrap_or(None)
 }
 
-fn parse_volume_percent(s: &str) -> Option<u32> {
-    let idx = s.find("double")?;
-    let num: f64 = s[idx + "double".len()..]
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()?;
-    Some((num.clamp(0.0, 1.0) * 100.0).round() as u32)
+fn volume_to_percent(volume: f64) -> u32 {
+    (volume.clamp(0.0, 1.0) * 100.0).round() as u32
 }
 
 fn parse_loop_status(s: &str) -> RepeatState {
@@ -1013,34 +1076,11 @@ fn spotify_track_id_from_mpris_text(text: &str) -> Option<String> {
     None
 }
 
-fn mpris_get_property_reply(dest: &str, name: &str) -> Result<String> {
-    let output = Command::new("dbus-send")
-        .args([
-            "--session",
-            "--print-reply",
-            "--type=method_call",
-            &format!("--dest={dest}"),
-            MPRIS_OBJECT,
-            &format!("{DBUS_PROPERTIES}.Get"),
-            &format!("string:{MPRIS_PLAYER}"),
-            &format!("string:{name}"),
-        ])
-        .output()
-        .with_context(|| format!("failed to read MPRIS {name}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("MPRIS Get {name} failed: {stderr}");
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
 /// Retry Pause until MPRIS reports Paused/Stopped, or `budget` elapses.
 fn pause_until_silent(dest: &str, budget: Duration) -> bool {
     let start = Instant::now();
     loop {
-        let _ = mpris_call(dest, "Pause");
+        let _ = bus::player_call(dest, "Pause");
         if mpris_is_silent(dest) {
             return true;
         }
@@ -1072,20 +1112,6 @@ fn pause_poll_should_stop(confirmed_silent: bool, elapsed: Duration, budget: Dur
 
 fn playback_status_is_silent(status: &str) -> bool {
     status.eq_ignore_ascii_case("Paused") || status.eq_ignore_ascii_case("Stopped")
-}
-
-/// Parse `dbus-send --print-reply=literal` `PlaybackStatus` (`Playing`/`Paused`/`Stopped`).
-fn parse_mpris_playback_status_reply(stdout: &str) -> Option<&'static str> {
-    let text = stdout.to_ascii_lowercase();
-    if text.contains("paused") {
-        Some("Paused")
-    } else if text.contains("stopped") {
-        Some("Stopped")
-    } else if text.contains("playing") {
-        Some("Playing")
-    } else {
-        None
-    }
 }
 
 fn is_spotify_client_binary(binary: &str) -> bool {
@@ -1148,14 +1174,17 @@ fn spotify_sink_inputs_from_json(json: &str) -> Vec<(u32, bool)> {
         .collect()
 }
 
-fn indices_to_restore(recorded: &[u32], current: &[(u32, bool)]) -> Vec<(u32, bool)> {
-    let mut out: Vec<(u32, bool)> = current.to_vec();
-    for index in recorded {
-        if !out.iter().any(|(i, _)| i == index) {
-            out.push((*index, false));
-        }
-    }
-    out
+/// The inputs this guard muted, paired with whether each currently sits at 0%
+/// Pulse volume (a restored stream at 0% stays silent even when unmuted).
+/// Streams the guard never touched, including ones the user muted, are left alone.
+fn restore_targets(recorded: &[u32], current: &[(u32, bool)]) -> Vec<(u32, bool)> {
+    recorded
+        .iter()
+        .map(|index| {
+            let silent = current.iter().any(|(i, silent)| i == index && *silent);
+            (*index, silent)
+        })
+        .collect()
 }
 
 fn spotify_sink_inputs() -> Vec<(u32, bool)> {
@@ -1194,7 +1223,7 @@ fn set_sink_input_volume_100(index: u32) -> bool {
 }
 
 fn restore_spotify_sink_inputs(recorded: &[u32]) {
-    for (index, silent_volume) in indices_to_restore(recorded, &spotify_sink_inputs()) {
+    for (index, silent_volume) in restore_targets(recorded, &spotify_sink_inputs()) {
         let _ = set_sink_input_mute(index, false);
         if silent_volume {
             let _ = set_sink_input_volume_100(index);
@@ -1220,7 +1249,7 @@ impl PulseMuteGuard {
                         muted.push(index);
                     }
                 }
-                thread::sleep(Duration::from_millis(40));
+                thread::sleep(Duration::from_millis(200));
             }
             muted
         });
@@ -1244,13 +1273,23 @@ impl Drop for PulseMuteGuard {
 }
 
 fn spotify_process_running() -> bool {
-    // Match the official client binary name without catching spotify_player / spotifyd.
-    Command::new("pgrep")
+    // Match the official client binary name without catching spotify_player /
+    // spotifyd, and only this user's processes on a shared machine.
+    let mut command = Command::new("pgrep");
+    if let Some(uid) = current_uid() {
+        command.args(["-u", &uid.to_string()]);
+    }
+    command
         .args(["-x", "spotify"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
+}
+
+fn current_uid() -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata("/proc/self").ok().map(|m| m.uid())
 }
 
 /// Resolve a nudge URI from config or a recently-played track id.
@@ -1305,16 +1344,14 @@ mod tests {
 
     #[test]
     fn name_has_owner_false_is_not_error() {
-        // Smoke: dbus-send exists in CI/dev Linux; don't require Spotify running.
-        let result =
-            mpris_name_has_owner("org.mpris.MediaPlayer2.spotify-player-wake-test-missing");
+        // Smoke test against the real session bus; skip where there is none
+        // (containers, CI runners without dbus) so `cargo test` stays hermetic.
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() {
+            return;
+        }
+        let result = bus::name_has_owner("org.mpris.MediaPlayer2.spotify-player-wake-test-missing");
         assert!(result.is_ok());
         assert!(!result.unwrap());
-    }
-
-    #[test]
-    fn hide_search_only_visible_is_always_true() {
-        assert!(hide_search_only_visible());
     }
 
     #[test]
@@ -1362,29 +1399,17 @@ mod tests {
     }
 
     #[test]
-    fn restore_includes_current_and_recorded_indices() {
-        let current = vec![(99, true)];
+    fn restore_targets_only_touch_inputs_the_guard_muted() {
+        // 7 is a stream the guard never muted (e.g. muted by the user): untouched.
+        let current = vec![(99, true), (7, true)];
         assert_eq!(
-            indices_to_restore(&[12, 99], &current),
-            vec![(99, true), (12, false)]
+            restore_targets(&[12, 99], &current),
+            vec![(12, false), (99, true)]
         );
     }
 
     #[test]
-    fn parses_literal_mpris_playback_status() {
-        assert_eq!(
-            parse_mpris_playback_status_reply("   variant       string \"Paused\"\n"),
-            Some("Paused")
-        );
-        assert_eq!(
-            parse_mpris_playback_status_reply("string Playing"),
-            Some("Playing")
-        );
-        assert_eq!(
-            parse_mpris_playback_status_reply("string Stopped"),
-            Some("Stopped")
-        );
-        assert_eq!(parse_mpris_playback_status_reply("garbage"), None);
+    fn classifies_mpris_playback_status() {
         assert!(playback_status_is_silent("Paused"));
         assert!(playback_status_is_silent("stopped"));
         assert!(!playback_status_is_silent("Playing"));
@@ -1393,49 +1418,43 @@ mod tests {
         assert!(!playback_status_is_playing("Paused"));
     }
 
-    const SAMPLE_METADATA: &str = r#"
-method return
-   variant       array [
-         dict entry(
-            string "mpris:trackid"
-            variant                string "/com/spotify/track/6lmsHxA47XsTQ1BPL1PMx7"
-         )
-         dict entry(
-            string "mpris:length"
-            variant                uint64 152000000
-         )
-         dict entry(
-            string "mpris:artUrl"
-            variant                string "https://i.scdn.co/image/ab67616d0000b2735e968be90e158a68975426b8"
-         )
-         dict entry(
-            string "xesam:album"
-            variant                string "Paradise Records (Compilation)"
-         )
-         dict entry(
-            string "xesam:artist"
-            variant                array [
-                  string "Logic"
-               ]
-         )
-         dict entry(
-            string "xesam:title"
-            variant                string "Raider of the Lost Art"
-         )
-         dict entry(
-            string "xesam:trackNumber"
-            variant                int32 3
-         )
-         dict entry(
-            string "xesam:url"
-            variant                string "https://open.spotify.com/track/6lmsHxA47XsTQ1BPL1PMx7"
-         )
-      ]
-"#;
+    fn sample_metadata() -> PropMap {
+        use dbus::arg::{RefArg, Variant};
+        let mut map = PropMap::new();
+        let mut put = |key: &str, value: Box<dyn RefArg>| {
+            map.insert(key.to_string(), Variant(value));
+        };
+        put(
+            "mpris:trackid",
+            Box::new(dbus::Path::new("/com/spotify/track/6lmsHxA47XsTQ1BPL1PMx7").unwrap()),
+        );
+        put("mpris:length", Box::new(152_000_000_u64));
+        put(
+            "mpris:artUrl",
+            Box::new(
+                "https://i.scdn.co/image/ab67616d0000b2735e968be90e158a68975426b8".to_string(),
+            ),
+        );
+        put(
+            "xesam:album",
+            Box::new("Paradise Records (Compilation)".to_string()),
+        );
+        put("xesam:artist", Box::new(vec!["Logic".to_string()]));
+        put(
+            "xesam:title",
+            Box::new("Raider of the Lost Art".to_string()),
+        );
+        put("xesam:trackNumber", Box::new(3_i32));
+        put(
+            "xesam:url",
+            Box::new("https://open.spotify.com/track/6lmsHxA47XsTQ1BPL1PMx7".to_string()),
+        );
+        map
+    }
 
     #[test]
-    fn parses_mpris_metadata_dict_for_playback_window() {
-        let parsed = parse_mpris_metadata_reply(SAMPLE_METADATA);
+    fn parses_mpris_metadata_map_for_playback_window() {
+        let parsed = parse_mpris_metadata(&sample_metadata());
         assert_eq!(parsed.title, "Raider of the Lost Art");
         assert_eq!(parsed.artists, vec!["Logic"]);
         assert_eq!(parsed.album, "Paradise Records (Compilation)");
@@ -1449,6 +1468,23 @@ method return
     }
 
     #[test]
+    fn local_files_have_no_spotify_track_id() {
+        use dbus::arg::{RefArg, Variant};
+        let mut map = sample_metadata();
+        map.insert(
+            "mpris:trackid".to_string(),
+            Variant(Box::new(dbus::Path::new("/com/spotify/local/abc").unwrap()) as Box<dyn RefArg>),
+        );
+        map.insert(
+            "xesam:url".to_string(),
+            Variant(Box::new("file:///home/me/music/song.flac".to_string()) as Box<dyn RefArg>),
+        );
+        let parsed = parse_mpris_metadata(&map);
+        assert_eq!(parsed.track_id, None);
+        assert_eq!(parsed.title, "Raider of the Lost Art");
+    }
+
+    #[test]
     fn mpris_now_playing_skips_empty_title_and_stopped() {
         let parsed = ParsedMprisMetadata::default();
         assert!(
@@ -1458,7 +1494,7 @@ method return
 
     #[test]
     fn mpris_fallback_builds_connect_shaped_playback() {
-        let parsed = parse_mpris_metadata_reply(SAMPLE_METADATA);
+        let parsed = parse_mpris_metadata(&sample_metadata());
         let now = now_playing_from_parsed(
             "Playing",
             parsed,
@@ -1526,14 +1562,11 @@ method return
     }
 
     #[test]
-    fn parses_dbus_send_double_volume() {
-        assert_eq!(
-            parse_volume_percent("method return\n   variant       double 1\n"),
-            Some(100)
-        );
-        assert_eq!(parse_volume_percent("variant double 0.8"), Some(80));
-        assert_eq!(parse_volume_percent("variant double 0"), Some(0));
-        assert_eq!(parse_volume_percent("no volume here"), None);
+    fn converts_mpris_volume_to_percent() {
+        assert_eq!(volume_to_percent(1.0), 100);
+        assert_eq!(volume_to_percent(0.8), 80);
+        assert_eq!(volume_to_percent(0.0), 0);
+        assert_eq!(volume_to_percent(1.7), 100);
     }
 
     #[test]

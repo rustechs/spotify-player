@@ -72,6 +72,9 @@ fn init_logging(
         .context("failed to create backtrace file")?;
     let backtrace_file = std::sync::Mutex::new(backtrace_file);
     std::panic::set_hook(Box::new(move |info| {
+        // Also surface panics in the log file and the in-TUI Logs page;
+        // the backtrace file alone is easy to miss.
+        tracing::error!("Panic: {info}");
         let mut file = backtrace_file.lock().unwrap();
         let backtrace = backtrace::Backtrace::new();
         writeln!(&mut file, "Got a panic: {info:#?}\n").unwrap();
@@ -180,7 +183,9 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
             let state = state.clone();
             let client_pub = client_pub.clone();
             move || {
-                client::start_player_event_watcher(&state, &client_pub);
+                run_supervised("player-event-watcher", || {
+                    client::start_player_event_watcher(&state, &client_pub);
+                });
             }
         })?;
 
@@ -196,7 +201,9 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
                 let client_pub = client_pub.clone();
                 let state = state.clone();
                 move || {
-                    event::start_event_handler(&state, &client_pub);
+                    run_supervised("terminal-event-handler", || {
+                        event::start_event_handler(&state, &client_pub);
+                    });
                 }
             })?;
 
@@ -237,11 +244,22 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
         }
     }
 
-    // Keep the async runtime alive without blocking a worker thread.
-    // `std::thread::sleep` here would pin one tokio worker forever and can
-    // contribute to CLI/socket starvation under load.
+    // Keep the runtime alive; the tasks and threads spawned above do the work.
+    std::future::pending::<()>().await;
+    Ok(())
+}
+
+/// Run a long-lived thread body, restarting it after a panic.
+///
+/// `parking_lot` locks do not poison, so the shared state stays usable; a panic
+/// on one tick must not silently disable playback refreshes or keyboard input.
+fn run_supervised(name: &str, mut body: impl FnMut()) {
     loop {
-        tokio::time::sleep(std::time::Duration::from_hours(1)).await;
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut body)).is_ok() {
+            return;
+        }
+        tracing::error!("Thread `{name}` panicked; restarting it in 1s");
+        std::thread::sleep(std::time::Duration::from_secs(1));
     }
 }
 
@@ -268,6 +286,10 @@ fn main() -> Result<()> {
         .get_one::<String>("cache-folder")
         .expect("cache-folder should have a default value")
         .into();
+    // The cache folder holds the Web API tokens and librespot credentials, so it
+    // is created private. A folder that already exists is the user's to manage.
+    utils::create_private_dir_all(&cache_folder)
+        .with_context(|| format!("create cache folder {}", cache_folder.display()))?;
     let cache_audio_folder = cache_folder.join("audio");
     if !cache_audio_folder.exists() {
         std::fs::create_dir_all(&cache_audio_folder)?;
@@ -310,6 +332,10 @@ fn main() -> Result<()> {
 
             init_logging(log_folder, log_buffer.clone())
                 .context("failed to initialize application's logging")?;
+
+            // Older versions left credential files with default permissions. Run
+            // once logging is up so a failure is recorded.
+            auth::restrict_cached_credentials(&config::get_config().cache_folder);
 
             // log the application's configurations
             tracing::info!("Configurations: {:?}", config::get_config());

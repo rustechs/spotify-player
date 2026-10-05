@@ -25,8 +25,12 @@ pub enum ToastKind {
 pub struct Toast {
     pub kind: ToastKind,
     pub message: String,
-    /// Deadline after which the toast leaves the FIFO.
-    pub expires_at: Instant,
+    /// How long the toast stays once it is visible.
+    pub timeout: Duration,
+    /// Deadline after which the toast leaves the FIFO. Set by `expire_due` when
+    /// the toast first becomes one of the visible cards, so toasts waiting
+    /// behind the `4+` marker are not lost before they are ever shown.
+    pub expires_at: Option<Instant>,
 }
 
 impl Toast {
@@ -34,7 +38,8 @@ impl Toast {
         Self {
             kind: ToastKind::Success,
             message: message.into(),
-            expires_at: Instant::now() + timeout,
+            timeout,
+            expires_at: None,
         }
     }
 
@@ -42,7 +47,8 @@ impl Toast {
         Self {
             kind: ToastKind::Error,
             message: message.into(),
-            expires_at: Instant::now() + timeout,
+            timeout,
+            expires_at: None,
         }
     }
 }
@@ -82,25 +88,26 @@ impl ToastQueue {
         true
     }
 
-    /// Remove expired toasts from the front.
+    /// Remove expired toasts from the front, then start the timer of every
+    /// visible toast that does not have one yet.
     pub fn expire_due(&mut self, now: Instant) {
         while self
             .items
             .front()
-            .is_some_and(|toast| toast.expires_at <= now)
+            .is_some_and(|toast| toast.expires_at.is_some_and(|at| at <= now))
         {
             self.items.pop_front();
+        }
+        for toast in self.items.iter_mut().take(TOAST_VISIBLE_COUNT) {
+            if toast.expires_at.is_none() {
+                toast.expires_at = Some(now + toast.timeout);
+            }
         }
     }
 
     pub fn dismiss_current(&mut self) {
         self.items.pop_front();
     }
-}
-
-/// Whether a toast should be stored. Daemon and `enable_toast = false` skip enqueue.
-pub(crate) fn should_enqueue_toast(enable_toast: bool, is_daemon: bool) -> bool {
-    enable_toast && !is_daemon
 }
 
 /// If a popup is open, close it and leave the toast queue alone.
@@ -264,10 +271,12 @@ fn mark_toast_line_clipped(line: &mut String, max_width: usize) {
         return;
     }
     let keep = max_width - 1;
-    let len = line.chars().count();
-    if len > keep {
+    if display_width(line) > keep {
         let mut out = String::new();
-        for ch in line.chars().take(keep) {
+        for ch in line.chars() {
+            if display_width(&out) + char_width(ch) > keep {
+                break;
+            }
             out.push(ch);
         }
         out.push(TOAST_ELLIPSIS);
@@ -275,6 +284,15 @@ fn mark_toast_line_clipped(line: &mut String, max_width: usize) {
     } else {
         line.push(TOAST_ELLIPSIS);
     }
+}
+
+/// Terminal columns a string occupies; ratatui wraps by this, not by chars.
+fn display_width(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
+fn char_width(c: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
 }
 
 fn wrap_toast_lines(text: &str, width: usize) -> Vec<String> {
@@ -287,14 +305,14 @@ fn wrap_toast_lines(text: &str, width: usize) -> Vec<String> {
     let mut current = String::new();
 
     for word in trimmed.split_whitespace() {
-        if word.chars().count() > width {
+        if display_width(word) > width {
             if !current.is_empty() {
                 lines.push(current);
                 current = String::new();
             }
             let mut chunk = String::new();
             for ch in word.chars() {
-                if chunk.chars().count() == width {
+                if !chunk.is_empty() && display_width(&chunk) + char_width(ch) > width {
                     lines.push(chunk);
                     chunk = String::new();
                 }
@@ -308,7 +326,7 @@ fn wrap_toast_lines(text: &str, width: usize) -> Vec<String> {
 
         if current.is_empty() {
             current = word.to_string();
-        } else if current.chars().count() + 1 + word.chars().count() <= width {
+        } else if display_width(&current) + 1 + display_width(word) <= width {
             current.push(' ');
             current.push_str(word);
         } else {
@@ -343,7 +361,8 @@ mod tests {
         Toast {
             kind: ToastKind::Success,
             message: msg.to_string(),
-            expires_at,
+            timeout: Duration::from_secs(3),
+            expires_at: Some(expires_at),
         }
     }
 
@@ -351,8 +370,43 @@ mod tests {
         Toast {
             kind: ToastKind::Error,
             message: msg.to_string(),
-            expires_at,
+            timeout: Duration::from_secs(3),
+            expires_at: Some(expires_at),
         }
+    }
+
+    #[test]
+    fn toast_queue_starts_timer_when_toast_becomes_visible() {
+        let mut q = ToastQueue::default();
+        let t0 = Instant::now();
+        for i in 0..4 {
+            q.push(Toast::success(format!("t{i}"), Duration::from_secs(3)));
+        }
+        q.expire_due(t0);
+        assert!(q
+            .visible()
+            .all(|t| t.expires_at == Some(t0 + Duration::from_secs(3))));
+        assert_eq!(q.items[3].expires_at, None, "queued toast has no timer yet");
+
+        let t1 = t0 + Duration::from_secs(4);
+        q.expire_due(t1);
+        assert_eq!(q.len(), 1);
+        assert_eq!(q.visible().next().map(|t| t.message.as_str()), Some("t3"));
+        assert_eq!(q.items[0].expires_at, Some(t1 + Duration::from_secs(3)));
+        q.expire_due(t1 + Duration::from_secs(2));
+        assert_eq!(q.len(), 1, "promoted toast keeps its full timeout");
+    }
+
+    #[test]
+    fn toast_wrapping_uses_display_width() {
+        assert_eq!(
+            wrap_toast_lines("日本語のテスト", 6),
+            vec!["日本語", "のテス", "ト"]
+        );
+        let mut line = "日本語のテスト".to_string();
+        mark_toast_line_clipped(&mut line, 6);
+        assert_eq!(line, "日本…");
+        assert_eq!(display_width(&line), 5);
     }
 
     #[test]

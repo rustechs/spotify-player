@@ -51,7 +51,9 @@ pub fn render_playback_window(
                     }
                 }?;
                 let progress = std::cmp::min(
-                    player.playback_progress().expect("non-empty playback"),
+                    player
+                        .playback_progress()
+                        .unwrap_or_else(chrono::Duration::zero),
                     duration,
                 );
                 Some(ActivePlayback {
@@ -543,6 +545,7 @@ fn construct_playback_text(
                     to_bidi_string(&crate::utils::map_join(&track.artists, |a| &a.name, ", ")),
                     ui.theme.playback_artists(),
                 ),
+                #[allow(deprecated)]
                 rspotify::model::PlayableItem::Episode(episode) => {
                     (episode.show.publisher.clone(), ui.theme.playback_artists())
                 }
@@ -564,7 +567,11 @@ fn construct_playback_text(
             },
             "{genres}" => match playable {
                 rspotify::model::PlayableItem::Track(full_track) => {
-                    let genre = match data.caches.genres.get(&full_track.artists[0].name) {
+                    let genre = match full_track
+                        .artists
+                        .first()
+                        .and_then(|artist| data.caches.genres.get(&artist.name))
+                    {
                         Some(genres) => &format_genres(genres, configs.app_config.genre_num),
                         None => "no genre",
                     };
@@ -731,9 +738,10 @@ fn split_rect_for_playback_window(state: &SharedState, rect: Rect) -> (Rect, Rec
     // status, and the chart tightly. The cover overlaps the visualizer, so it
     // does not add height.
     #[cfg(feature = "streaming")]
-    let playback_width = if configs.app_config.enable_audio_visualization
-        && state.player.read().currently_playing().is_some()
-    {
+    let viz_active = configs.app_config.enable_audio_visualization
+        && state.player.read().currently_playing().is_some();
+    #[cfg(feature = "streaming")]
+    let playback_width = if viz_active {
         playback_format_line_count() as usize + super::streaming::VIS_HEIGHT as usize + 2
     } else {
         configs.app_config.layout.playback_window_height
@@ -744,9 +752,7 @@ fn split_rect_for_playback_window(state: &SharedState, rect: Rect) -> (Rect, Rec
 
     // Without visualization, the playback window must be tall enough for the cover.
     #[cfg(all(feature = "image", feature = "streaming"))]
-    let playback_width = if configs.app_config.enable_audio_visualization
-        && state.player.read().currently_playing().is_some()
-    {
+    let playback_width = if viz_active {
         playback_width
     } else {
         std::cmp::max(configs.app_config.cover_img_width + 1, playback_width)
@@ -757,9 +763,7 @@ fn split_rect_for_playback_window(state: &SharedState, rect: Rect) -> (Rect, Rec
 
     // add lines for top/bottom borders depending on the progress bar's position
     #[cfg(feature = "streaming")]
-    let num_lines = if configs.app_config.enable_audio_visualization
-        && state.player.read().currently_playing().is_some()
-    {
+    let num_lines = if viz_active {
         2
     } else {
         match configs.app_config.progress_bar_position {

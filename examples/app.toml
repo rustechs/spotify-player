@@ -1,15 +1,18 @@
 theme = "default"
 login_redirect_uri = "http://127.0.0.1:8989/login"
 client_id = "d420a117a32841c2b3474932e49fb54b"
+ncspot_only_get_endpoints = ["me/playlists", "search", "playlists/"]
 client_port = 8080
 tracks_playback_limit = 50
-playback_format = "{status} {track} • {artists}\n{album} • {genres}"
+top_tracks_limit = 100
+playback_format = "{status} {track} • {artists} {liked}\n{album} • {genres}"
 playback_metadata_fields = ["repeat", "shuffle", "volume", "device"]
 notify_format = { summary = "{track} • {artists}", body = "{album}" }
 notify_timeout_in_secs = 0
 notify_transient = false
 app_refresh_duration_in_ms = 32
 playback_refresh_duration_in_ms = 0
+api_rate_limit_retries = 2
 page_size_in_rows = 20
 enable_media_control = false
 enable_streaming = "Always"

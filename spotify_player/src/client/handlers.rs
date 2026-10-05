@@ -22,10 +22,15 @@ struct PlayerEventHandlerState {
     last_queue_fetch: Instant,
 }
 
-/// Cap how long any single client request may block the handler / a worker task.
+/// Cap how long any single client request may block a worker task.
 /// Without this, a hung Spotify HTTP call (or oversized Retry-After sleep) can wedge
 /// the TUI command path and the CLI UDP socket indefinitely.
 const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Player requests may wake the desktop client (`ready_timeout_secs`, default
+/// 45 s, plus the 15 s Connect registration wait). They run on their own worker,
+/// so this longer bound never delays other requests.
+const PLAYER_REQUEST_TIMEOUT: Duration = Duration::from_secs(75);
 
 /// Minimum gap between track-end playback refreshes. The watcher runs every 100ms and
 /// used to enqueue `GetCurrentPlayback` on every tick once progress >= duration, which
@@ -49,35 +54,59 @@ pub async fn start_client_handler(
     client: &super::AppClient,
     client_sub: &flume::Receiver<ClientRequest>,
 ) {
+    // Player mutations read and write `buffered_playback`; a dedicated worker runs
+    // them one at a time so rapid repeat/shuffle keys cannot race on stale state,
+    // while this loop keeps draining every other request (a slow player call used
+    // to stall playback polls, searches and CLI replies behind it).
+    let (player_tx, player_rx) = flume::unbounded::<ClientRequest>();
+    tokio::task::spawn({
+        let state = state.clone();
+        let client = client.clone();
+        async move {
+            start_player_worker(&state, &client, &player_rx).await;
+        }
+    });
+
     while let Ok(request) = client_sub.recv_async().await {
+        if matches!(&request, ClientRequest::Player(_)) {
+            if player_tx.send(request).is_err() {
+                tracing::error!("Player request worker is gone; dropping the request");
+            }
+            continue;
+        }
+
         let state = state.clone();
         let client = client.clone();
         let span = tracing::info_span!("client_request", request = ?request);
         let toast_request = request.clone();
+        tokio::task::spawn(
+            async move {
+                let outcome = tokio::time::timeout(
+                    CLIENT_REQUEST_TIMEOUT,
+                    client.handle_request(&state, request),
+                )
+                .await;
+                enqueue_request_toast(&state, &toast_request, outcome, CLIENT_REQUEST_TIMEOUT);
+            }
+            .instrument(span),
+        );
+    }
+}
 
-        // Player mutations read and write `buffered_playback`; run them serially so
-        // rapid repeat/shuffle/etc. keys cannot race on stale state.
-        // Bound the wait so a single hung Player API call cannot stall the loop forever.
-        if matches!(&request, ClientRequest::Player(_)) {
-            let outcome = tokio::time::timeout(
-                CLIENT_REQUEST_TIMEOUT,
-                client.handle_request(&state, request).instrument(span),
-            )
-            .await;
-            enqueue_request_toast(&state, &toast_request, outcome);
-        } else {
-            tokio::task::spawn(
-                async move {
-                    let outcome = tokio::time::timeout(
-                        CLIENT_REQUEST_TIMEOUT,
-                        client.handle_request(&state, request),
-                    )
-                    .await;
-                    enqueue_request_toast(&state, &toast_request, outcome);
-                }
-                .instrument(span),
-            );
-        }
+async fn start_player_worker(
+    state: &SharedState,
+    client: &super::AppClient,
+    player_sub: &flume::Receiver<ClientRequest>,
+) {
+    while let Ok(request) = player_sub.recv_async().await {
+        let span = tracing::info_span!("player_request", request = ?request);
+        let toast_request = request.clone();
+        let outcome = tokio::time::timeout(
+            PLAYER_REQUEST_TIMEOUT,
+            client.handle_request(state, request).instrument(span),
+        )
+        .await;
+        enqueue_request_toast(state, &toast_request, outcome, PLAYER_REQUEST_TIMEOUT);
     }
 }
 
@@ -85,6 +114,7 @@ fn enqueue_request_toast(
     state: &SharedState,
     request: &ClientRequest,
     outcome: Result<anyhow::Result<()>, tokio::time::error::Elapsed>,
+    timeout: Duration,
 ) {
     match outcome {
         Ok(Ok(())) => {
@@ -99,9 +129,9 @@ fn enqueue_request_toast(
             }
         }
         Err(_) => {
-            tracing::error!("Timed out after {CLIENT_REQUEST_TIMEOUT:?} handling client request");
+            tracing::error!("Timed out after {timeout:?} handling client request");
             if request.is_toastable() {
-                state.push_error_toast(format!("Timed out after {CLIENT_REQUEST_TIMEOUT:?}"));
+                state.push_error_toast(format!("Timed out after {timeout:?}"));
             }
         }
     }
@@ -134,11 +164,13 @@ fn handle_playback_change_event(
         player.buffered_playback.as_ref(),
         player.currently_playing(),
     ) {
-        (Some(playback), Some(rspotify::model::PlayableItem::Track(track))) => (
-            playback,
-            PlayableId::Track(track.id.clone().expect("null track_id")),
-            track.duration,
-        ),
+        (Some(playback), Some(rspotify::model::PlayableItem::Track(track))) => {
+            // Local files and ads have no Spotify id; there is nothing to track.
+            let Some(id) = track.id.clone() else {
+                return Ok(());
+            };
+            (playback, PlayableId::Track(id), track.duration)
+        }
         (Some(playback), Some(rspotify::model::PlayableItem::Episode(episode))) => (
             playback,
             PlayableId::Episode(episode.id.clone()),
@@ -163,7 +195,7 @@ fn handle_playback_change_event(
         Some(queue) => queue
             .currently_playing
             .as_ref()
-            .is_some_and(|queue_track| queue_track.id().expect("null track_id") != id),
+            .is_some_and(|queue_track| queue_track.id().is_none_or(|queue_id| queue_id != id)),
         None => true,
     };
     if needs_queue_fetch && handler_state.last_queue_fetch.elapsed() >= QUEUE_FETCH_INTERVAL {

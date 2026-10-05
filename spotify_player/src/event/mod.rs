@@ -1,3 +1,5 @@
+use std::ops::Mul;
+
 use crate::{
     client::{ClientRequest, PlayerRequest},
     command::{
@@ -21,7 +23,7 @@ use crate::{
 };
 
 use crate::utils::map_join;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use crossterm::event::KeyCode;
 
 use ratatui::widgets::ListState;
@@ -69,6 +71,53 @@ pub fn open_context_page(
 ) -> Result<()> {
     client_pub.send(ClientRequest::GetContext(context_id.clone()))?;
     ui.new_page(PageState::browsing(context_id));
+    Ok(())
+}
+
+/// Play a track link, or open the context page of a playlist/artist/album link.
+fn open_spotify_link(
+    state: &SharedState,
+    ui: &mut UIStateGuard,
+    client_pub: &flume::Sender<ClientRequest>,
+    content: &str,
+) -> Result<()> {
+    let re = regex::Regex::new(r"https://open.spotify.com/(?P<type>.*?)/(?P<id>[[:alnum:]]*).*")?;
+    let cap = re
+        .captures(content)
+        .context("Clipboard is not a valid Spotify link")?;
+    let typ = cap.name("type").expect("valid capture").as_str();
+    let id = cap.name("id").expect("valid capture").as_str();
+    match typ {
+        "track" => {
+            let id = TrackId::from_id(id)
+                .context("Invalid Spotify track link")?
+                .into_static();
+            state.player.write().currently_playing_tracks_id = None;
+            client_pub.send(ClientRequest::Player(PlayerRequest::StartPlayback(
+                Playback::URIs(vec![id.into()], None),
+                None,
+            )))?;
+        }
+        "playlist" => {
+            let id = PlaylistId::from_id(id)
+                .context("Invalid Spotify playlist link")?
+                .into_static();
+            open_context_page(ui, client_pub, ContextId::Playlist(id))?;
+        }
+        "artist" => {
+            let id = ArtistId::from_id(id)
+                .context("Invalid Spotify artist link")?
+                .into_static();
+            open_context_page(ui, client_pub, ContextId::Artist(id))?;
+        }
+        "album" => {
+            let id = AlbumId::from_id(id)
+                .context("Invalid Spotify album link")?
+                .into_static();
+            open_context_page(ui, client_pub, ContextId::Album(id))?;
+        }
+        other => anyhow::bail!("Unsupported Spotify link type `{other}`"),
+    }
     Ok(())
 }
 
@@ -161,6 +210,7 @@ fn handle_key_event(
         "Handling key event: {event:?}, current key sequence: {key_sequence:?}, count prefix: {:?}",
         ui.count_prefix
     );
+    let count = ui.count_prefix;
     let handled = {
         if ui.popup.is_none() {
             page::handle_key_sequence_for_page(&key_sequence, client_pub, state, &mut ui)?
@@ -178,7 +228,7 @@ fn handle_key_event(
                 handle_global_action(action, target, client_pub, state, &mut ui)?
             }
             Some(CommandOrAction::Command(command)) => {
-                handle_global_command(command, client_pub, state, &mut ui)?
+                handle_global_command(command, client_pub, state, &mut ui, count)?
             }
             None => false,
         }
@@ -274,7 +324,11 @@ pub fn handle_action_in_context(
                 } else {
                     client_pub.send(ClientRequest::AddToLibrary(Item::Track(track)))?;
                 }
-                ui.popup = None;
+                // `C-l` likes the playing track from anywhere; only close the
+                // action list, not an unrelated popup such as the device list.
+                if matches!(ui.popup, Some(PopupState::ActionList(..))) {
+                    ui.popup = None;
+                }
                 Ok(true)
             }
             Action::AddToLiked => {
@@ -590,6 +644,7 @@ fn handle_global_command(
     client_pub: &flume::Sender<ClientRequest>,
     state: &SharedState,
     ui: &mut UIStateGuard,
+    count: Option<usize>,
 ) -> Result<bool> {
     match command {
         Command::Quit => {
@@ -629,18 +684,22 @@ fn handle_global_command(
             )))?;
         }
         Command::SeekForward { duration } => {
+            let repeats: u16 = count.unwrap_or(1) as u16;
             if let Some(progress) = state.player.read().playback_progress() {
-                let duration =
-                    duration.unwrap_or(config::get_config().app_config.seek_duration_secs);
+                let duration = duration
+                    .unwrap_or(config::get_config().app_config.seek_duration_secs)
+                    .mul(repeats);
                 client_pub.send(ClientRequest::Player(PlayerRequest::SeekTrack(
                     progress + chrono::Duration::try_seconds(i64::from(duration)).unwrap(),
                 )))?;
             }
         }
         Command::SeekBackward { duration } => {
+            let repeats: u16 = count.unwrap_or(1) as u16;
             if let Some(progress) = state.player.read().playback_progress() {
-                let duration =
-                    duration.unwrap_or(config::get_config().app_config.seek_duration_secs);
+                let duration = duration
+                    .unwrap_or(config::get_config().app_config.seek_duration_secs)
+                    .mul(repeats);
                 client_pub.send(ClientRequest::Player(PlayerRequest::SeekTrack(
                     std::cmp::max(
                         chrono::Duration::zero(),
@@ -771,50 +830,15 @@ fn handle_global_command(
             }
         }
         Command::OpenSpotifyLinkFromClipboard => match clipboard::get_clipboard_content() {
-            Ok(content) => {
-                let re = regex::Regex::new(
-                    r"https://open.spotify.com/(?P<type>.*?)/(?P<id>[[:alnum:]]*).*",
-                )?;
-                if let Some(cap) = re.captures(&content) {
-                    let typ = cap.name("type").expect("valid capture").as_str();
-                    let id = cap.name("id").expect("valid capture").as_str();
-                    match typ {
-                        "track" => {
-                            let id = TrackId::from_id(id)?.into_static();
-                            state.player.write().currently_playing_tracks_id = None;
-                            client_pub.send(ClientRequest::Player(
-                                PlayerRequest::StartPlayback(
-                                    Playback::URIs(vec![id.into()], None),
-                                    None,
-                                ),
-                            ))?;
-                            ui.push_success_toast("Opened Spotify link");
-                        }
-                        "playlist" => {
-                            let id = PlaylistId::from_id(id)?.into_static();
-                            open_context_page(ui, client_pub, ContextId::Playlist(id))?;
-                            ui.push_success_toast("Opened Spotify link");
-                        }
-                        "artist" => {
-                            let id = ArtistId::from_id(id)?.into_static();
-                            open_context_page(ui, client_pub, ContextId::Artist(id))?;
-                            ui.push_success_toast("Opened Spotify link");
-                        }
-                        "album" => {
-                            let id = AlbumId::from_id(id)?.into_static();
-                            open_context_page(ui, client_pub, ContextId::Album(id))?;
-                            ui.push_success_toast("Opened Spotify link");
-                        }
-                        e => {
-                            tracing::warn!("unsupported Spotify type {e}!");
-                            ui.push_error_toast(format!("Unsupported Spotify type {e}"));
-                        }
-                    }
-                } else {
-                    tracing::warn!("clipboard's content ({content}) is not a valid Spotify link!");
-                    ui.push_error_toast("Clipboard is not a valid Spotify link");
+            // Every failure is reported as a toast; the clipboard text itself is
+            // never logged (it may hold anything).
+            Ok(content) => match open_spotify_link(state, ui, client_pub, &content) {
+                Ok(()) => ui.push_success_toast("Opened Spotify link"),
+                Err(err) => {
+                    tracing::warn!("Failed to open a Spotify link from the clipboard: {err:#}");
+                    ui.push_error_toast(format!("{err:#}"));
                 }
-            }
+            },
             Err(err) => {
                 tracing::error!("Failed to get clipboard's content: {err:#}");
                 ui.push_error_toast(format!("Failed to read clipboard: {err:#}"));
@@ -880,9 +904,11 @@ fn handle_global_command(
         }
         Command::JumpToCurrentTrackInContext => {
             let track_id = match state.player.read().currently_playing() {
-                Some(rspotify::model::PlayableItem::Track(track)) => {
-                    PlayableId::Track(track.id.clone().expect("all non-local tracks have ids"))
-                }
+                Some(rspotify::model::PlayableItem::Track(track)) => match track.id.clone() {
+                    Some(id) => PlayableId::Track(id),
+                    // Local files have no id and cannot be located in a context.
+                    None => return Ok(false),
+                },
                 Some(rspotify::model::PlayableItem::Episode(episode)) => {
                     PlayableId::Episode(episode.id.clone())
                 }

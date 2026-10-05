@@ -13,6 +13,13 @@ use sha2::{Digest as _, Sha256};
 
 pub const SPOTIFY_CLIENT_ID: &str = "65b708073fc0480ea92a077233ca87bd";
 pub const NCSPOT_CLIENT_ID: &str = "d420a117a32841c2b3474932e49fb54b";
+pub const NCSPOT_REDIRECT_URI: &str = "http://127.0.0.1:8989/login";
+
+/// File-name suffix of a Web API token cache; there is one
+/// `{client_id}_token.json` per client id.
+pub const TOKEN_CACHE_SUFFIX: &str = "_token.json";
+/// File `librespot` keeps its reusable credentials in, inside the cache folder.
+pub const CREDENTIALS_FILE: &str = "credentials.json";
 
 const SPOTIFY_AUTHORIZE_URL: &str = "https://accounts.spotify.com/authorize";
 const SPOTIFY_TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
@@ -88,6 +95,32 @@ impl AuthConfig {
     }
 }
 
+/// Make every credential file already cached in `cache_folder` owner-only.
+///
+/// Files written from now on are restricted where they are written; this
+/// covers what older versions left behind with default permissions, including
+/// token caches of client ids that are no longer configured.
+pub fn restrict_cached_credentials(cache_folder: &std::path::Path) {
+    let entries = match std::fs::read_dir(cache_folder) {
+        Ok(entries) => entries,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to list the cache folder {}: {err:#}",
+                cache_folder.display()
+            );
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let is_credential = name == CREDENTIALS_FILE || name.ends_with(TOKEN_CACHE_SUFFIX);
+        if is_credential && entry.path().is_file() {
+            crate::utils::restrict_permissions(&entry.path());
+        }
+    }
+}
+
 /// Get Spotify credentials to authenticate the application
 ///
 /// # Args
@@ -106,6 +139,7 @@ pub fn get_creds(auth_config: &AuthConfig, reauth: bool, use_cached: bool) -> Re
             let msg = "No cached credentials found, please authenticate the application first.";
             if reauth {
                 eprintln!("{msg}");
+                println!("Authenticating the librespot streaming client...");
 
                 let access_token = get_oauth_access_token(
                     SPOTIFY_CLIENT_ID,
@@ -124,17 +158,41 @@ pub fn get_creds(auth_config: &AuthConfig, reauth: bool, use_cached: bool) -> Re
     })
 }
 
-/// Authenticate the user-provided (Web API) client using the authorization code with PKCE flow.
+/// Authenticate the configured Web API client and its optional fallback using PKCE.
 ///
 /// This mirrors `rspotify`'s `prompt_for_token` (reusing/refreshing a cached token when possible),
 /// but replaces its callback listener with [`obtain_auth_code`], which is robust against stray
 /// browser requests on the callback port (see [`listen_for_auth_code`]).
 ///
-/// When `force` is set, any cached token is ignored and a fresh interactive authorization flow is
-/// always run. This is used by the `authenticate` CLI command to re-authenticate on demand.
+/// When `force` is set, cached tokens are ignored and fresh interactive authorization flows are
+/// run. This is used by the `authenticate` CLI command to re-authenticate on demand.
 pub async fn prompt_for_user_token(
     client: &mut crate::client::WebApiClient,
     force: bool,
+) -> Result<()> {
+    prompt_for_web_api_token(client.primary_mut(), force, "configured client").await?;
+    if let Some(fallback) = client.fallback_mut() {
+        prompt_for_web_api_token(fallback, force, "ncspot fallback client").await?;
+    }
+    Ok(())
+}
+
+async fn prompt_for_web_api_token(
+    client: &mut crate::client::PkceWebApiClient,
+    force: bool,
+    client_name: &str,
+) -> Result<()> {
+    authorize_web_api_client(client, force, client_name).await?;
+    // Every successful path leaves a token cache on disk. It holds a long-lived
+    // refresh token and `rspotify` creates it with the default umask.
+    crate::utils::restrict_permissions(&client.get_config().cache_path);
+    Ok(())
+}
+
+async fn authorize_web_api_client(
+    client: &mut crate::client::PkceWebApiClient,
+    force: bool,
+    client_name: &str,
 ) -> Result<()> {
     // Reuse a cached token when possible, refreshing it if it has expired.
     if !force {
@@ -183,14 +241,16 @@ pub async fn prompt_for_user_token(
 
     // No usable cached token: run the interactive authorization code flow.
     // `get_authorize_url` also generates and stores the PKCE verifier used by `request_token`.
+    println!("Authenticating the {client_name} for Spotify Web API access...");
     let url = client
         .get_authorize_url(None)
-        .context("get authorize URL for user-provided client")?;
-    let code = obtain_auth_code(&url, &client.get_oauth().redirect_uri)?;
+        .with_context(|| format!("get authorize URL for {client_name}"))?;
+    let oauth = client.get_oauth();
+    let code = obtain_auth_code(&url, &oauth.redirect_uri, Some(&oauth.state))?;
     client
         .request_token(&code)
         .await
-        .context("exchange auth code for token (user-provided client)")?;
+        .with_context(|| format!("exchange auth code for token ({client_name})"))?;
 
     Ok(())
 }
@@ -201,7 +261,7 @@ fn get_oauth_access_token(client_id: &str, redirect_uri: &str, scopes: &[&str]) 
     let state = random_url_safe(16);
     let auth_url = build_authorize_url(client_id, redirect_uri, scopes, &pkce.challenge, &state)?;
 
-    let code = obtain_auth_code(auth_url.as_str(), redirect_uri)?;
+    let code = obtain_auth_code(auth_url.as_str(), redirect_uri, Some(&state))?;
     exchange_code_for_token(client_id, redirect_uri, &code, &pkce.verifier)
 }
 
@@ -209,13 +269,17 @@ fn get_oauth_access_token(client_id: &str, redirect_uri: &str, scopes: &[&str]) 
 ///
 /// If `redirect_uri` is an HTTP loopback address with a port, a local server collects the code
 /// automatically; otherwise the user is prompted to paste the redirect URL on stdin.
-fn obtain_auth_code(auth_url: &str, redirect_uri: &str) -> Result<String> {
+fn obtain_auth_code(
+    auth_url: &str,
+    redirect_uri: &str,
+    expected_state: Option<&str>,
+) -> Result<String> {
     open::that_in_background(auth_url);
     println!("Browse to: {auth_url}");
 
     match redirect_socket_address(redirect_uri) {
-        Some(addr) => listen_for_auth_code(addr),
-        None => read_auth_code_from_stdin(),
+        Some(addr) => listen_for_auth_code(addr, expected_state),
+        None => read_auth_code_from_stdin(expected_state),
     }
 }
 
@@ -227,7 +291,7 @@ fn obtain_auth_code(auth_url: &str, redirect_uri: &str) -> Result<String> {
 /// and therefore fail with "Auth code param not found" when a prefetch arrives first — this server
 /// ignores any request that does not carry an auth `code` and keeps listening until the real
 /// redirect arrives.
-fn listen_for_auth_code(addr: SocketAddr) -> Result<String> {
+fn listen_for_auth_code(addr: SocketAddr, expected_state: Option<&str>) -> Result<String> {
     let listener =
         TcpListener::bind(addr).with_context(|| format!("bind OAuth callback server to {addr}"))?;
     tracing::info!("OAuth callback server listening on {addr}");
@@ -249,7 +313,7 @@ fn listen_for_auth_code(addr: SocketAddr) -> Result<String> {
 
         // The request line looks like `GET /login?code=...&state=... HTTP/1.1`.
         let request_target = request_line.split_whitespace().nth(1).unwrap_or_default();
-        if let Some(code) = code_from_redirect(request_target) {
+        if let Some(code) = code_from_redirect(request_target, expected_state) {
             respond(
                 &mut stream,
                 "200 OK",
@@ -268,13 +332,14 @@ fn listen_for_auth_code(addr: SocketAddr) -> Result<String> {
 }
 
 /// Prompt for the redirect URL on stdin and extract the auth `code`.
-fn read_auth_code_from_stdin() -> Result<String> {
+fn read_auth_code_from_stdin(expected_state: Option<&str>) -> Result<String> {
     println!("Enter the URL you were redirected to: ");
     let mut buffer = String::new();
     std::io::stdin()
         .read_line(&mut buffer)
         .context("read redirect URL from stdin")?;
-    code_from_redirect(buffer.trim()).context("no auth code found in the provided redirect URL")
+    code_from_redirect(buffer.trim(), expected_state)
+        .context("no auth code (with a matching state) found in the provided redirect URL")
 }
 
 fn respond(stream: &mut TcpStream, status: &str, body: &str) {
@@ -289,13 +354,25 @@ fn respond(stream: &mut TcpStream, status: &str, body: &str) {
 
 /// Extract the `code` query parameter from a redirect, accepting either a full URL or a bare
 /// request target (e.g. `/login?code=...`).
-fn code_from_redirect(redirect: &str) -> Option<String> {
+///
+/// When `expected_state` is given, a redirect whose `state` does not match is ignored: a stale
+/// or foreign callback must not end the listener before the real one arrives.
+fn code_from_redirect(redirect: &str, expected_state: Option<&str>) -> Option<String> {
     let url = Url::parse(redirect)
         .or_else(|_| Url::parse(&format!("http://localhost{redirect}")))
         .ok()?;
-    url.query_pairs()
+    let code = url
+        .query_pairs()
         .find(|(key, _)| key == "code")
-        .map(|(_, code)| code.into_owned())
+        .map(|(_, code)| code.into_owned())?;
+    if let Some(expected) = expected_state {
+        let state = url.query_pairs().find(|(key, _)| key == "state");
+        if state.as_ref().map(|(_, value)| value.as_ref()) != Some(expected) {
+            tracing::warn!("Ignoring an OAuth redirect whose `state` does not match this login");
+            return None;
+        }
+    }
+    Some(code)
 }
 
 /// Resolve the loopback socket address that an `http://host:port/...` redirect URI listens on.
@@ -400,15 +477,110 @@ fn random_url_safe(n: usize) -> String {
 mod test {
     use super::*;
 
+    /// The token cache that gets restricted is the file the client itself reads,
+    /// whatever it is named.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn authorized_web_api_token_cache_is_owner_only() {
+        use crate::utils::{test_mode, test_scratch_dir};
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = test_scratch_dir("token-cache");
+        let cache_path = dir.join("any-name.json");
+        // A cached token that is still valid, so no request is made.
+        rspotify::Token {
+            access_token: "access".to_string(),
+            expires_at: Some(chrono::Utc::now() + chrono::TimeDelta::hours(1)),
+            refresh_token: Some("refresh".to_string()),
+            ..Default::default()
+        }
+        .write_cache(&cache_path)
+        .unwrap();
+        std::fs::set_permissions(&cache_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let mut client =
+            crate::client::PkceWebApiClient::new(rspotify::AuthCodePkceSpotify::with_config(
+                rspotify::Credentials {
+                    id: "client-id".to_string(),
+                    secret: None,
+                },
+                rspotify::OAuth::default(),
+                rspotify::Config {
+                    token_cached: true,
+                    cache_path: cache_path.clone(),
+                    ..Default::default()
+                },
+            ));
+        prompt_for_web_api_token(&mut client, false, "test client")
+            .await
+            .unwrap();
+
+        assert_eq!(test_mode(&cache_path), 0o600);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `CREDENTIALS_FILE` has to track the name `librespot` picks.
+    #[test]
+    fn librespot_stores_credentials_in_the_credentials_file() {
+        let dir = crate::utils::test_scratch_dir("librespot-credentials");
+        let cache = Cache::new(Some(dir.clone()), None, None, None).unwrap();
+        cache.save_credentials(&Credentials::with_access_token("token"));
+
+        assert!(dir.join(CREDENTIALS_FILE).is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restrict_cached_credentials_touches_only_credential_files() {
+        use crate::utils::{test_mode, test_scratch_dir};
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = test_scratch_dir("cached-credentials");
+        let credential_files = [
+            CREDENTIALS_FILE.to_string(),
+            format!("{NCSPOT_CLIENT_ID}{TOKEN_CACHE_SUFFIX}"),
+            // The cache name used before one file per client id.
+            "user_client_token.json".to_string(),
+        ];
+        let other_files = ["Playlists_cache.json", "spotify-player.log"];
+        for name in credential_files
+            .iter()
+            .map(String::as_str)
+            .chain(other_files)
+        {
+            let path = dir.join(name);
+            std::fs::write(&path, "{}").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        // A folder whose name looks like a token cache must keep its search bit.
+        let lookalike = dir.join(format!("folder{TOKEN_CACHE_SUFFIX}"));
+        std::fs::create_dir(&lookalike).unwrap();
+        std::fs::set_permissions(&lookalike, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        restrict_cached_credentials(&dir);
+
+        for name in &credential_files {
+            assert_eq!(test_mode(&dir.join(name)), 0o600, "{name}");
+        }
+        for name in other_files {
+            assert_eq!(test_mode(&dir.join(name)), 0o644, "{name}");
+        }
+        assert_eq!(test_mode(&lookalike), 0o755);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn code_from_redirect_extracts_code() {
         // Bare request target (as read from the HTTP request line) and full URL both work.
         assert_eq!(
-            code_from_redirect("/login?code=abc123&state=xyz").as_deref(),
+            code_from_redirect("/login?code=abc123&state=xyz", None).as_deref(),
             Some("abc123")
         );
         assert_eq!(
-            code_from_redirect("http://127.0.0.1:8989/login?code=abc123&state=xyz").as_deref(),
+            code_from_redirect("http://127.0.0.1:8989/login?code=abc123&state=xyz", None)
+                .as_deref(),
             Some("abc123")
         );
     }
@@ -417,11 +589,24 @@ mod test {
     fn code_from_redirect_ignores_stray_requests() {
         // The exact request that previously broke authentication: a browser prefetch with no code.
         assert_eq!(
-            code_from_redirect("/apple-touch-icon-precomposed.png"),
+            code_from_redirect("/apple-touch-icon-precomposed.png", None),
             None
         );
-        assert_eq!(code_from_redirect("/favicon.ico"), None);
-        assert_eq!(code_from_redirect("/login"), None);
+        assert_eq!(code_from_redirect("/favicon.ico", None), None);
+        assert_eq!(code_from_redirect("/login", None), None);
+    }
+
+    #[test]
+    fn code_from_redirect_checks_the_state_when_expected() {
+        assert_eq!(
+            code_from_redirect("/login?code=abc123&state=xyz", Some("xyz")).as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(
+            code_from_redirect("/login?code=abc123&state=other", Some("xyz")),
+            None
+        );
+        assert_eq!(code_from_redirect("/login?code=abc123", Some("xyz")), None);
     }
 
     #[test]

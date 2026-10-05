@@ -1,7 +1,7 @@
 use ratatui::{
     layout::Rect,
     style::Modifier,
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
@@ -43,6 +43,11 @@ pub fn render_toasts(frame: &mut Frame, ui: &UIStateGuard, content: Rect) {
             ToastKind::Error => "Error",
         };
 
+        // The toast is the only true overlay in the app (everything else is
+        // drawn into its own partition of the frame), so reset the cells first
+        // or the page text shows through the card.
+        frame.render_widget(Clear, area);
+        frame.render_widget(Block::default().style(ui.theme.app()), area);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(style)
@@ -63,6 +68,8 @@ pub fn render_toasts(frame: &mut Frame, ui: &UIStateGuard, content: Rect) {
     }
 
     if let Some(area) = overflow {
+        frame.render_widget(Clear, area);
+        frame.render_widget(Block::default().style(ui.theme.app()), area);
         frame.render_widget(
             Block::default()
                 .borders(Borders::LEFT | Borders::RIGHT | Borders::TOP)
@@ -84,6 +91,37 @@ mod tests {
         buffer::Buffer,
         widgets::{Block, Widget},
     };
+
+    #[test]
+    fn toasts_clear_underlying_page_content() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mutex = parking_lot::Mutex::new(crate::state::UIState::default());
+        let ui = {
+            let mut ui = mutex.lock();
+            ui.toasts.push(crate::state::Toast::success(
+                "Copied link",
+                std::time::Duration::from_secs(3),
+            ));
+            ui
+        };
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let page = vec!["X".repeat(area.width as usize); area.height as usize].join("\n");
+                frame.render_widget(Paragraph::new(page), area);
+                render_toasts(frame, &ui, area);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        // A one-line message makes a 3-row card at the bottom; row 6 is its interior.
+        let row: String = (1..39).map(|x| buf[(x, 6)].symbol().to_string()).collect();
+        assert!(row.contains("Copied link"), "{row:?}");
+        assert!(
+            !row.contains('X'),
+            "page text leaked into the toast: {row:?}"
+        );
+    }
 
     #[test]
     fn compact_toast_inner_keeps_short_message() {

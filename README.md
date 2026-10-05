@@ -7,7 +7,7 @@
 - [Installation](#installation)
 - [Authentication](#authentication)
   - [How authentication works](#how-authentication-works)
-  - [Why you may be asked to authenticate twice](#why-you-may-be-asked-to-authenticate-twice)
+  - [Why you may be asked to authenticate multiple times](#why-you-may-be-asked-to-authenticate-multiple-times)
   - [Client ID and rate limits](#client-id-and-rate-limits)
   - [Using a custom client ID](#using-a-custom-client-id)
 - [Features](#features)
@@ -70,7 +70,7 @@ A Spotify Premium account is **required**.
 ##### Linux
 
 - [Rust and cargo](https://www.rust-lang.org/tools/install) as the build dependencies
-- install `openssl`, `alsa-lib` (`streaming` feature), `libdbus` (`media-control` feature), `libpulse` (`system-audio-visualization` feature, enabled by default in this fork).
+- install `openssl`, `alsa-lib` (`streaming` feature), `libdbus` (Linux: always, for the desktop Spotify MPRIS integration and the `media-control` feature), `libpulse` (`system-audio-visualization` feature, enabled by default in this fork).
   - For example, on Debian based systems, run the below command to install application's dependencies:
 
     ```shell
@@ -193,46 +193,51 @@ docker run --rm \
 
 The simplest way to authenticate is to just **run the application** — on first use it prompts for whichever credentials are not yet cached. Each prompt opens the Spotify authorization page in your browser; after you approve access, Spotify redirects to a local loopback address (`login_redirect_uri`, default `http://127.0.0.1:8989/login`) where `spotify_player` captures the authorization code and exchanges it for an access token. Credentials are cached in the application's [cache folder](#caches), so this is a one-time step per machine.
 
-Alternatively, run the `spotify_player authenticate` CLI command to authenticate **both** credentials up front — useful for setting things up ahead of a [daemon](#daemon) or headless launch. Unlike a normal launch, `authenticate` always forces a fresh interactive login for both credentials, ignoring any cached tokens, so it can also be used to re-authenticate from scratch.
+Alternatively, run the `spotify_player authenticate` CLI command to authenticate all required credentials up front — useful for setting things up ahead of a [daemon](#daemon) or headless launch. Unlike a normal launch, `authenticate` always forces fresh interactive logins, ignoring cached credentials, so it can also be used to re-authenticate from scratch.
 
 ### How authentication works
 
-Two distinct credentials are involved:
+Two kinds of credentials are involved:
 
-- A **Web API token**, used for all REST calls (playback control, library, search, playlists, etc.). This is obtained through the OAuth flow above.
+- One or two **Web API tokens**, used for REST calls (playback control, library, search, playlists, etc.). The default setup uses ncspot's client ID. When a custom `client_id` is configured, its token is used first and a separate ncspot token provides fallback access.
 - A **librespot session**, used for the [streaming](#streaming) feature (direct playback and Spotify Connect device registration).
 
-Both authenticate through your Spotify account; the only thing that differs is the _client ID_ presented to Spotify (see below).
+They authenticate through your Spotify account; the _client ID_ presented to Spotify differs between credentials (see below).
 
-### Why you may be asked to authenticate twice
+### Why you may be asked to authenticate multiple times
 
-With the [streaming](#streaming) feature enabled (the default), the first launch can open the Spotify authorization page **twice** — once for each credential described above, in this order:
+With the [streaming](#streaming) feature enabled (the default), the first launch normally opens the Spotify authorization page **twice**, in this order:
 
-1. The **Web API token**, presented under the configured `client_id` (ncspot's by default). This is cached as `user_client_token.json`.
+1. The **Web API token**, presented under the configured `client_id` (ncspot's by default). This is cached as `<client_id>_token.json`.
 2. The **librespot session** credentials, presented under Spotify's official client ID. These are cached as `credentials.json`.
 
-These are two independent OAuth flows with two different client IDs, so Spotify requires a separate approval for each, and each token is cached separately in the [cache folder](#caches). This is a one-time step per machine — once both tokens are cached, subsequent launches reuse and silently refresh them, and you will not be prompted again unless the cache is cleared or a token is revoked.
+These are two independent OAuth flows with two different client IDs, so Spotify requires a separate approval for each, and each credential is cached separately in the [cache folder](#caches). This is a one-time step per machine — subsequent launches reuse and silently refresh them unless a cache is cleared or a credential is revoked.
 
-The `spotify_player authenticate` command runs both flows in one go (forcing a fresh login for each). If the `streaming` feature is disabled, the librespot session is not needed, so you are prompted just once (step 1).
+When a custom `client_id` is configured, an ncspot fallback Web API token is also requested and cached as `<ncspot_client_id>_token.json`. Its OAuth callback always uses `http://127.0.0.1:8989/login`; `login_redirect_uri` applies only to the custom client. A custom setup with streaming enabled can therefore require three approvals on first launch. Web API token cache filenames include their client IDs, so changing `client_id` requires a new approval instead of reusing a token issued to another client.
+
+A fallback ncspot client is integrated since the custom client might not be registered with [extended quota mode](https://developer.spotify.com/documentation/web-api/concepts/quota-modes) and could therefore doesn't have access to [certain endpoints](https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api).
+
+The `spotify_player authenticate` command runs every required flow in one go, forcing a fresh login for each. Without streaming, the librespot flow is omitted, leaving one Web API approval for the default setup or two for a custom-client setup.
 
 ### Client ID and rate limits
 
 Every request to the Spotify Web API is attributed to a Spotify _application_, identified by a **client ID**. The client ID — not your account — determines the [API quota](https://developer.spotify.com/documentation/web-api/concepts/rate-limits) you are subject to.
 
-By default, `spotify_player` uses [ncspot](https://github.com/hrkfdn/ncspot)'s client ID. This is intentional: that client ID is registered in [extended quota mode](https://developer.spotify.com/documentation/web-api/concepts/quota-modes) and predates Spotify's [November 2024 Web API changes](https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api). As a result it has a much higher rate limit and access to endpoints (browse, personalized content, generated playlists, …) that newly-registered applications can no longer use.
+By default, `spotify_player` uses [ncspot](https://github.com/hrkfdn/ncspot)'s client ID. This client ID is shared by many users, so its API quota can be exhausted by aggregate usage and cause `429 Too Many Requests` responses. **Registering and configuring your own client ID is strongly recommended** so routine requests use a quota dedicated to your Spotify application.
 
-> [!IMPORTANT]
-> **You almost certainly should not configure your own `client_id`.** Any application you register today starts in Spotify's restricted _default_ quota mode. Using such a client ID commonly leads to `429 Too Many Requests` and `403 Forbidden` errors and missing browse/personalized data. This was the root cause of several reported issues (e.g. [#890](https://github.com/aome510/spotify-player/issues/890), [#893](https://github.com/aome510/spotify-player/issues/893), [#912](https://github.com/aome510/spotify-player/issues/912), [#913](https://github.com/aome510/spotify-player/issues/913)), and switching to the bundled default client ID ([#918](https://github.com/aome510/spotify-player/pull/918)) resolved them.
->
-> The recommended setup is to **leave `client_id` unset** so the bundled default is used.
+The ncspot client ID remains available as a fallback because it is registered in [extended quota mode](https://developer.spotify.com/documentation/web-api/concepts/quota-modes) and predates Spotify's [November 2024 Web API changes](https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api). It can access endpoints (browse, personalized content, generated playlists, …) that newly-registered applications can no longer use.
+
+When a custom `client_id` is configured, `spotify-player` sends most Web API requests through that client first. If Spotify rejects custom-client request with any `4xx` response, the request is attempted once through ncspot. Successful requests and failures outside the `4xx` range do not trigger fallback.
+
+The custom client uses no request middleware. The ncspot client stores `Retry-After` durations and retries rate-limited GET requests up to two times by default; mutation requests are never delayed or retried by the middleware. Configure the ncspot retry count with `api_rate_limit_retries`; see the [configuration documentation](https://github.com/aome510/spotify-player/blob/master/docs/config.md) for details.
 
 ### Using a custom client ID
 
-A custom client ID is only worthwhile if you have a specific reason — for example an application that has been granted extended quota mode by Spotify, or organizational policy requiring your own registered app.
+Use a custom client ID to avoid competing for the shared ncspot client's rate limit. Most requests will be attributed to your own Spotify application instead. Newly registered applications use restricted default quota mode, so endpoints unavailable to the custom client transparently fall back to ncspot.
 
-If you do need one, [register an application](https://developer.spotify.com/dashboard) on the Spotify developer dashboard, add your `login_redirect_uri` (default `http://127.0.0.1:8989/login`) to the app's allowed redirect URIs, then set `client_id` (or `client_id_command`) in `app.toml`. See the [Client id command](https://github.com/aome510/spotify-player/blob/master/docs/config.md#client-id-command) section of the configuration docs for details.
+To configure one, [register an application](https://developer.spotify.com/dashboard) on the Spotify developer dashboard, add your `login_redirect_uri` (default `http://127.0.0.1:8989/login`) to the app's allowed redirect URIs, then set `client_id` (or `client_id_command`) in `app.toml`. See the [Client id command](https://github.com/aome510/spotify-player/blob/master/docs/config.md#client-id-command) section of the configuration docs for details.
 
-After changing the client ID, re-run `spotify_player authenticate` to refresh the cached token.
+After changing the client ID, re-run `spotify_player authenticate` to refresh the custom and fallback tokens.
 
 ## Features
 
@@ -240,7 +245,7 @@ After changing the client ID, re-run `spotify_player authenticate` to refresh th
 
 Control Spotify remotely with [Spotify Connect](https://support.spotify.com/us/article/spotify-connect/). Press **D** to list devices, then **enter** to connect.
 
-On Linux, when `enable_streaming = "Never"` and you control the official desktop client via `preferred_device`, that app is often missing from Connect until local playback starts — or already running idle/paused in the system tray after autostart. Enable `[desktop_spotify]` in `app.toml` so **first session** (and **playing reconnect**) visibly report, launch when needed, optionally hide to the system tray, and MPRIS-nudge Spotify whenever the preferred device is absent or not actively playing (even if another speaker such as Amazon Everywhere is listed; active audio on another speaker is left alone when preferred is already listed), then transfer to the woken client once Connect lists it. A later session reconnect while playback is paused does not OpenUri-nudge the idle tray client (that was starting music after API blips); reconnect still wakes when restoring a playing session. If the desktop client is already Playing via MPRIS, wake/OpenUri/Pause is skipped so existing audio keeps playing — init waits up to 15s for `preferred_device` to appear in Connect and transfers with keep-playing when it does; if Connect still omits it, playback is left unchanged until you start something (Enter/play), which then registers the desktop client (OpenUri on the current track without pausing audible playback) and retries transfer on transient API errors. If Connect lists `preferred_device`, first-session init still transfers to that device with keep-playing and never to another speaker. If Connect still has no current playback, the TUI playback window uses MPRIS metadata (track, artists, album, progress, cover URL) until Connect lists a session. Connect often reports 0% volume for that client; the TUI uses MPRIS volume instead so the playback row does not start at 0%. By default the registration Play is silenced via Pulse/PipeWire sink-input mute and mute is held until pause confirms, including retries and a short background hold (`pause_after_nudge = true`); unmute after pause or a timeout so mute cannot stick forever. Starting the desktop app does not begin audible playback; use `spotify_player playback play` or the TUI play command when you want audio. Or run `spotify_player wake-desktop`. See [docs/config.md](./docs/config.md#desktop-spotify-wake-linux).
+On Linux, when `enable_streaming = "Never"` and `preferred_device` names the official desktop client, that client is often missing from Connect until it has played something, or sits idle in the tray after login. Enable `[desktop_spotify]` in `app.toml` to launch it when needed, nudge it over MPRIS so Connect registers it (silently, paused right after), hide it to the tray, and transfer playback to it. A paused mid-session reconnect never starts music, and a client that is already playing is left alone. When Connect has no session, the playback window shows the client's MPRIS track. See [docs/config.md](./docs/config.md#desktop-spotify-wake-linux) for the full decision table, or run `spotify_player wake-desktop`.
 
 ### Streaming
 
@@ -282,9 +287,9 @@ cargo install spotify_player --no-default-features
 
 Real-time audio visualization is displayed in the playback window as a frequency-band bar chart (128 log-scale bands from bass (left) to treble (right)) with dB and Hz axis labels, a themed grid, the progress bar directly below the chart, and repeat/shuffle/volume/device spread across a full-width row under the bar while music is streamed locally via the integrated [librespot](https://github.com/librespot-org/librespot) player.
 
-With the `system-audio-visualization` feature (enabled by default in this fork on Linux), set `enable_system_audio_visualization` to `true` to also drive the bars from the PipeWire/Pulse default-sink monitor when playback is on an external Spotify Connect device (for example desktop Spotify playing local/lossless files). While a track is loaded, the visualization area stays reserved (including pause, where bars idle at zero); it is hidden only when there is no current track.
+Set `enable_audio_visualization` to `true` in your config to enable this feature. The bars are colored by amplitude using the active theme's `visualization` component style (`low`/`mid`/`high` colors); see [config docs](./docs/config.md).
 
-Set `enable_audio_visualization` to `true` in your config to enable this feature. See [config docs](./docs/config.md).
+With the `system-audio-visualization` feature (enabled by default in this fork on Linux), set `enable_system_audio_visualization` to `true` to also drive the bars from the PipeWire/Pulse default-sink monitor when playback is on an external Spotify Connect device (for example desktop Spotify playing local/lossless files). While a track is loaded, the visualization area stays reserved (including pause, where bars idle at zero); it is hidden only when there is no current track.
 
 With the `image` feature also enabled, the cover sits in the top-right of the playback window and may overlap the visualizer's top-right corner. Track/album/genre text stays on the left, indented one column left of the chart's vertical axis; repeat/shuffle/volume/device stay on a full-width row under the progress bar.
 
@@ -357,7 +362,7 @@ cargo install spotify_player --features notify
 
 ### Toasts
 
-The TUI shows a short overlay in the lower-right of the main content area (never on the playback window) after likes, queue adds, playlist edits, skip next/previous, copy-link, and opening a Spotify link from the clipboard. Each box grows with the message up to about 60 columns and 6 rows (four inner lines); overflow beyond that is clipped with `…`. Up to three toasts are stacked; a `4+` marker denotes additional queued messages. Body text is not bold so wrapped lines stay inside the border. Toasts, including errors, disappear after `toast_success_timeout_secs` (default 3). `esc` still dismisses the current toast early when no popup is open. Set `enable_toast = false` to disable. Desktop `notify` for track changes is separate.
+The TUI shows a short overlay in the lower-right of the main content area (never on the playback window or a popup) after likes, queue adds, playlist edits, starting playback (`Playing`), skip next/previous, copy-link, and opening a Spotify link from the clipboard. Each box grows with the message up to about 60 columns and 6 rows (four inner lines); overflow beyond that is clipped with `…`. Up to three toasts are stacked; a `4+` marker denotes additional queued messages. Body text is not bold so wrapped lines stay inside the border. Toasts, including errors, disappear `toast_success_timeout_secs` (default 3) after they become visible, so toasts waiting behind the `4+` marker still get their full time on screen. `esc` still dismisses the current toast early when no popup is open. Set `enable_toast = false` to disable. Desktop `notify` for track changes is separate.
 
 ### Mouse support
 
@@ -412,6 +417,8 @@ To enable [fuzzy search](https://en.wikipedia.org/wiki/Approximate_string_matchi
 - `search`: Search spotify
 - `connect`: Connect to a Spotify device
 - `wake-desktop`: Launch/nudge the official Spotify desktop app so Connect can see it (Linux; requires `[desktop_spotify] enable = true`)
+
+A CLI command waits up to 35 seconds for the running instance to reply. A request that takes longer (for example a large `playlist import`) keeps running in the background; the CLI reports the timeout and the outcome is in the application log.
 - `like`: Like currently playing track
 - `authenticate`: Authenticate the application
 - `playlist`: Playlist editing (new, delete, import, fork, etc)
@@ -457,15 +464,15 @@ List of supported commands:
 | `VolumeChange`                  | change playback volume by an offset (default shortcuts use 5%)                                     | `+`, `-`           |
 | `Mute`                          | toggle playback volume between 0% and previous level                                               | `_`                |
 | `SeekStart`                     | seek start of current track                                                                        | `^`                |
-| `SeekForward`                   | seek forward by a duration in seconds (defaults to `seek_duration_secs`)                           | `>`                |
-| `SeekBackward`                  | seek backward by a duration in seconds (defaults to `seek_duration_secs`)                          | `<`                |
+| `SeekForward`                   | seek forward by a duration in seconds (defaults to `seek_duration_secs`, supports vim-style count) | `>`                |
+| `SeekBackward`                  | seek backward by a duration in seconds (defaults to `seek_duration_secs`, supports vim-style count)| `<`                |
 | `Quit`                          | quit the application                                                                               | `C-c`, `q`         |
 | `ClosePopup`                    | close a popup, or dismiss the current toast if none is open                                        | `esc`              |
 | `SelectNextOrScrollDown`        | select the next item in a list/table or scroll down (supports vim-style count: 5j)                 | `j`, `C-n`, `down` |
 | `SelectPreviousOrScrollUp`      | select the previous item in a list/table or scroll up (supports vim-style count: 10k)              | `k`, `C-p`, `up`   |
 | `PageSelectNextOrScrollDown`    | select the next page item in a list/table or scroll a page down (supports vim-style count: 3C-f)   | `page_down`, `C-f` |
 | `PageSelectPreviousOrScrollUp`  | select the previous page item in a list/table or scroll a page up (supports vim-style count: 2C-b) | `page_up`, `C-b`   |
-| `SelectFirstOrScrollToTop`      | select the first item in a list/table or scroll to the top                                         | `g g`, `home`      |
+| `SelectFirstOrScrollToTop`      | select the first item in a list/table or scroll to the top                                         | `g g`              |
 | `SelectLastOrScrollToBottom`    | select the last item in a list/table or scroll to the bottom                                       | `G`, `end`         |
 | `ChooseSelected`                | choose the selected item                                                                           | `enter`            |
 | `RefreshPlayback`               | manually refresh the current playback                                                              | `C-r`              |
@@ -495,7 +502,7 @@ List of supported commands:
 | `Queue`                         | go to the queue page                                                                               | `z`                |
 | `OpenCommandHelp`               | go to the command help page                                                                        | `?`, `C-h`         |
 | `PreviousPage`                  | go to the previous page                                                                            | `backspace`, `C-q` |
-| `OpenLogs`                      | go the the application logs page                                                                   | `g o`              |
+| `OpenLogs`                      | go to the application logs page                                                                    | `g o`              |
 | `OpenSpotifyLinkFromClipboard`  | open a Spotify link from clipboard                                                                 | `O`                |
 | `SortTrackByTitle`              | sort the track table (if any) by track's title                                                     | `o t`              |
 | `SortTrackByArtists`            | sort the track table (if any) by track's artists                                                   | `o a`              |
@@ -504,7 +511,7 @@ List of supported commands:
 | `SortTrackByDuration`           | sort the track table (if any) by track's duration                                                  | `o d`              |
 | `SortLibraryAlphabetically`     | sort the library alphabetically                                                                    | `o l a`            |
 | `SortLibraryByRecent`           | sort the library (playlists and albums) by recently added items                                    | `o l r`            |
-| `ReverseOrder`                  | reverse the order of the track table (if any)                                                      | `o r`              |
+| `ReverseTrackOrder`             | reverse the order of the track table (if any)                                                      | `o r`              |
 | `MovePlaylistItemUp`            | move playlist item up one position                                                                 | `C-k`              |
 | `MovePlaylistItemDown`          | move playlist item down one position                                                               | `C-j`              |
 | `CreatePlaylist`                | create a new playlist                                                                              | `N`                |
@@ -522,6 +529,7 @@ List of available actions:
 - `GoToArtist`
 - `GoToAlbum`
 - `GoToRadio`
+- `GoToShow`
 - `AddToLibrary`
 - `AddToPlaylist`
 - `AddToQueue`
@@ -556,6 +564,8 @@ See [configuration documentation](https://github.com/aome510/spotify-player/blob
 ## Caches
 
 By default, cache files are stored in `$HOME/.cache/spotify-player` (logs, credentials, audio cache, etc.). Change this with `-C <FOLDER_PATH>` or `--cache-folder <FOLDER_PATH>`.
+
+On Unix the cache folder is created private to your user (`0700`), and the cached credential files (`credentials.json` and the `*_token.json` files) are kept owner-only (`0600`). A folder that already exists keeps its permissions.
 
 ### Logging
 

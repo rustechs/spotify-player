@@ -6,7 +6,7 @@
 use parking_lot::Mutex;
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 const FFT_SIZE: usize = 1024;
@@ -27,11 +27,8 @@ const DECAY_FACTOR: f32 = 0.985;
 /// through quiet passages so the bars reflect genuine relative loudness instead
 /// of always filling to 100%.
 const DECAY_FACTOR_PEAK: f32 = 0.9985;
-/// Reference sample rate used by the **render-side** decay helpers
-/// (`decay_for_elapsed`, `peak_decay_for_elapsed`).
-/// The audio processors use their own `sample_rate` field so that
-/// decay timings stay precise if audio arrives at 48 000 Hz instead.
-/// Nominal PCM sample rate used for frequency-axis labels in the UI.
+/// Reference sample rate for the render-side decay helpers and the initial
+/// `VisBands::sample_rate`; audio processors carry their own rate (44.1/48 kHz).
 pub const SAMPLE_RATE: f32 = 44_100.0;
 
 /// Shared frequency-band state exposed between the audio sink and the UI.
@@ -228,15 +225,26 @@ impl BandProcessor {
         self.process_hops();
     }
 
-    /// Clear queued samples and zero published bands (used on local sink stop).
+    /// Local sink stopped: clear queued samples, zero the published bands and
+    /// release the source flags. The intro is left alone; the UI clears it
+    /// when nothing is loaded, and clearing it here re-armed a full-scale
+    /// flash on every pause.
     pub fn reset(&mut self) {
+        self.reset_buffer();
+        let mut g = self.bands.lock();
+        g.is_active = false;
+        g.local_sink_active = false;
+    }
+
+    /// Stop contributing without touching the source flags or the intro:
+    /// clears queued samples, zeroes the published bands and arms a warm
+    /// start. The system-audio capture uses this when it yields to the local
+    /// sink, which owns `local_sink_active` from then on.
+    pub fn reset_buffer(&mut self) {
         let mut g = self.bands.lock();
         g.values.fill(0.0);
         g.peak_envelope = 1e-6;
         g.updated_at = Instant::now();
-        g.is_active = false;
-        g.local_sink_active = false;
-        g.clear_intro();
         drop(g);
         self.sample_buf.clear();
         self.warm_start = true;
@@ -382,24 +390,29 @@ fn smooth_bands(bands: &mut [f32], scratch: &mut [f32]) {
     }
 }
 
-/// Lowest displayed frequency (Hz) on the log-scale axis — first usable FFT bin.
-pub fn min_display_hz(sample_rate: f32) -> f32 {
-    sample_rate / FFT_SIZE as f32
+/// Band layout shared by every processor (and the axis labels).
+fn band_ranges() -> &'static [(usize, usize)] {
+    static RANGES: OnceLock<Vec<(usize, usize)>> = OnceLock::new();
+    RANGES.get_or_init(|| precompute_band_ranges(FFT_SIZE / 2, NUM_BANDS))
 }
 
-/// Highest displayed frequency (Hz) — Nyquist.
-pub fn max_display_hz(sample_rate: f32) -> f32 {
-    sample_rate / 2.0
-}
-
-/// Map a frequency (Hz) to a horizontal fraction in `[0, 1]` on the log-scale axis.
+/// Horizontal fraction in `[0, 1]` where `freq_hz` sits on the bar axis.
+///
+/// Bars are indexed by band, and the low bands cover consecutive linear FFT
+/// bins (see `precompute_band_ranges`), so labels must follow the band layout
+/// rather than a pure log scale: 1 kHz at 44.1 kHz is band ~22, not the middle.
 pub fn freq_to_x_fraction(freq_hz: f32, sample_rate: f32) -> f32 {
-    let f_min = min_display_hz(sample_rate);
-    let f_max = max_display_hz(sample_rate);
-    let log_f = freq_hz.clamp(f_min, f_max).log10();
-    let log_min = f_min.log10();
-    let log_max = f_max.log10();
-    ((log_f - log_min) / (log_max - log_min)).clamp(0.0, 1.0)
+    let ranges = band_ranges();
+    let bin = freq_hz.max(0.0) / (sample_rate / FFT_SIZE as f32);
+    let num_bands = ranges.len() as f32;
+    for (i, &(start, end)) in ranges.iter().enumerate() {
+        if bin < end as f32 {
+            let span = (end - start).max(1) as f32;
+            let within = ((bin - start as f32) / span).clamp(0.0, 1.0);
+            return ((i as f32 + within) / num_bands).clamp(0.0, 1.0);
+        }
+    }
+    1.0
 }
 
 /// Convert dB relative to peak into the normalised bar scale used for rendering.
@@ -414,8 +427,28 @@ mod tests {
     #[test]
     fn freq_to_x_fraction_maps_endpoints() {
         let rate = 44_100.0;
-        assert!((freq_to_x_fraction(min_display_hz(rate), rate) - 0.0).abs() < 1e-6);
-        assert!((freq_to_x_fraction(max_display_hz(rate), rate) - 1.0).abs() < 1e-6);
+        let first_bin_hz = rate / FFT_SIZE as f32;
+        assert!((freq_to_x_fraction(first_bin_hz, rate) - 0.0).abs() < 1e-6);
+        assert!((freq_to_x_fraction(rate / 2.0, rate) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn freq_to_x_fraction_follows_the_band_layout() {
+        let rate = 44_100.0;
+        let ticks = [100.0, 500.0, 1_000.0, 5_000.0, 10_000.0, 20_000.0];
+        let xs: Vec<f32> = ticks.iter().map(|&f| freq_to_x_fraction(f, rate)).collect();
+        assert!(xs.windows(2).all(|w| w[0] < w[1]), "{xs:?}");
+        // 1 kHz is FFT bin ~23, i.e. band ~22 of 128 under the linear low end.
+        let one_k = freq_to_x_fraction(1_000.0, rate);
+        assert!((0.15..0.25).contains(&one_k), "{one_k}");
+        // The band a label lands in must actually contain that frequency's bin.
+        let bin = 1_000.0 / (rate / FFT_SIZE as f32);
+        let band = (one_k * NUM_BANDS as f32) as usize;
+        let (start, end) = band_ranges()[band];
+        assert!(
+            (start as f32..end as f32).contains(&bin),
+            "{start}..{end} vs {bin}"
+        );
     }
 
     #[test]

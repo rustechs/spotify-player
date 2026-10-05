@@ -31,12 +31,14 @@ spotify_player -o device.volume=80 -o theme=dracula
 
 | Option                            | Description                                                                                          | Default                                                                |
 | --------------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| `client_id`                       | Spotify client ID for API access. **Leave unset unless you know you need a custom one** (see notes). | See code (default: ncspot's client ID)                                 |
+| `client_id`                       | Primary Spotify client ID for API access; rejected requests can fall back to ncspot (see notes).    | See code (default: ncspot's client ID)                                 |
 | `client_id_command`               | Shell command that outputs client ID to stdout (overrides `client_id`).                              | `None`                                                                 |
+| `ncspot_only_get_endpoints`       | Endpoint prefixes for GET requests that should always use the ncspot client.                        | `["me/playlists", "playlists/"]`                                       |
 | `login_redirect_uri`              | Redirect URI for authentication.                                                                     | `http://127.0.0.1:8989/login`                                          |
 | `client_port`                     | Port for the application's client to handle CLI commands.                                            | `8080`                                                                 |
 | `log_folder`                      | Path to store log files.                                                                             | `None`                                                                 |
 | `tracks_playback_limit`           | Maximum number of tracks in a playback session.                                                      | `50`                                                                   |
+| `top_tracks_limit`                | Maximum number of tracks returned on the user's top tracks page.                                    | `100`                                                                  |
 | `playback_format`                 | Format string for the playback window. `{metadata}` is ignored here; those fields render below the progress bar. | `{status} {track} • {artists} {liked}\n{album} • {genres}` |
 | `playback_metadata_fields`        | Ordered list of fields shown on the last inner row of the playback block, spread across the full width. | `["repeat", "shuffle", "volume", "device"]`                            |
 | `notify_format`                   | Notification format (if `notify` feature enabled).                                                   | `{ summary = "{track} • {artists}", body = "{album}" }`                |
@@ -44,10 +46,11 @@ spotify_player -o device.volume=80 -o theme=dracula
 | `notify_transient`                | Send transient notifications (Linux only, if `notify` feature enabled).                              | `false`                                                                |
 | `player_event_hook_command`       | Command to execute on player events.                                                                 | `None`                                                                 |
 | `ap_port`                         | Spotify session connection port.                                                                     | `None`                                                                 |
-| `proxy`                           | Spotify session connection proxy.                                                                    | `None`                                                                 |
+| `proxy`                           | Spotify session connection proxy. Credentials embedded in the URL (`user:password@`) are not supported and are ignored. | `None`                                                                 |
 | `theme`                           | Name of the theme to use.                                                                            | `default`                                                              |
 | `app_refresh_duration_in_ms`      | Interval (ms) between application refreshes.                                                         | `32`                                                                   |
 | `playback_refresh_duration_in_ms` | Interval (ms) between playback refreshes. `0` is event/command-only, except `enable_streaming = "Never"` which falls back to a light 5s poll (see Notes). | `0`                                                                    |
+| `api_rate_limit_retries`          | Number of times to retry an ncspot GET request after Spotify returns `429 Too Many Requests`.       | `2`                                                                    |
 | `page_size_in_rows`               | Number of rows per page for navigation.                                                              | `20`                                                                   |
 | `enable_media_control`            | Enable media control support (requires `media-control` feature).                                     | `true` (Linux), `false` (macOS/Windows)                                |
 | `enable_streaming`                | Enable streaming (`Always`, `Never`, or `DaemonOnly`).                                               | `Always`                                                               |
@@ -57,7 +60,7 @@ spotify_player -o device.volume=80 -o theme=dracula
 | `enable_notify`                   | Enable notifications (requires `notify` feature).                                                    | `true`                                                                 |
 | `enable_cover_image_cache`        | Cache album cover images.                                                                            | `true`                                                                 |
 | `preferred_device`                | Prefer transferring playback to a Connect device with this name when none is active (useful with `enable_streaming = "Never"`). | unset |
-| `desktop_spotify`                 | Linux: launch/nudge the official desktop Spotify client on first session (and playing reconnect) when preferred is missing or idle/paused in the tray; paused reconnect skips that wake (see below). | disabled |
+| `desktop_spotify`                 | Linux: launch/nudge the official desktop client so Connect can use it as `preferred_device` (see [Desktop Spotify wake](#desktop-spotify-wake-linux)). | disabled |
 | `notify_streaming_only`           | Send notifications only when streaming is active (requires `streaming` and `notify` features).       | `false`                                                                |
 | `play_icon`                       | Icon for playing state.                                                                              | `▶`                                                                    |
 | `pause_icon`                      | Icon for paused state.                                                                               | `▌▌`                                                                   |
@@ -74,22 +77,23 @@ spotify_player -o device.volume=80 -o theme=dracula
 | `seek_duration_secs`              | Seek duration in seconds for seek commands.                                                          | `5`                                                                    |
 | `sort_artist_albums_by_type`      | Sort albums by type on artist pages.                                                                 | `false`                                                                |
 | `volume_scroll_step`              | Volume change step when using mouse scroll.                                                          | `5`                                                                    |
-| `enable_mouse_scroll_volume`      | Enable volume control via mouse scroll.                                                              | `true`                                                                 |
-| `custom_queue`                    | Enable app-managed queue for custom playback integration (requires `streaming` feature).             | `true`                                                                 |
+| `enable_mouse_scroll_volume`      | Enable volume control via mouse scroll.                                                             | `false`                                                                |
+| `custom_queue`                    | Reserved for an app-managed queue (requires `streaming` feature). **Not implemented yet**: the option currently has no effect. | `true`                                                                 |
 | `pause_on_startup`                | Start with playback paused instead of resuming the previous session (requires `streaming` feature).  | `false`                                                                |
 | `enable_relative_line_number`     | Enable Vim-style relative line numbers for lists and popups.                                         | `false`                                                                |
-| `enable_toast`                    | Show in-TUI toasts for likes, queue, playlist edits, skip next/previous, copy-link, and clipboard-open. Desktop `notify` is unchanged. | `true` |
-| `toast_success_timeout_secs`      | Auto-dismiss timeout for all in-TUI toasts, including errors.     | `3`                                                                    |
+| `enable_toast`                    | Show in-TUI toasts for likes, queue, playlist edits, starting playback, skip next/previous, copy-link, and clipboard-open. Desktop `notify` is unchanged. | `true` |
+| `toast_success_timeout_secs`      | Auto-dismiss timeout for all in-TUI toasts, including errors, counted from when a toast becomes visible. | `3`                                                                    |
 | `device`                          | Device configuration (see below).                                                                    | See below                                                              |
 
 ### Notes
 
-- By default, `spotify-player` uses [ncspot](https://github.com/hrkfdn/ncspot)'s client ID for compatibility with Spotify's API. It is registered in [extended quota mode](https://developer.spotify.com/documentation/web-api/concepts/quota-modes) and predates Spotify's [November 2024 Web API changes](https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api), so it has higher rate limits and broader endpoint access than a newly-registered app. **Avoid setting a custom `client_id`**: clients registered today start in the restricted default quota mode and commonly hit `429 Too Many Requests` / `403 Forbidden` errors. `spotify-player` logs a warning at startup if a custom `client_id` is detected. See [this issue](https://github.com/aome510/spotify-player/issues/890) and the [Authentication section of the README](../README.md#authentication) for details.
+- By default, `spotify-player` uses [ncspot](https://github.com/hrkfdn/ncspot)'s client ID for compatibility with Spotify's API. When a custom `client_id` is configured, most requests use it first and any `4xx` response is retried once with a separately authenticated ncspot fallback client. Each Web API token is stored as `<client_id>_token.json`, so changing `client_id` selects a different cache instead of reusing a token issued to another client. The fallback OAuth flow always uses `http://127.0.0.1:8989/login`, while `login_redirect_uri` applies only to the custom client. See the [Authentication section of the README](../README.md#authentication) for details.
+- The custom client has no request middleware. For ncspot requests, `spotify-player` stores `Retry-After` durations globally and retries GET requests up to `api_rate_limit_retries` times. New ncspot GET requests wait for an active `Retry-After` period, while mutation requests are never delayed or retried by the middleware.
 - `ap_port` and `proxy` are passed to Librespot for session configuration. Librespot uses its defaults if unset.
 - Setting a positive `playback_refresh_duration_in_ms` increases API usage and may trigger rate limits. By default it is `0` (refresh playback only on events or commands). When `enable_streaming = "Never"`, a `0` value still falls back to a light 5s poll so external Connect track/device changes appear without manual `Ctrl-R`.
 - `enable_streaming` accepts `Always`, `Never`, or `DaemonOnly`. For backward compatibility, `true`/`false` are also accepted.
 - When `enable_streaming = "Never"`, the app will not invent a synthetic integrated Connect device (which previously caused HTTP 404 transfer loops). Set `preferred_device` to your desktop client's name (e.g. `"estelle"`) so first-session init transfers target that device.
-- On Linux, the official desktop Spotify app often stays invisible to Connect until local playback starts, or sits idle/paused in the tray after autostart while Connect still lists it. Enable `[desktop_spotify]` (`enable = true`) to launch Spotify if needed and MPRIS-nudge it during **first-session** playback init when `preferred_device` is missing from Connect or listed but not actively playing (or when no devices are listed if `preferred_device` is unset). Mid-session reconnects of a paused session skip that OpenUri/Play nudge so a Spotify API blip cannot start music; reconnect still nudges when restoring a session that was actually playing, or if this process just launched the desktop client. If the desktop client is already **Playing** via MPRIS, wake/OpenUri/Pause is skipped so existing audio is left alone — init waits up to 15s for `preferred_device` to appear in Connect and transfers with keep-playing when it does; if Connect still omits it, playback is left unchanged until a playback command (Enter/play), which registers the desktop client (OpenUri on the current MPRIS track without pausing audible playback) and retries transfer on transient API errors. If Connect has no current playback, the TUI still shows the MPRIS track (title, artists, album, progress, cover) until Connect lists a session. Connect often reports `volume_percent: 0` for that client; the TUI uses MPRIS volume instead so the playback row does not start at 0% (and mouse-scroll does not write 0% back). Or run `spotify_player wake-desktop`. Optional `nudge_uri` forces `OpenUri`; otherwise recently played is used, then bare `Play`. After a wake, first-session init waits for the woken client to register and transfers to it by name, so playback is not handed to whichever speaker Connect still reports as active. `pause_after_nudge` (default true) silences that registration Play by muting Spotify's Pulse/PipeWire sink-inputs (MPRIS volume is left unchanged) and holds mute until MPRIS reports paused (retries, then a short background hold; unmute after pause or a timeout) so launching the desktop client does not start audible audio; playback starts only after an explicit CLI/TUI play command. Set it to `false` if you want the automatically started playback to keep playing.
+- On Linux, the official desktop client is often invisible to Connect until it plays something. The `[desktop_spotify]` section can launch and MPRIS-nudge it at startup and on play; see [Desktop Spotify wake (Linux)](#desktop-spotify-wake-linux) for exactly when that runs and what it never does.
 - Repeat, shuffle, volume, and device are drawn on the last inner row of the playback block (order from `playback_metadata_fields`), spread across the full width, with a solid bottom border underneath. `{metadata}` in `playback_format` is ignored so those fields are not duplicated. With `enable_audio_visualization` enabled, `progress_bar_position` is ignored and the progress bar is always rendered below the visualization.
 - `explicit_icon` can be set to any Unicode character or an empty string to disable explicit markers.
 - `cover_img_length = 0` (the default) auto-derives the cover's column count from the terminal's cell aspect ratio. Set a non-zero `cover_img_length` to size the box manually.
@@ -161,20 +165,35 @@ See the [Librespot wiki](https://github.com/librespot-org/librespot/wiki/Options
 
 ### Desktop Spotify wake (Linux)
 
-Options in the `[desktop_spotify]` section launch and/or MPRIS-nudge the official desktop client on **first session** (TUI startup) when `preferred_device` is missing from Connect, or when it is listed but not actively playing (typical paused tray/autostart case). The same wake runs when reconnecting a session that was actually playing, or if this process just launched the desktop client. A mid-session reconnect of a **paused** session skips that `OpenUri`/`Play` nudge so a Spotify API blip cannot start music. If the official client is already playing locally (MPRIS `Playing`), wake is skipped so that audio is not paused or stolen — init waits up to 15s for `preferred_device` to appear in Connect and transfers with keep-playing when it does; if Connect still omits it, playback is left unchanged until a playback command, which registers the desktop client (OpenUri on the current MPRIS track without pausing audible playback). If MPRIS is already Playing and Connect lists `preferred_device`, first-session init still transfers to that device with keep-playing and never to another speaker. If Connect has no current playback, the TUI still shows the MPRIS track until Connect lists a session. Connect often reports 0% volume for the official client; the TUI overlays MPRIS volume so the row is not 0% and mouse-scroll does not write 0% back. If another speaker is already playing while preferred is listed, wake is skipped so audio is not stolen. If `preferred_device` is unset, wake only when no devices are listed. Common with `enable_streaming = "Never"` + `preferred_device`:
+The `[desktop_spotify]` section makes the official desktop client usable as a Connect target when `enable_streaming = "Never"` and `preferred_device` names it. Spotify Connect often omits the desktop client until it has played something, or lists it idle in the tray after login autostart. The wake launches the client if needed, nudges it over MPRIS so Connect registers it, and then transfers playback to it by name.
+
+When the wake runs, and what it does:
+
+| Situation | Launch | MPRIS nudge (`OpenUri`/`Play`) | Audio | Transfer |
+| --- | --- | --- | --- | --- |
+| First session, `preferred_device` missing from Connect | if not running | yes | silenced, paused right after (`pause_after_nudge`) | to the woken device once Connect lists it (up to 15 s) |
+| First session, `preferred_device` listed but idle/paused | no | yes | same | same |
+| First session, desktop client already playing (MPRIS `Playing`) | no | no | untouched | to `preferred_device` with keep-playing once listed; otherwise nothing until you press play |
+| Another speaker is playing while `preferred_device` is listed | no | no | untouched | none |
+| Mid-session reconnect while playback was paused | no | no | untouched | none (an API blip must never start music) |
+| Mid-session reconnect while playback was playing, or this process just launched the client | if not running | yes | as first session | as first session |
+| `preferred_device` unset | only when Connect lists no device | yes | as first session | generic device selection |
+| Play/resume command that fails with "no active device" | if not running | yes; on the current MPRIS track without pausing when the client is already playing, otherwise as first session | untouched when already playing; otherwise silenced, paused right after | to `preferred_device`, then the command is retried |
+
+Independent of the wake: when Connect reports no current playback, the playback window shows the desktop client's MPRIS track (title, artists, album, progress, cover) until Connect lists a session, and when Connect lists the preferred client at 0% volume the MPRIS volume is shown instead so mouse-scroll never writes 0% back. Starting the desktop app never begins audible playback by itself; use the TUI play command or `spotify_player playback play`. `spotify_player wake-desktop` runs the same wake by hand.
 
 | Option | Description | Default |
 | --- | --- | --- |
-| `enable` | Run wake on first-session playback init (and when restoring a playing session) when `preferred_device` is missing or idle/paused (or when no devices are listed if unset). Paused mid-session reconnects skip that wake. Also required for `spotify_player wake-desktop`. When Connect has no current playback, the TUI uses MPRIS metadata for the playback window. When Connect lists the preferred desktop client at 0% volume, MPRIS volume is shown instead. | `false` |
+| `enable` | Turn the wake on (also required for `spotify_player wake-desktop`). | `false` |
 | `command` | Desktop client executable. | `spotify` |
 | `args` | Extra launch arguments. | `[]` |
-| `mpris_dest` | MPRIS D-Bus name. | `org.mpris.MediaPlayer2.spotify` |
-| `nudge_uri` | Optional `OpenUri` target (`spotify:…` or open.spotify.com URL). If unset, recently played is used at first-session init, else bare `Play`. | unset |
-| `pause_after_nudge` | Pause after the wake so Connect registers the device without leaving audio playing. The registration Play/OpenUri is silenced by muting Spotify's Pulse/PipeWire sink-inputs (MPRIS volume is left unchanged — zeroing it can stick the stream at 0%). Mute stays until MPRIS reports paused (retries, then a short background hold); inputs are unmuted after pause, or after a timeout so mute cannot stick forever. If a restored stream is at 0% Pulse volume, it is set back to 100%. Playback then starts only from an explicit CLI/TUI play command. Set false to hear the automatically started playback. | `true` |
-| `start_minimized` | Hide Spotify to the **system tray** after launch or MPRIS nudge (and again after Connect transfer if the window remaps). Uses `xdotool windowclose` on **visible** main UI windows when Spotify's `ui.minimize_to_tray` pref is on (this helper enables that pref before launch); otherwise falls back to taskbar minimize. Requires `xdotool`. Brief flash still possible. | `true` |
-| `ready_timeout_secs` | Max wait for MPRIS after launch. | `45` |
+| `mpris_dest` | MPRIS D-Bus name of the desktop client. | `org.mpris.MediaPlayer2.spotify` |
+| `nudge_uri` | `OpenUri` target for the registration nudge (`spotify:…` or an open.spotify.com URL). If unset, the most recently played track is used, else a bare `Play`. | unset |
+| `pause_after_nudge` | Silence the registration `Play` by muting Spotify's Pulse/PipeWire sink inputs, pause as soon as MPRIS confirms, then unmute (with a timeout so mute cannot stick). Set `false` to let the automatically started playback play. | `true` |
+| `start_minimized` | Hide the client window to the system tray after launch, nudge and Connect transfer. Requires `xdotool`; enables Spotify's own `ui.minimize_to_tray` pref before launching (falls back to taskbar minimize when that pref is off). | `true` |
+| `ready_timeout_secs` | Max wait for MPRIS after launching the client. | `45` |
 
-Tray hide only targets mapped visible main windows. Closing hidden or minimized ghosts (for example from `wmctrl hidden` login autostart or a KWin no-focus rule that minimized Spotify before tray hide runs) can leave the desktop client thinking the UI is shown while nothing is visible — tray **Show Spotify** toggles to **Minimize to Tray** without mapping a window. For KDE login autostart, use tray-compatible hide when `ui.minimize_to_tray=true` (see `scripts/spotify-login-autostart.example.sh`) instead of `wmctrl hidden`. With this hide path, tray **Show Spotify** still maps the window when a KWin no-focus / `fsplevel` rule minimized Spotify on launch.
+Tray hide only closes mapped, visible main windows. Closing a hidden or minimized ghost window (for example from a `wmctrl hidden` login autostart or a KWin no-focus rule) leaves the client believing its UI is shown while nothing is visible, and the tray's **Show Spotify** then toggles without mapping a window. For KDE login autostart use `scripts/spotify-login-autostart.example.sh`, which hides in a tray-compatible way when `ui.minimize_to_tray=true`.
 
 ### Layout configuration
 
@@ -240,6 +259,9 @@ The `component_style` table customizes UI component appearance. All fields are o
 | `lyrics_playing`                 | Style for the currently playing lyrics line               |
 | `toast_success`                  | Style for success toast borders and title. Body text drops `Bold` so wrapped lines stay inside the box. |
 | `toast_error`                    | Style for error toast borders and title. Body text drops `Bold` so wrapped lines stay inside the box. |
+| `visualization`                  | Colors for the audio visualization bars (see below)       |
+
+The `visualization` style uses three optional colors (`low`, `mid`, `high`), interpolated by bar amplitude: quiet bars use `low`, medium bars use `mid`, and loud bars use `high`. When omitted, a blue → green → red gradient is used.
 
 Each style accepts optional fields:
 
@@ -284,6 +306,7 @@ lyrics_played = { modifiers = ["Dim"] }
 lyrics_playing = { fg = "Green", modifiers = ["Bold"] }
 toast_success = { fg = "Green", modifiers = ["Bold"] }
 toast_error = { fg = "Red", modifiers = ["Bold"] }
+visualization = { low = "Blue", mid = "Green", high = "Red" }
 ```
 
 #### Accepted Colors
@@ -316,7 +339,7 @@ The [`theme_parse`](../scripts/theme_parse) Python script (requires `toml` and `
 Example:
 
 ```
-./theme_parse "Builtin Solarized Dark" "solarized_dark"  >> ~/.config/spotify-player/theme.toml
+./theme_parse "iTerm2 Solarized Dark" "solarized_dark" >> ~/.config/spotify-player/theme.toml
 ```
 
 This converts the [Builtin Solarized Dark](https://github.com/mbadolato/iTerm2-Color-Schemes/blob/master/alacritty/Builtin%20Solarized%20Dark.yml) color scheme to a theme named `solarized_dark`.

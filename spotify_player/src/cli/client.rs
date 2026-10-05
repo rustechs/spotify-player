@@ -20,7 +20,10 @@ use crate::{
         PlaylistId, SharedState, TrackId,
     },
 };
-use rspotify::prelude::{BaseClient, OAuthClient};
+use rspotify::{
+    model::LibraryId,
+    prelude::{BaseClient, OAuthClient},
+};
 
 use super::{
     Command, Deserialize, EditAction, GetRequest, IdOrName, ItemId, ItemType, Key, PlaylistCommand,
@@ -77,7 +80,14 @@ pub async fn start_socket(
                     let request: Request = match serde_json::from_slice(&req_buf) {
                         Ok(v) => v,
                         Err(err) => {
+                            // Always answer, or the CLI waits out its full read timeout
+                            // (e.g. a newer CLI talking to an older running instance).
                             tracing::error!("Cannot deserialize the socket request: {err:#}");
+                            let response =
+                                Response::Err(format!("Bad request: {err:#}").into_bytes());
+                            if let Err(err) = send_response(response, &socket, dest_addr).await {
+                                tracing::warn!("Failed to send the socket response: {err:#}");
+                            }
                             return;
                         }
                     };
@@ -89,36 +99,44 @@ pub async fn start_socket(
                     );
 
                     async {
-                        let response = match tokio::time::timeout(
-                            SOCKET_REQUEST_TIMEOUT,
-                            handle_socket_request(&client, state.as_ref(), request),
-                        )
-                        .await
+                        // Time out the *wait*, not the work: cancelling a playlist
+                        // import/sync half way through its cache rewrite lost data.
+                        let work = tokio::task::spawn(
+                            async move {
+                                handle_socket_request(&client, state.as_ref(), request).await
+                            }
+                            .in_current_span(),
+                        );
+                        let response = match tokio::time::timeout(SOCKET_REQUEST_TIMEOUT, work)
+                            .await
                         {
-                            Ok(Ok(data)) => {
+                            Ok(Ok(Ok(data))) => {
                                 tracing::info!("Successfully handled the socket request.");
                                 Response::Ok(data)
                             }
-                            Ok(Err(err)) => {
+                            Ok(Ok(Err(err))) => {
                                 tracing::error!("Failed to handle socket request: {err:#}");
-                                let msg = format!("Bad request: {err:#}");
-                                Response::Err(msg.into_bytes())
+                                Response::Err(format!("Bad request: {err:#}").into_bytes())
+                            }
+                            Ok(Err(err)) => {
+                                tracing::error!("Socket request handler panicked: {err:#}");
+                                Response::Err(b"Internal error: request handler panicked".to_vec())
                             }
                             Err(_) => {
                                 tracing::error!(
-                                    "Timed out after {SOCKET_REQUEST_TIMEOUT:?} handling socket request"
+                                    "Timed out after {SOCKET_REQUEST_TIMEOUT:?} waiting for the socket request; it keeps running"
                                 );
                                 Response::Err(
                                     format!(
-                                        "Timed out after {SOCKET_REQUEST_TIMEOUT:?} handling request"
+                                        "Timed out after {SOCKET_REQUEST_TIMEOUT:?} waiting for the request; it is still running in the background"
                                     )
                                     .into_bytes(),
                                 )
                             }
                         };
-                        send_response(response, &socket, dest_addr)
-                            .await
-                            .unwrap_or_default();
+                        if let Err(err) = send_response(response, &socket, dest_addr).await {
+                            tracing::warn!("Failed to send the socket response: {err:#}");
+                        }
                     }
                     .instrument(span)
                     .await;
@@ -208,9 +226,9 @@ async fn handle_socket_request(
 
             if let Some(id) = track.and_then(|t| t.id.clone()) {
                 if unlike {
-                    client.current_user_saved_tracks_delete([id]).await?;
+                    client.library_remove([LibraryId::Track(id)]).await?;
                 } else {
-                    client.current_user_saved_tracks_add([id]).await?;
+                    client.library_add([LibraryId::Track(id)]).await?;
                 }
             }
 
@@ -476,12 +494,7 @@ async fn handle_playback_request(
                 .context("no active playback found!")?
                 .volume
                 .context("playback has no volume!")?;
-            let percent = if is_offset {
-                std::cmp::max(0, (volume as i8) + percent)
-            } else {
-                percent
-            };
-            PlayerRequest::Volume(percent.try_into()?)
+            PlayerRequest::Volume(volume_percent(volume, percent, is_offset)?)
         }
         Command::Seek(position_offset_ms) => {
             // Playback's progress cannot be computed trivially without knowing the `playback` variable in
@@ -556,7 +569,7 @@ async fn handle_playlist_request(client: &AppClient, command: PlaylistCommand) -
         }
         PlaylistCommand::Delete { id } => {
             let following = client
-                .playlist_check_follow(id.clone(), &[uid])
+                .library_contains([LibraryId::Playlist(id.clone())])
                 .await
                 .context(format!("Could not find playlist '{}'", id.id()))?
                 .pop()
@@ -564,7 +577,9 @@ async fn handle_playlist_request(client: &AppClient, command: PlaylistCommand) -
 
             // Won't delete if not following
             if following {
-                client.playlist_unfollow(id.clone()).await?;
+                client
+                    .library_remove([LibraryId::Playlist(id.clone())])
+                    .await?;
                 Ok(format!("Playlist '{id}' was deleted/unfollowed"))
             } else {
                 Ok(format!(
@@ -626,9 +641,28 @@ async fn handle_playlist_request(client: &AppClient, command: PlaylistCommand) -
             // get all playlists' import data represented as subdirectories with `import_to` name.
             // Inside each `import_to` subdirectory, an import `import_from -> import_to`
             // data is represented as a file with `import_from` name.
-            for dir in imports_dir.read_dir()? {
+            let entries = match imports_dir.read_dir() {
+                Ok(entries) => entries,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok("No playlist import data found.".to_string());
+                }
+                Err(err) => return Err(err).context("read the playlist imports folder"),
+            };
+            for dir in entries {
                 let to_dir = dir?.path();
-                let to_id = PlaylistId::from_id(to_dir.file_name().unwrap().to_str().unwrap())?;
+                // Only import folders belong here; skip stray files such as `.DS_Store`.
+                let Some(to_id) = to_dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| PlaylistId::from_id(name.to_owned()).ok())
+                    .filter(|_| to_dir.is_dir())
+                else {
+                    tracing::warn!(
+                        "Skipping unexpected entry in the playlist imports folder: {}",
+                        to_dir.display()
+                    );
+                    continue;
+                };
 
                 // If a playlist id is specified, only consider sync imports of that playlist
                 if let Some(id) = &id {
@@ -638,15 +672,25 @@ async fn handle_playlist_request(client: &AppClient, command: PlaylistCommand) -
                 }
 
                 let pl_follow = client
-                    .playlist_check_follow(to_id.as_ref(), &[uid.as_ref()])
+                    .library_contains([LibraryId::Playlist(to_id.as_ref())])
                     .await?
                     .pop()
                     .unwrap();
 
                 if pl_follow {
                     for i in to_dir.read_dir()? {
-                        let from_id =
-                            PlaylistId::from_id(i?.file_name().to_str().unwrap().to_owned())?;
+                        let entry = i?;
+                        let Some(from_id) = entry
+                            .file_name()
+                            .to_str()
+                            .and_then(|name| PlaylistId::from_id(name.to_owned()).ok())
+                        else {
+                            tracing::warn!(
+                                "Skipping unexpected playlist import entry: {}",
+                                entry.path().display()
+                            );
+                            continue;
+                        };
                         result +=
                             &playlist_import(client, from_id, to_id.clone_static(), delete).await?;
                         result += "\n";
@@ -956,4 +1000,35 @@ async fn handle_lyrics_request(
     }
 
     Ok(output.into_bytes())
+}
+
+/// Resolve the `volume` CLI command into a percent within `0..=100`.
+///
+/// Offsets are clamped; an absolute value outside the range is an error.
+fn volume_percent(current: u32, percent: i8, is_offset: bool) -> Result<u8> {
+    let target = if is_offset {
+        (i64::from(current) + i64::from(percent)).clamp(0, 100)
+    } else {
+        i64::from(percent)
+    };
+    u8::try_from(target)
+        .ok()
+        .filter(|v| *v <= 100)
+        .with_context(|| format!("volume percent {percent} is outside 0..=100"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::volume_percent;
+
+    #[test]
+    fn volume_percent_clamps_offsets_and_rejects_bad_absolutes() {
+        assert_eq!(volume_percent(100, 50, true).unwrap(), 100);
+        assert_eq!(volume_percent(80, 30, true).unwrap(), 100);
+        assert_eq!(volume_percent(10, -30, true).unwrap(), 0);
+        assert_eq!(volume_percent(50, -5, true).unwrap(), 45);
+        assert_eq!(volume_percent(50, 70, false).unwrap(), 70);
+        assert!(volume_percent(50, -1, false).is_err());
+        assert!(volume_percent(50, 101, false).is_err());
+    }
 }

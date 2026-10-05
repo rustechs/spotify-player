@@ -38,10 +38,12 @@ fn add_playlist_folders(
         if let Some((_, id)) = f.uri.rsplit_once(':') {
             if f.node_type == "folder" {
                 *folder_id += 1;
+                // Fall back to this folder's own id; the parent's id made every
+                // unnamed sibling collide on the same name.
                 let name = f
                     .name
                     .clone()
-                    .unwrap_or(format!("folder_{current_folder_id}"));
+                    .unwrap_or_else(|| format!("folder_{}", *folder_id));
                 // Folder node
                 acc.push(PlaylistFolderItem::Folder(PlaylistFolder {
                     name: name.clone(),

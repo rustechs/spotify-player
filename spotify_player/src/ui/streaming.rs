@@ -120,25 +120,33 @@ impl Sink for VisualizationSink {
     }
 }
 
-/// Maps a normalised amplitude [0, 1] to an RGB colour.
-/// Quiet (0.0) → cool blue, medium → green, loud (1.0) → hot red.
-fn bar_color(t: f32) -> Color {
-    let (r, g, b) = if t < 0.5 {
-        let s = t * 2.0;
-        (
-            (30.0 + 20.0 * s) as u8,
-            (100.0 + 155.0 * s) as u8,
-            (255.0 * (1.0 - s * 0.5)) as u8,
-        )
+/// Linearly interpolates between two RGB colors; selects the nearest endpoint
+/// when either color is not an RGB color (e.g. an ANSI palette color).
+fn lerp_color(a: Color, b: Color, t: f32) -> Color {
+    match (a, b) {
+        (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => Color::Rgb(
+            (f32::from(r1) + (f32::from(r2) - f32::from(r1)) * t) as u8,
+            (f32::from(g1) + (f32::from(g2) - f32::from(g1)) * t) as u8,
+            (f32::from(b1) + (f32::from(b2) - f32::from(b1)) * t) as u8,
+        ),
+        (a, b) => {
+            if t < 0.5 {
+                a
+            } else {
+                b
+            }
+        }
+    }
+}
+
+/// Maps a normalised amplitude `t` in [0, 1] to a color between the theme's
+/// `low` (quiet), `mid` (medium) and `high` (loud) visualization stops.
+fn bar_color(t: f32, low: Color, mid: Color, high: Color) -> Color {
+    if t < 0.5 {
+        lerp_color(low, mid, t * 2.0)
     } else {
-        let s = (t - 0.5) * 2.0;
-        (
-            (50.0 + 205.0 * s) as u8,
-            (255.0 * (1.0 - s)) as u8,
-            (128.0 * (1.0 - s)) as u8,
-        )
-    };
-    Color::Rgb(r, g, b)
+        lerp_color(mid, high, (t - 0.5) * 2.0)
+    }
 }
 
 fn axis_style(theme: &Theme) -> Style {
@@ -183,7 +191,29 @@ fn db_tick_y(plot_rect: Rect, max_val: u64, db: i32) -> u16 {
     plot_rect.y + plot_rect.height.saturating_sub(bar_rows.max(1))
 }
 
-fn render_axis_frame(frame: &mut Frame, chart_rect: Rect, style: Style) {
+/// Which plot cells the rendered bars occupy, so the frame and grid drawn
+/// after the chart never overwrite a bar (and the chart's blank cells never
+/// erase them).
+struct BarCoverage {
+    plot: Rect,
+    /// Bar value per plot column, in eighths of a row (`0..=height * 8`).
+    values: Vec<u64>,
+}
+
+impl BarCoverage {
+    fn covers(&self, x: u16, y: u16) -> bool {
+        if x < self.plot.x || x >= self.plot.right() || y < self.plot.y || y >= self.plot.bottom() {
+            return false;
+        }
+        let column = usize::from(x - self.plot.x);
+        let rows_below = u64::from(self.plot.bottom() - 1 - y);
+        self.values
+            .get(column)
+            .is_some_and(|&value| value > rows_below * 8)
+    }
+}
+
+fn render_axis_frame(frame: &mut Frame, chart_rect: Rect, style: Style, bars: &BarCoverage) {
     let buf = frame.buffer_mut();
     if chart_rect.width < 2 || chart_rect.height < 2 {
         return;
@@ -195,7 +225,9 @@ fn render_axis_frame(frame: &mut Frame, chart_rect: Rect, style: Style) {
     let bottom = chart_rect.bottom().saturating_sub(1);
 
     for x in left..right {
-        buf.set_string(x, top, "─", style);
+        if !bars.covers(x, top) {
+            buf.set_string(x, top, "─", style);
+        }
         buf.set_string(x, bottom, "─", style);
     }
     for y in top..=bottom {
@@ -215,6 +247,7 @@ fn render_grid_lines(
     max_val: u64,
     sample_rate: f32,
     style: Style,
+    bars: &BarCoverage,
 ) {
     let buf = frame.buffer_mut();
 
@@ -224,7 +257,9 @@ fn render_grid_lines(
             continue;
         }
         for x in plot_rect.x..plot_rect.right() {
-            buf.set_string(x, y, "┄", style);
+            if !bars.covers(x, y) {
+                buf.set_string(x, y, "┄", style);
+            }
         }
     }
 
@@ -234,7 +269,9 @@ fn render_grid_lines(
             continue;
         }
         for y in plot_rect.y..plot_rect.bottom() {
-            buf.set_string(x, y, "┆", style);
+            if !bars.covers(x, y) {
+                buf.set_string(x, y, "┆", style);
+            }
         }
     }
 }
@@ -298,7 +335,8 @@ fn render_x_axis_labels(
 ///
 /// Bars are subsampled to the available rect width so they always fill the area
 /// cleanly. Heights use a sqrt (perceptual) curve so quiet signals stay visible.
-/// Each bar is coloured by its amplitude: cool blue (quiet) → green → hot red (loud).
+/// Each bar is coloured by its amplitude using the theme's `visualization`
+/// colors: `low` (quiet) → `mid` → `high` (loud).
 pub fn render_audio_visualization(
     frame: &mut Frame,
     state: &SharedState,
@@ -373,23 +411,34 @@ pub fn render_audio_visualization(
         return;
     }
 
-    let num_bars = (plot_rect.width as usize).min(values.len()).max(1);
+    // One bar per plot column: bands are subsampled on narrow terminals and
+    // repeated on wide ones, so the axis labels always span the same width.
+    let num_bars = usize::from(plot_rect.width).max(1);
     let max_val = u64::from(plot_rect.height) * 8;
-
-    render_axis_frame(frame, chart_rect, axis_style);
-    render_grid_lines(frame, plot_rect, max_val, sample_rate, axis_style);
+    let vis_colors = theme.visualization();
 
     let step = values.len() as f64 / num_bars as f64;
-    let bars: Vec<Bar> = (0..num_bars)
+    let bar_values: Vec<(u64, f32)> = (0..num_bars)
         .map(|i| {
             let idx = ((i as f64 * step) as usize).min(values.len() - 1);
             let norm = values[idx];
             let val = (norm * max_val as f32).round() as u64;
             let val = if norm > 0.0 { val.max(1) } else { 0 };
+            (val, norm)
+        })
+        .collect();
+    let bars: Vec<Bar> = bar_values
+        .iter()
+        .map(|&(val, norm)| {
             Bar::default()
                 .value(val)
                 .text_value("")
-                .style(Style::default().fg(bar_color(norm)))
+                .style(Style::default().fg(bar_color(
+                    norm,
+                    vis_colors.low,
+                    vis_colors.mid,
+                    vis_colors.high,
+                )))
         })
         .collect();
 
@@ -399,7 +448,22 @@ pub fn render_audio_visualization(
         .bar_gap(0)
         .max(max_val);
 
+    // The chart writes blank cells above every bar, so the frame and grid go
+    // on top of it, skipping the cells the bars occupy.
     frame.render_widget(chart, plot_rect);
+    let coverage = BarCoverage {
+        plot: plot_rect,
+        values: bar_values.iter().map(|&(val, _)| val).collect(),
+    };
+    render_axis_frame(frame, chart_rect, axis_style, &coverage);
+    render_grid_lines(
+        frame,
+        plot_rect,
+        max_val,
+        sample_rate,
+        axis_style,
+        &coverage,
+    );
     render_y_axis_labels(frame, horiz[0], plot_rect, max_val, axis_style);
     render_x_axis_labels(
         frame,
@@ -409,4 +473,34 @@ pub fn render_audio_visualization(
         sample_rate,
         axis_style,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BarCoverage;
+    use ratatui::layout::Rect;
+
+    #[test]
+    fn bar_coverage_marks_only_cells_under_bars() {
+        // 4 columns, 3 rows: values are eighths of a row, bottom row is y = 2.
+        let coverage = BarCoverage {
+            plot: Rect::new(1, 0, 4, 3),
+            values: vec![0, 8, 12, 24],
+        };
+        assert!(!coverage.covers(1, 2), "zero bar covers nothing");
+        assert!(coverage.covers(2, 2));
+        assert!(
+            !coverage.covers(2, 1),
+            "one-row bar stops at the bottom row"
+        );
+        assert!(
+            coverage.covers(3, 1),
+            "partial second row counts as covered"
+        );
+        assert!(!coverage.covers(3, 0));
+        assert!(coverage.covers(4, 0), "full bar reaches the top row");
+        assert!(!coverage.covers(0, 2), "outside the plot");
+        assert!(!coverage.covers(5, 2));
+        assert!(!coverage.covers(2, 3));
+    }
 }

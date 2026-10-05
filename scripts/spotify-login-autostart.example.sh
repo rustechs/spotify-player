@@ -10,8 +10,12 @@
 set -euo pipefail
 
 spotify_running() {
-  pgrep -u "${USER}" -f '/snap/spotify/.*/usr/share/spotify/spotify$' >/dev/null 2>&1 \
-    || pgrep -u "${USER}" -x spotify >/dev/null 2>&1
+  # `id -u` rather than `$USER`: login autostart contexts may not export USER,
+  # and `set -u` would abort the script before Spotify is launched.
+  local uid
+  uid="$(id -u)"
+  pgrep -u "${uid}" -f '/snap/spotify/.*/usr/share/spotify/spotify$' >/dev/null 2>&1 \
+    || pgrep -u "${uid}" -x spotify >/dev/null 2>&1
 }
 
 minimize_to_tray_pref_enabled() {

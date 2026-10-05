@@ -59,6 +59,11 @@ jobs:
       - name: Cargo clippy without features
         run: cargo clippy --no-default-features -- -D warnings
 
+      - name: Cargo clippy with daemon (Linux only)
+        # `daemonize` is Unix-only; lint the daemon/streaming paths where they build.
+        if: ${{ runner.os == 'Linux' }}
+        run: cargo clippy --no-default-features --features ${{ env.RUST_FEATURES }},daemon -- -D warnings
+
   cargo-machete:
     runs-on: ubuntu-latest
     steps:

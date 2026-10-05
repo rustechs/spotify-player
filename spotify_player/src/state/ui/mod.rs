@@ -108,7 +108,7 @@ impl UIState {
         app_config: &config::AppConfig,
         message: impl Into<String>,
     ) {
-        if !should_enqueue_toast(app_config.enable_toast, false) {
+        if !app_config.enable_toast {
             return;
         }
         let timeout = std::time::Duration::from_secs(app_config.toast_success_timeout_secs);
@@ -120,7 +120,7 @@ impl UIState {
         app_config: &config::AppConfig,
         message: impl Into<String>,
     ) {
-        if !should_enqueue_toast(app_config.enable_toast, false) {
+        if !app_config.enable_toast {
             return;
         }
         let timeout = std::time::Duration::from_secs(app_config.toast_success_timeout_secs);
@@ -202,9 +202,6 @@ mod tests {
             ui.toasts.is_empty(),
             "enable_toast=false must not enqueue success or error toasts"
         );
-
-        assert!(!should_enqueue_toast(false, false));
-        assert!(should_enqueue_toast(true, false));
     }
 
     #[test]

@@ -45,10 +45,17 @@ pub struct UserData {
     pub saved_tracks: HashMap<String, Track>,
 }
 
+#[derive(Debug)]
+pub enum SearchCacheEntry {
+    Loading,
+    Ready(SearchResults),
+    Failed,
+}
+
 /// the application's in-memory caches
 pub struct MemoryCaches {
     pub context: ttl_cache::TtlCache<String, Context>,
-    pub search: ttl_cache::TtlCache<String, SearchResults>,
+    pub search: ttl_cache::TtlCache<String, SearchCacheEntry>,
     pub lyrics: ttl_cache::TtlCache<String, Option<Lyrics>>,
     pub genres: ttl_cache::TtlCache<String, Vec<String>>,
     #[cfg(feature = "image")]
@@ -58,7 +65,7 @@ pub struct MemoryCaches {
 #[derive(Default, Debug)]
 /// Spotify browse data
 pub struct BrowseData {
-    pub categories: Vec<Category>,
+    pub categories: Option<Vec<Category>>,
     pub category_playlists: HashMap<String, Vec<Playlist>>,
 }
 
@@ -71,6 +78,42 @@ impl MemoryCaches {
             genres: ttl_cache::TtlCache::new(64),
             #[cfg(feature = "image")]
             images: ttl_cache::TtlCache::new(64),
+        }
+    }
+
+    pub fn begin_search(&mut self, query: &str) -> bool {
+        let should_begin = matches!(
+            self.search.get(query),
+            None | Some(SearchCacheEntry::Failed)
+        );
+
+        if should_begin {
+            self.search.insert(
+                query.to_string(),
+                SearchCacheEntry::Loading,
+                *TTL_CACHE_DURATION,
+            );
+        }
+
+        should_begin
+    }
+
+    pub fn complete_search(&mut self, query: String, results: SearchResults) {
+        self.search
+            .insert(query, SearchCacheEntry::Ready(results), *TTL_CACHE_DURATION);
+    }
+
+    pub fn fail_search(&mut self, query: String) {
+        if matches!(self.search.get(&query), Some(SearchCacheEntry::Loading)) {
+            self.search
+                .insert(query, SearchCacheEntry::Failed, *TTL_CACHE_DURATION);
+        }
+    }
+
+    pub fn search_results(&self, query: &str) -> Option<&SearchResults> {
+        match self.search.get(query) {
+            Some(SearchCacheEntry::Ready(results)) => Some(results),
+            _ => None,
         }
     }
 }
@@ -227,8 +270,14 @@ where
     let path = cache_folder.join(format!("{key:?}_cache.json"));
     if path.exists() {
         tracing::info!("Loading {key:?} data from {}...", path.display());
-        let f = BufReader::new(std::fs::File::open(path).expect("path exists"));
-        match serde_json::from_reader(f) {
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(err) => {
+                tracing::error!("Failed to open {key:?} cache {}: {err:#}", path.display());
+                return None;
+            }
+        };
+        match serde_json::from_reader(BufReader::new(file)) {
             Ok(data) => {
                 tracing::info!("Successfully loaded {key:?} data!");
                 Some(data)
@@ -240,5 +289,45 @@ where
         }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MemoryCaches, SearchCacheEntry, SearchResults};
+
+    #[test]
+    fn search_lifecycle_suppresses_duplicate_requests() {
+        let mut caches = MemoryCaches::new();
+
+        assert!(caches.begin_search("query"));
+        assert!(matches!(
+            caches.search.get("query"),
+            Some(SearchCacheEntry::Loading)
+        ));
+        assert!(!caches.begin_search("query"));
+
+        caches.complete_search("query".to_string(), SearchResults::default());
+
+        assert!(caches.search_results("query").is_some());
+        assert!(!caches.begin_search("query"));
+    }
+
+    #[test]
+    fn failed_search_can_be_retried() {
+        let mut caches = MemoryCaches::new();
+
+        assert!(caches.begin_search("query"));
+        caches.fail_search("query".to_string());
+
+        assert!(matches!(
+            caches.search.get("query"),
+            Some(SearchCacheEntry::Failed)
+        ));
+        assert!(caches.begin_search("query"));
+        assert!(matches!(
+            caches.search.get("query"),
+            Some(SearchCacheEntry::Loading)
+        ));
     }
 }

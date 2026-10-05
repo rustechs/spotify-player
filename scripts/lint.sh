@@ -10,5 +10,9 @@ FEATURES="${RUST_FEATURES:-rodio-backend,media-control,system-audio-visualizatio
 cargo fmt --all -- --check
 cargo clippy --no-default-features --features "${FEATURES}" -- -D warnings
 cargo clippy --no-default-features -- -D warnings
+if [[ "$(uname -s)" == "Linux" ]]; then
+  # `daemonize` is Unix-only; lint the daemon/streaming paths where they build.
+  cargo clippy --no-default-features --features "${FEATURES},daemon" -- -D warnings
+fi
 
 echo "lint ok (fmt + clippy with/without features)"
