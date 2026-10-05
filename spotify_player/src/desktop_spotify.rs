@@ -606,13 +606,17 @@ fn nudge(dest: &str, nudge_uri: Option<&str>, pause_after: bool) -> Result<()> {
     }
 
     if pause_after {
-        // Pause immediately; Connect still sees the brief OpenUri session.
-        tracing::info!("Pausing desktop Spotify after silent wake nudge");
-        if pause_until_silent(dest, Duration::from_secs(2)) {
+        tracing::info!("Pausing desktop Spotify once the silent wake session starts");
+        let outcome = pause_wake_session(
+            &mut MprisPlayer(dest),
+            WAKE_SESSION_START_BUDGET,
+            WAKE_PAUSE_BUDGET,
+        );
+        if outcome == SilentWake::Paused {
             tracing::info!("Desktop Spotify paused; unmuting local sink-inputs");
         } else {
             tracing::warn!(
-                "Desktop Spotify did not pause after silent wake; holding mute until pause confirms"
+                "Silent wake not finished ({outcome:?}); holding mute until the wake session is paused"
             );
             hold_silence_until_paused(dest.to_string(), pulse_mute);
             return Ok(());
@@ -1076,38 +1080,106 @@ fn spotify_track_id_from_mpris_text(text: &str) -> Option<String> {
     None
 }
 
-/// Retry Pause until MPRIS reports Paused/Stopped, or `budget` elapses.
-fn pause_until_silent(dest: &str, budget: Duration) -> bool {
-    let start = Instant::now();
+/// How long the desktop client gets to start the wake session before the
+/// pause is handed to a background thread.
+const WAKE_SESSION_START_BUDGET: Duration = Duration::from_secs(3);
+/// How long a started wake session gets to pause.
+const WAKE_PAUSE_BUDGET: Duration = Duration::from_secs(2);
+/// How long the background thread keeps the mute while it waits for both.
+const WAKE_HOLD_BUDGET: Duration = Duration::from_secs(10);
+const WAKE_POLL: Duration = Duration::from_millis(100);
+
+/// The desktop client as the silent wake sees it; a trait so the sequencing
+/// can be tested without a session bus.
+trait WakePlayer {
+    fn is_playing(&mut self) -> bool;
+    fn is_silent(&mut self) -> bool;
+    fn pause(&mut self);
+    fn wait(&mut self, step: Duration);
+}
+
+struct MprisPlayer<'a>(&'a str);
+
+impl WakePlayer for MprisPlayer<'_> {
+    fn is_playing(&mut self) -> bool {
+        mpris_is_playing_blocking(self.0)
+    }
+
+    fn is_silent(&mut self) -> bool {
+        mpris_is_silent(self.0)
+    }
+
+    fn pause(&mut self) {
+        let _ = bus::player_call(self.0, "Pause");
+    }
+
+    fn wait(&mut self, step: Duration) {
+        thread::sleep(step);
+    }
+}
+
+/// How a silent wake ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SilentWake {
+    /// The wake session started and is paused again.
+    Paused,
+    /// The client never reported the wake session as playing.
+    NeverStarted,
+    /// The wake session started and would not pause.
+    StillPlaying,
+}
+
+/// Pause the playback session a wake nudge starts, retrying until MPRIS
+/// reports Paused/Stopped or `pause_budget` elapses.
+///
+/// The pause only counts once the client has reported Playing. Right after
+/// `OpenUri` it still reports the Paused state from before the nudge, and a
+/// pause confirmed against that lets the track start a moment later, after
+/// the caller has unmuted.
+fn pause_wake_session(
+    player: &mut impl WakePlayer,
+    start_budget: Duration,
+    pause_budget: Duration,
+) -> SilentWake {
+    let mut waited = Duration::ZERO;
+    while !player.is_playing() {
+        if waited >= start_budget {
+            return SilentWake::NeverStarted;
+        }
+        player.wait(WAKE_POLL);
+        waited += WAKE_POLL;
+    }
+
+    let mut waited = Duration::ZERO;
     loop {
-        let _ = bus::player_call(dest, "Pause");
-        if mpris_is_silent(dest) {
-            return true;
+        player.pause();
+        if player.is_silent() {
+            return SilentWake::Paused;
         }
-        if pause_poll_should_stop(false, start.elapsed(), budget) {
-            return false;
+        if waited >= pause_budget {
+            return SilentWake::StillPlaying;
         }
-        thread::sleep(Duration::from_millis(100));
+        player.wait(WAKE_POLL);
+        waited += WAKE_POLL;
     }
 }
 
 fn hold_silence_until_paused(dest: String, pulse_mute: Option<PulseMuteGuard>) {
     thread::spawn(move || {
-        let budget = Duration::from_secs(10);
-        if pause_until_silent(&dest, budget) {
-            tracing::info!("Desktop Spotify paused after delayed silent-wake hold");
-        } else {
-            tracing::warn!(
+        let budget = WAKE_HOLD_BUDGET;
+        match pause_wake_session(&mut MprisPlayer(&dest), budget, budget) {
+            SilentWake::Paused => {
+                tracing::info!("Desktop Spotify paused after delayed silent-wake hold");
+            }
+            SilentWake::NeverStarted => tracing::info!(
+                "Desktop Spotify never started the wake session; restoring audio"
+            ),
+            SilentWake::StillPlaying => tracing::warn!(
                 "Desktop Spotify still playing after {budget:?}; restoring audio to avoid a stuck mute"
-            );
+            ),
         }
         drop(pulse_mute);
     });
-}
-
-/// Stop polling once playback is silent, or the retry budget is spent.
-fn pause_poll_should_stop(confirmed_silent: bool, elapsed: Duration, budget: Duration) -> bool {
-    confirmed_silent || elapsed >= budget
 }
 
 fn playback_status_is_silent(status: &str) -> bool {
@@ -1569,23 +1641,103 @@ mod tests {
         assert_eq!(volume_to_percent(1.7), 100);
     }
 
+    /// A desktop client scripted poll by poll: it reports the Paused state
+    /// from before the nudge for `starts_after` polls, then plays until it
+    /// has been paused `pauses_needed` times.
+    struct ScriptedPlayer {
+        starts_after: Option<u32>,
+        pauses_needed: u32,
+        polls: u32,
+        pauses_before_start: u32,
+        pauses_after_start: u32,
+    }
+
+    impl ScriptedPlayer {
+        fn new(starts_after: Option<u32>, pauses_needed: u32) -> Self {
+            Self {
+                starts_after,
+                pauses_needed,
+                polls: 0,
+                pauses_before_start: 0,
+                pauses_after_start: 0,
+            }
+        }
+
+        fn started(&self) -> bool {
+            self.starts_after.is_some_and(|polls| self.polls >= polls)
+        }
+    }
+
+    impl WakePlayer for ScriptedPlayer {
+        fn is_playing(&mut self) -> bool {
+            self.started() && self.pauses_after_start < self.pauses_needed
+        }
+
+        fn is_silent(&mut self) -> bool {
+            !self.is_playing()
+        }
+
+        fn pause(&mut self) {
+            if self.started() {
+                self.pauses_after_start += 1;
+            } else {
+                self.pauses_before_start += 1;
+            }
+        }
+
+        fn wait(&mut self, _step: Duration) {
+            self.polls += 1;
+        }
+    }
+
+    const START: Duration = Duration::from_secs(3);
+    const PAUSE: Duration = Duration::from_secs(2);
+
     #[test]
-    fn pause_poll_holds_mute_until_silent_or_budget() {
-        assert!(!pause_poll_should_stop(
-            false,
-            Duration::from_millis(100),
-            Duration::from_secs(2)
-        ));
-        assert!(pause_poll_should_stop(
-            true,
-            Duration::from_millis(100),
-            Duration::from_secs(2)
-        ));
-        assert!(pause_poll_should_stop(
-            false,
-            Duration::from_secs(2),
-            Duration::from_secs(2)
-        ));
+    fn silent_wake_is_not_confirmed_by_the_state_from_before_the_nudge() {
+        // The client keeps reporting Paused for half a second after OpenUri
+        // and only then starts the track. Confirming the pause against that
+        // stale state let the track play, unmuted, at every start-up.
+        let mut player = ScriptedPlayer::new(Some(5), 1);
+        assert_eq!(
+            pause_wake_session(&mut player, START, PAUSE),
+            SilentWake::Paused
+        );
+        assert_eq!(player.polls, 5, "waited for the session to start");
+        assert_eq!(player.pauses_before_start, 0);
+        assert_eq!(player.pauses_after_start, 1);
+        assert!(player.is_silent());
+    }
+
+    #[test]
+    fn silent_wake_keeps_pausing_a_session_that_ignores_the_first_pause() {
+        let mut player = ScriptedPlayer::new(Some(0), 3);
+        assert_eq!(
+            pause_wake_session(&mut player, START, PAUSE),
+            SilentWake::Paused
+        );
+        assert_eq!(player.pauses_after_start, 3);
+    }
+
+    #[test]
+    fn silent_wake_reports_a_session_that_never_starts_or_never_pauses() {
+        let mut never_starts = ScriptedPlayer::new(None, 1);
+        assert_eq!(
+            pause_wake_session(&mut never_starts, START, PAUSE),
+            SilentWake::NeverStarted
+        );
+        assert_eq!(
+            never_starts.polls, 30,
+            "the whole start budget, in 100 ms polls"
+        );
+        assert_eq!(never_starts.pauses_before_start, 0);
+
+        let mut never_pauses = ScriptedPlayer::new(Some(2), u32::MAX);
+        assert_eq!(
+            pause_wake_session(&mut never_pauses, START, PAUSE),
+            SilentWake::StillPlaying
+        );
+        assert_eq!(never_pauses.polls, 2 + 20, "then the whole pause budget");
     }
 
     #[test]

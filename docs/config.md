@@ -189,7 +189,7 @@ Independent of the wake: when Connect reports no current playback, the playback 
 | `args` | Extra launch arguments. | `[]` |
 | `mpris_dest` | MPRIS D-Bus name of the desktop client. | `org.mpris.MediaPlayer2.spotify` |
 | `nudge_uri` | `OpenUri` target for the registration nudge (`spotify:…` or an open.spotify.com URL). If unset, the most recently played track is used, else a bare `Play`. | unset |
-| `pause_after_nudge` | Silence the registration `Play` by muting Spotify's Pulse/PipeWire sink inputs, pause as soon as MPRIS confirms, then unmute (with a timeout so mute cannot stick). Set `false` to let the automatically started playback play. | `true` |
+| `pause_after_nudge` | Silence the registration `Play` by muting Spotify's Pulse/PipeWire sink inputs, pause once MPRIS reports the registration session as playing, then unmute (with a timeout so mute cannot stick). Set `false` to let the automatically started playback play. | `true` |
 | `start_minimized` | Hide the client window to the system tray after launch, nudge and Connect transfer. Requires `xdotool`; enables Spotify's own `ui.minimize_to_tray` pref before launching (falls back to taskbar minimize when that pref is off). | `true` |
 | `ready_timeout_secs` | Max wait for MPRIS after launching the client. | `45` |
 
