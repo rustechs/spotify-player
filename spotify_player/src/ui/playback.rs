@@ -56,9 +56,18 @@ pub fn render_playback_window(
                         .unwrap_or_else(chrono::Duration::zero),
                     duration,
                 );
+                // A new connection clears the buffered playback and the next
+                // playback fetch refills it. A rate limit can hold that fetch
+                // back for a minute, so draw from the playback itself meanwhile.
+                let buffered_playback = player.buffered_playback.clone().or_else(|| {
+                    player
+                        .playback
+                        .as_ref()
+                        .map(PlaybackMetadata::from_playback)
+                });
                 Some(ActivePlayback {
                     item,
-                    buffered_playback: player.buffered_playback.clone(),
+                    buffered_playback,
                     progress,
                     duration,
                 })
@@ -800,6 +809,68 @@ fn split_rect_for_playback_window(state: &SharedState, rect: Rect) -> (Rect, Rec
 #[cfg(test)]
 mod tests {
     use super::{collapse_format_newlines, status_row_spacing};
+
+    /// A playing track on a Connect device, as `/v1/me/player` returns it.
+    const PLAYBACK: &str = r#"{
+        "device": {
+            "id": "0000000000000000000000000000000000000000",
+            "is_active": true, "is_private_session": false, "is_restricted": false,
+            "name": "test-device", "type": "Computer", "volume_percent": 70
+        },
+        "repeat_state": "off", "shuffle_state": false, "context": null,
+        "timestamp": 1700000000000, "progress_ms": 61000, "is_playing": true,
+        "item": {
+            "album": {
+                "album_type": "album", "artists": [], "available_markets": [],
+                "external_urls": {}, "href": null, "id": "1111111111111111111111",
+                "images": [], "name": "Test Album",
+                "release_date": "2000-01-01", "release_date_precision": "day"
+            },
+            "artists": [{
+                "external_urls": {}, "href": null,
+                "id": "2222222222222222222222", "name": "Test Artist"
+            }],
+            "available_markets": [], "disc_number": 1, "duration_ms": 180000,
+            "explicit": false, "external_ids": {}, "external_urls": {}, "href": null,
+            "id": "3333333333333333333333", "is_local": false, "name": "Test Track",
+            "popularity": 1, "preview_url": null, "track_number": 1, "type": "track"
+        },
+        "currently_playing_type": "track",
+        "actions": {"disallows": {}}
+    }"#;
+
+    #[test]
+    fn track_text_is_drawn_while_the_buffered_playback_is_missing() {
+        use ratatui::{backend::TestBackend, Terminal};
+
+        let dir = crate::utils::test_scratch_dir("playback-render");
+        crate::config::set_config(crate::config::Configs::new(&dir, &dir).unwrap());
+        let state = std::sync::Arc::new(crate::state::State::new(false, std::sync::Arc::default()));
+        {
+            let mut player = state.player.write();
+            player.playback = Some(serde_json::from_str(PLAYBACK).unwrap());
+            player.playback_last_updated_time = Some(std::time::Instant::now());
+            // What a new connection leaves behind until the next playback fetch.
+            player.buffered_playback = None;
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(84, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                let mut ui = state.ui.lock();
+                let rect = frame.area();
+                super::render_playback_window(frame, &state, &mut ui, rect);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        let drawn = |text: &str| rows.iter().any(|row| row.contains(text));
+        assert!(drawn("Test Track"), "{rows:#?}");
+        assert!(drawn("Test Artist"), "{rows:#?}");
+        assert!(drawn("device: test-device"), "{rows:#?}");
+    }
 
     #[test]
     fn collapse_format_newlines_strips_trailing_blank_line() {
