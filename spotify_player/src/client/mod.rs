@@ -757,6 +757,12 @@ impl AppClient {
         }
 
         let mut playback = playback.context("no playback found")?;
+
+        #[cfg(target_os = "linux")]
+        if run_on_desktop_client(&request, &mut playback).await {
+            return Ok(Some(playback));
+        }
+
         let device_id = playback.device_id.as_deref();
 
         match request {
@@ -2788,6 +2794,39 @@ async fn sleep_rate_limit(attempt: u32, retry_after_secs: Option<u64>, context: 
     tokio::time::sleep(wait).await;
 }
 
+/// Carry out `request` on the desktop client over MPRIS when it is the device
+/// being played, and record the result in `playback`. `false` leaves the
+/// request to the Web API, including when the client does not answer.
+#[cfg(target_os = "linux")]
+async fn run_on_desktop_client(request: &PlayerRequest, playback: &mut PlaybackMetadata) -> bool {
+    use crate::desktop_spotify::LocalCommand;
+
+    let configs = config::get_config();
+    let desktop = &configs.app_config.desktop_spotify;
+    let Some(command) = crate::desktop_spotify::local_command(
+        request,
+        playback,
+        desktop,
+        configs.app_config.preferred_device.as_deref(),
+    ) else {
+        return false;
+    };
+    if let Err(err) = crate::desktop_spotify::send_local_command(&desktop.mpris_dest, command).await
+    {
+        tracing::warn!(
+            "Desktop Spotify did not take {command:?} over MPRIS; using the Web API: {err:#}"
+        );
+        return false;
+    }
+    tracing::info!("Sent {command:?} to desktop Spotify over MPRIS");
+    match command {
+        LocalCommand::Play => playback.is_playing = true,
+        LocalCommand::Pause => playback.is_playing = false,
+        LocalCommand::Next | LocalCommand::Previous => {}
+    }
+    true
+}
+
 /// Overlay Linux desktop MPRIS onto Connect playback:
 /// - no Connect session → show the MPRIS track so the window is not empty
 /// - Connect session on `preferred_device` with volume 0/None → use MPRIS volume
@@ -2806,11 +2845,10 @@ fn overlay_desktop_mpris(
         if !desktop.enable {
             return connect;
         }
-        let device_name = configs
-            .app_config
-            .preferred_device
-            .clone()
-            .unwrap_or_else(|| "Spotify".to_string());
+        let device_name = crate::desktop_spotify::desktop_device_name(
+            configs.app_config.preferred_device.as_deref(),
+        )
+        .to_string();
         match connect {
             None => {
                 match crate::desktop_spotify::current_playback_from_mpris(

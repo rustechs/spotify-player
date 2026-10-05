@@ -44,7 +44,9 @@ use rspotify::model::{
     PlayableItem, RepeatState, SimplifiedAlbum, SimplifiedArtist, TrackId, Type,
 };
 
+use crate::client::PlayerRequest;
 use crate::config::DesktopSpotifyConfig;
+use crate::state::PlaybackMetadata;
 use dbus::arg::PropMap;
 
 const MPRIS_OBJECT: &str = "/org/mpris/MediaPlayer2";
@@ -123,6 +125,76 @@ pub fn launch_early_if_needed(config: &DesktopSpotifyConfig) -> Result<bool> {
     EARLY_LAUNCH.store(true, Ordering::Release);
     tracing::info!("Started Spotify desktop early while playback initializes");
     Ok(true)
+}
+
+/// Name Connect lists the desktop client under: `preferred_device`, else the
+/// client's own default.
+pub fn desktop_device_name(preferred_device: Option<&str>) -> &str {
+    preferred_device.unwrap_or("Spotify")
+}
+
+/// A transport command the desktop client takes over MPRIS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalCommand {
+    Play,
+    Pause,
+    Next,
+    Previous,
+}
+
+impl LocalCommand {
+    fn method(self) -> &'static str {
+        match self {
+            Self::Play => "Play",
+            Self::Pause => "Pause",
+            Self::Next => "Next",
+            Self::Previous => "Previous",
+        }
+    }
+}
+
+/// The command that carries out `request` on the desktop client itself, or
+/// `None` when the request has to go through the Web API.
+///
+/// Only when the desktop client is the device being played. A command sent
+/// over MPRIS acts at once and does not count against the Web API rate limit,
+/// which otherwise rejects, and so drops, key presses. Seek, volume, shuffle
+/// and repeat stay on the Web API.
+pub fn local_command(
+    request: &PlayerRequest,
+    playback: &PlaybackMetadata,
+    config: &DesktopSpotifyConfig,
+    preferred_device: Option<&str>,
+) -> Option<LocalCommand> {
+    let on_desktop_client = playback
+        .device_name
+        .eq_ignore_ascii_case(desktop_device_name(preferred_device));
+    if !config.enable || !on_desktop_client {
+        return None;
+    }
+    match request {
+        PlayerRequest::Pause if playback.is_playing => Some(LocalCommand::Pause),
+        PlayerRequest::Resume if !playback.is_playing => Some(LocalCommand::Play),
+        // An explicit verb rather than `PlayPause`: sent twice, it still ends
+        // in the state the key press asked for.
+        PlayerRequest::ResumePause => Some(if playback.is_playing {
+            LocalCommand::Pause
+        } else {
+            LocalCommand::Play
+        }),
+        PlayerRequest::NextTrack => Some(LocalCommand::Next),
+        PlayerRequest::PreviousTrack => Some(LocalCommand::Previous),
+        _ => None,
+    }
+}
+
+/// Send `command` to the desktop client over MPRIS.
+pub async fn send_local_command(dest: &str, command: LocalCommand) -> Result<()> {
+    let dest = dest.to_owned();
+    run_blocking("MPRIS player command", move || {
+        bus::player_call(&dest, command.method())
+    })
+    .await?
 }
 
 /// Spotify track URI for the desktop client's current MPRIS session, if any.
@@ -1405,6 +1477,110 @@ mod tests {
         assert_eq!(
             restore_targets(&[12, 99], &current),
             vec![(12, false), (99, true)]
+        );
+    }
+
+    fn playback_on(device_name: &str, is_playing: bool) -> PlaybackMetadata {
+        PlaybackMetadata {
+            device_name: device_name.to_string(),
+            device_id: None,
+            volume: Some(50),
+            is_playing,
+            repeat_state: RepeatState::Off,
+            shuffle_state: false,
+            mute_state: None,
+        }
+    }
+
+    fn desktop_enabled() -> DesktopSpotifyConfig {
+        DesktopSpotifyConfig {
+            enable: true,
+            ..DesktopSpotifyConfig::default()
+        }
+    }
+
+    #[test]
+    fn transport_keys_go_to_the_desktop_client_when_it_is_playing() {
+        let config = desktop_enabled();
+        let command = |request: PlayerRequest, is_playing: bool| {
+            local_command(
+                &request,
+                &playback_on("Estelle", is_playing),
+                &config,
+                Some("estelle"),
+            )
+        };
+        // The toggle becomes an explicit verb, so a repeated press is harmless.
+        assert_eq!(
+            command(PlayerRequest::ResumePause, true),
+            Some(LocalCommand::Pause)
+        );
+        assert_eq!(
+            command(PlayerRequest::ResumePause, false),
+            Some(LocalCommand::Play)
+        );
+        assert_eq!(
+            command(PlayerRequest::Pause, true),
+            Some(LocalCommand::Pause)
+        );
+        assert_eq!(
+            command(PlayerRequest::Resume, false),
+            Some(LocalCommand::Play)
+        );
+        assert_eq!(
+            command(PlayerRequest::NextTrack, true),
+            Some(LocalCommand::Next)
+        );
+        assert_eq!(
+            command(PlayerRequest::PreviousTrack, false),
+            Some(LocalCommand::Previous)
+        );
+        // Nothing to send, as on the Web API path.
+        assert_eq!(command(PlayerRequest::Pause, false), None);
+        assert_eq!(command(PlayerRequest::Resume, true), None);
+        // Not offered over MPRIS.
+        assert_eq!(command(PlayerRequest::Shuffle, true), None);
+        assert_eq!(command(PlayerRequest::Volume(40), true), None);
+        assert_eq!(
+            command(PlayerRequest::SeekTrack(chrono::Duration::seconds(5)), true),
+            None
+        );
+    }
+
+    #[test]
+    fn transport_keys_stay_on_the_web_api_for_any_other_device() {
+        let enabled = desktop_enabled();
+        let toggle = PlayerRequest::ResumePause;
+        // A phone or speaker is playing: pausing the desktop client would do nothing.
+        assert_eq!(
+            local_command(
+                &toggle,
+                &playback_on("Kitchen", true),
+                &enabled,
+                Some("estelle")
+            ),
+            None
+        );
+        // Without `preferred_device` the client goes by its default name.
+        assert_eq!(
+            local_command(&toggle, &playback_on("Spotify", true), &enabled, None),
+            Some(LocalCommand::Pause)
+        );
+        assert_eq!(
+            local_command(&toggle, &playback_on("estelle", true), &enabled, None),
+            None
+        );
+        // The desktop integration is off.
+        let disabled = DesktopSpotifyConfig::default();
+        assert!(!disabled.enable);
+        assert_eq!(
+            local_command(
+                &toggle,
+                &playback_on("estelle", true),
+                &disabled,
+                Some("estelle")
+            ),
+            None
         );
     }
 
