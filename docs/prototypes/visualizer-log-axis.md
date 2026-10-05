@@ -95,4 +95,41 @@ Prototype code stays on branch `proto/visualizer-log-axis` and is not meant for 
 
 Next: a human choice. The evidence supports dropping A and B. Between the other two, D is the stronger direction: C's failure comes with its window, D's comes from a level rule that can be changed. Neither should be built as prototyped, because the level rule affects both. A second round on that rule, with the same harness and criteria bound in advance, and a live look with real music would close the remaining unknowns. Whatever is chosen then goes through normal development with tests; nothing here is promoted as it stands.
 
-**Review pending.**
+**Reviewed 2026-10-05.** The human chose a second round on the level rule.
+
+## Round 2 — which bar level rule keeps levels even on the log axis?
+
+**Critical unknown:** round one kept today's rule, the RMS of the bins under a bar followed by three-point smoothing, and found that it draws a note lower the wider its bar and gives D a 6 dB seam. Does summing the power under a bar fix both for C and D, and what else has to change with it?
+
+**Scenario / real boundary:** as round one: the same pipeline, renderer, signals, 48 kHz, hop of 128 and harness. Round one's variants and numbers are left reproducible.
+
+**Variants,** one change per step, all measured in the same run, each for C and for D:
+
+| Step | Level of a bar | Smoothing over three bars | Fewer columns than bars |
+| --- | --- | --- | --- |
+| C, D | RMS of the bins under it: round one, the control | yes | every column samples one bar, as today |
+| C+sum, D+sum | power summed under the bar; a bar narrower than one bin reads the interpolated bin as before | yes | as today |
+| C+sum sharp, D+sum sharp | as +sum | no | every column draws the tallest bar it covers |
+
+`current` runs alongside as the reference.
+
+The third step exists because two things sit on top of the level rule. Smoothing halves a peak that fits in one bar and leaves alone a peak that spans several, so it lowers high notes by up to 6 dB under any rule. And the renderer samples: at 84 terminal columns it draws 77 of the 128 bars, so a peak one bar wide can fall between columns once nothing smears it.
+
+**Budget / stop:** one implementation wave, one measurement batch.
+
+**Measurement oracle:** round one's measurements, plus, on bars: 41 equal tones spaced evenly in pitch from 60 Hz to 12 kHz, each read at its peak; pink-noise level per octave; hop-to-hop flicker of the bars between 2 and 8 kHz on pink noise. On screen: the same 41 tones read from the 77 columns the renderer draws at 84 terminal columns, under both column rules.
+
+**Acceptance oracle,** bound before any round-two run and numbered on from round one:
+
+6. Width independence, +sum: equal tones at 1, 4 and 10 kHz read within 2 dB of each other.
+7. Floor, +sum: each of those reads within 8 dB of an equal 100 Hz tone. Smoothing alone is expected to cost 4 to 6 dB here, which is why this is not tighter.
+8. Window independence, +sum: C+sum and D+sum read within 1 dB of each other at 4 and at 10 kHz.
+9. Seam: the pink-noise tilt of D is within 3 dB of C under the same rule, for +sum and for +sum sharp.
+10. Even levels, +sum sharp: each of the 41 tones reads within 3 dB of their median.
+11. No regression: criteria 1 and 2 hold for the four new variants.
+
+Not bound: flicker, pink level per octave, the on-screen readings, onset and cost.
+
+**Valid while / revalidate when:** as round one.
+
+**Round 2 not yet run.**
