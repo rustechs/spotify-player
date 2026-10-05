@@ -1,6 +1,6 @@
 # Code review and recommended-changes plan (2026-09-13)
 
-**Status:** Approved 2026-09-15 ("go for it") and executed on branch `claude/code-review-plan-29aa6b`, one commit per phase (§3, §5). Independently verified 2026-09-18 (§6). The four pre-merge fixes from that verification landed 2026-10-04 (§6.7). Rendered captures of the changed screens were added 2026-10-05 (§6.8).
+**Status:** Approved 2026-09-15 ("go for it") and executed on branch `claude/code-review-plan-29aa6b`, one commit per phase (§3, §5). Independently verified 2026-09-18 (§6). The four pre-merge fixes from that verification landed 2026-10-04 (§6.7). Rendered captures of the changed screens were added 2026-10-05 (§6.8). The branch was merged the same day and the first real-session run is recorded in §6.9.
 **Scope:** Full review of `rustechs/spotify-player` at `cecd00e` (branch `claude/code-review-plan-29aa6b`): 22.7k lines of Rust in `spotify_player/src`, plus docs, config examples, CI and manifests.
 **Method:** The fork delta (50 commits, +7086/−1008 lines since the `upstream/master` merge-base `5987777`) was read line by line. Inherited upstream code was reviewed in four parallel slices (CLI/auth/main; state/config/keymap; UI/event; streaming/audio/media-control) and every reported finding was re-verified by opening the cited lines before inclusion. Each finding cites `file:line`, gives a concrete failure scenario, and is tagged **FORK** (introduced here; fix here) or **UPSTREAM** (inherited; fix here and consider sending upstream).
 
@@ -176,7 +176,7 @@ Behaviour changes carried in by the upstream v0.25.1 merge (`e93b663`) that no c
 - The three top-tracks pages fetch at most `top_tracks_limit` tracks (default 100) instead of every page.
 
 Open manual gates (no desktop Spotify or GUI session was available here):
-- Desktop wake end to end on X11 and Wayland: launch, silent registration nudge, tray hide (single watcher), Connect transfer, MPRIS overlay when Connect is empty, `wake-desktop` CLI output. Phases 4–5 rewrote this path around `spawn_blocking` and the `dbus` crate; the D-Bus calls are exercised only by the `name_has_owner` smoke test when a session bus exists.
+- Desktop wake end to end on X11 and Wayland: launch, silent registration nudge, tray hide (single watcher), Connect transfer, MPRIS overlay when Connect is empty, `wake-desktop` CLI output. Phases 4–5 rewrote this path around `spawn_blocking` and the `dbus` crate; the D-Bus calls are exercised only by the `name_has_owner` smoke test when a session bus exists. **Partly closed on 2026-10-05 by a live Wayland run, see §6.9.**
 - Visualizer: bars filling a 190-column terminal, grid visible between bars, Hz labels over the right bands, no flash on pause, no jitter with system-audio capture plus local streaming.
 - Toast overlay over cover art with the `image` feature, toasts staying clear of popups.
 - `cd.yml` dry run via `workflow_dispatch` on the fork to confirm the Linux release jobs link `libpulse`.
@@ -281,3 +281,41 @@ Four captures of the changed screens are in [`assets/code-review-2026-09/`](asse
 These cover the layout claims among the open manual gates in §5. Still manual: the toast overlay over real cover art, since the test backend has no image protocol, the visualizer against real audio, and the desktop wake.
 
 The harness also surfaced one inherited defect. A track without a Spotify id is titled "Unknown Track" in the playback window ([`ui/playback.rs:511`](../../spotify_player/src/ui/playback.rs:511), upstream #962), so a local file shown through the MPRIS overlay loses its title. It is not fixed here.
+
+### 6.9 First real-session run (2026-10-05)
+
+The branch was merged as `c5a32dc` ([#53](https://github.com/rustechs/spotify-player/pull/53)), installed with the default features and started in its usual place: a terminal pane on a Wayland session, `enable_streaming = "Never"`, the snap desktop client as `preferred_device`, `[desktop_spotify]` enabled, and the desktop client closed. This is the first time the wake path rewritten in phases 4 and 5 ran against a real session. The evidence is the instance's own log and CLI read-back, with identifiers removed. No screenshot was taken, so what the screen showed is not recorded here.
+
+| UTC | Log line (trimmed) |
+| --- | --- |
+| 08:44:12.096 | `Started Spotify desktop early while playback initializes` |
+| 08:44:12.659 | `Used a new session for Spotify client.` |
+| 08:44:12.746 | `Starting a client socket at 127.0.0.1:8080` |
+| 08:44:13.505 | `Preferred device unavailable; automatically starting Spotify desktop via spotify` |
+| 08:44:13.576 | WARN `Desktop Spotify exited before MPRIS was ready; relaunching spotify` |
+| 08:44:27.367 | `Desktop Spotify MPRIS ready` |
+| 08:44:27.846 | `Nudging desktop Spotify via OpenUri` |
+| 08:44:27.847 | `Pausing desktop Spotify after silent wake nudge` |
+| 08:44:27.848 | `Desktop Spotify paused; unmuting local sink-inputs` |
+| 08:44:28.101 | `Spotify desktop window already hidden (system tray)` |
+| 08:44:39.955 | `Woken device registered with Connect`, then `Trying to connect to device` |
+| 08:44:40.527 | WARN `Failed to pause after desktop wake transfer: http error: status code 403 Forbidden` |
+
+What the run shows:
+
+- **The wake works end to end on Wayland.** Launch, MPRIS readiness after 15 s, the silent nudge, the pause, the mute-guard restore, Connect registration and the transfer all happened. Afterwards the CLI listed the desktop client as the active device, paused, where it had listed only another speaker before, and no Spotify stream was left muted.
+- **B4 is visible in the timings.** The session, the CLI socket and the library requests all completed while the wake was still waiting for MPRIS, so the wake no longer holds the runtime.
+- **B5 and S12 hold in the field.** The first log written by this version contains no token material, and after the startup sweep `credentials.json` and both token caches are `0600`.
+- **No panic and no supervisor restart** in the first 19 minutes; the backtrace file is empty.
+
+Not shown by this run: whether the window is really hidden, since the hide check is `xdotool`-based and on Wayland it can only report "already hidden"; the single hide watcher; X11; the `wake-desktop` command; and the MPRIS overlay, because Connect listed the device.
+
+Findings, none of them fixed here:
+
+| ID | Observation | Standing |
+| --- | --- | --- |
+| F1 | `spotify` is launched three times within 1.5 s: the early launch, then "automatically starting", then "exited before MPRIS was ready; relaunching". Two launcher processes are left as zombies under the instance, because launched children are never reaped. Likely cause of the relaunch, not verified: the `pgrep -x spotify` liveness check is still false while the snap launcher is exec-ing. | Predates this work: the same three lines are in logs of 2026-08-17 and 2026-08-19. |
+| F2 | The pause after the wake transfer returns 403. Playback ends paused anyway. | Predates this work: same line on 2026-08-19 and 2026-09-01. A 403 from an already-paused player could count as success. |
+| F3 | The playback poll is rate limited about half the time on the shared ncspot client id: 38 windows in 19 minutes, median 16 s, 51 % of the span. The upstream middleware now waits out `Retry-After` and retries, so GETs no longer fail, but the playback window can lag by that long. | Environmental. The previous version logged 2,212 failed requests and about 21,600 rate-limit warnings in its last 1.4 days. README "Client ID and rate limits" recommends a personal client id. |
+| F4 | Upstream renamed the Web API token cache to `{client_id}_token.json` with no migration, so an upgrade forces a browser login. Here the old file was copied to the new name by hand before the restart, and no login was needed. | Follow-up: read the legacy `user_client_token.json` when the new file is absent. |
+| F5 | A volume gesture at 09:00:31 sent 18 `PUT /me/player/volume` requests in 1.7 s. Each was answered 429 with `Retry-After` 6 to 7 s and failed with "Failed to handle client request". Volume requests are not retried, they raise no toast, and because the buffered volume never changed every tick re-sent the same value. | New observation, upstream design: mutation requests are never delayed or retried by the middleware. Follow-up: coalesce repeated volume requests and either wait out a known `Retry-After` or say so in a toast. F3 is the cause. |
