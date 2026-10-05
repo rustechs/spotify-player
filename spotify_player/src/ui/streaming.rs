@@ -30,8 +30,16 @@ const X_AXIS_UNIT_WIDTH: u16 = 2;
 
 const DB_GRID_TICKS: [i32; 3] = [-12, -24, -36];
 const DB_LABEL_TICKS: [i32; 4] = [0, -12, -24, -36];
-const FREQ_TICKS_HZ: [f32; 6] = [100.0, 500.0, 1_000.0, 5_000.0, 10_000.0, 20_000.0];
-/// Raw band peak below which we treat the monitor as silent (pause / idle).
+/// Frequencies with a vertical grid line: the decades, evenly spaced on the
+/// log axis.
+const FREQ_GRID_HZ: [f32; 3] = [100.0, 1_000.0, 10_000.0];
+/// Frequencies labelled on the x-axis, in the order they claim space: a chart
+/// too narrow for all of them keeps the decades and drops the ones in between.
+const FREQ_LABELS_HZ: [f32; 9] = [
+    100.0, 1_000.0, 10_000.0, 50.0, 500.0, 5_000.0, 20_000.0, 200.0, 2_000.0,
+];
+/// Band peak below which we treat the monitor as silent (pause / idle). Band
+/// levels are relative to a full-scale sine, so this is -100 dBFS.
 const VIZ_SIGNAL_FLOOR: f32 = 1e-5;
 
 /// Whether the UI should draw live bar heights from `VisBands`.
@@ -180,9 +188,43 @@ fn format_db_label(db: i32) -> String {
     }
 }
 
-fn freq_tick_x(plot_rect: Rect, freq_hz: f32, sample_rate: f32) -> u16 {
-    let fraction = freq_to_x_fraction(freq_hz, sample_rate);
+fn freq_tick_x(plot_rect: Rect, freq_hz: f32) -> u16 {
+    let fraction = freq_to_x_fraction(freq_hz);
     plot_rect.x + (fraction * f32::from(plot_rect.width.saturating_sub(1))).round() as u16
+}
+
+/// The band value drawn in plot column `column` of `columns`: the tallest of
+/// the bands the column covers. Sampling one band per column would skip the
+/// rest once there are fewer columns than bands, and a peak one band wide
+/// could then be drawn from its neighbour or not at all.
+fn column_value(values: &[f32; crate::vis::NUM_BANDS], column: usize, columns: usize) -> f32 {
+    let step = values.len() as f64 / columns as f64;
+    let first = ((column as f64 * step) as usize).min(values.len() - 1);
+    let end = (((column + 1) as f64 * step) as usize).clamp(first + 1, values.len());
+    values[first..end].iter().copied().fold(0.0, f32::max)
+}
+
+/// Where each frequency label starts on the x-axis row. Labels sit under
+/// their tick, pulled in at the ends of the axis, and one that would touch a
+/// label already placed is left out.
+fn x_axis_labels(plot_rect: Rect, axis_cap_x: u16) -> Vec<(u16, String)> {
+    let mut placed: Vec<(u16, String)> = Vec::new();
+    for freq in FREQ_LABELS_HZ {
+        let label = format_freq_hz(freq);
+        let len = label.len() as u16;
+        let Some(last_start) = axis_cap_x.checked_sub(len).filter(|&x| x >= plot_rect.x) else {
+            continue;
+        };
+        let x = freq_tick_x(plot_rect, freq)
+            .saturating_sub(len / 2)
+            .clamp(plot_rect.x, last_start);
+        let touches =
+            |&(other, ref text): &(u16, String)| x <= other + text.len() as u16 && other <= x + len;
+        if !placed.iter().any(touches) {
+            placed.push((x, label));
+        }
+    }
+    placed
 }
 
 fn db_tick_y(plot_rect: Rect, max_val: u64, db: i32) -> u16 {
@@ -245,7 +287,6 @@ fn render_grid_lines(
     frame: &mut Frame,
     plot_rect: Rect,
     max_val: u64,
-    sample_rate: f32,
     style: Style,
     bars: &BarCoverage,
 ) {
@@ -263,8 +304,8 @@ fn render_grid_lines(
         }
     }
 
-    for freq in FREQ_TICKS_HZ {
-        let x = freq_tick_x(plot_rect, freq, sample_rate);
+    for freq in FREQ_GRID_HZ {
+        let x = freq_tick_x(plot_rect, freq);
         if x <= plot_rect.x || x >= plot_rect.right() {
             continue;
         }
@@ -309,20 +350,14 @@ fn render_x_axis_labels(
     plot_rect: Rect,
     chart_rect: Rect,
     hz_margin: Rect,
-    sample_rate: f32,
     style: Style,
 ) {
     let buf = frame.buffer_mut();
     let label_y = chart_rect.bottom().saturating_sub(1);
 
-    for freq in FREQ_TICKS_HZ {
-        let x = freq_tick_x(plot_rect, freq, sample_rate);
-        let label = format_freq_hz(freq);
-        let label_x = x.saturating_sub(label.len() as u16 / 2);
-        let axis_cap_x = chart_rect.right().saturating_sub(1);
-        if label_x + label.len() as u16 <= axis_cap_x {
-            buf.set_string(label_x, label_y, &label, style);
-        }
+    let axis_cap_x = chart_rect.right().saturating_sub(1);
+    for (x, label) in x_axis_labels(plot_rect, axis_cap_x) {
+        buf.set_string(x, label_y, &label, style);
     }
 
     if hz_margin.width >= 2 {
@@ -333,8 +368,9 @@ fn render_x_axis_labels(
 
 /// Render a frequency-band bar chart using live FFT data from the audio sink.
 ///
-/// Bars are subsampled to the available rect width so they always fill the area
-/// cleanly. Heights use a sqrt (perceptual) curve so quiet signals stay visible.
+/// The bands are fitted to the available rect width, one bar per column, so
+/// they always fill the area cleanly. Heights use a sqrt (perceptual) curve so
+/// quiet signals stay visible.
 /// Each bar is coloured by its amplitude using the theme's `visualization`
 /// colors: `low` (quiet) → `mid` → `high` (loud).
 pub fn render_audio_visualization(
@@ -371,7 +407,6 @@ pub fn render_audio_visualization(
     }
 
     let guard = vis_lock.lock();
-    let sample_rate = guard.sample_rate;
     let intro_level = guard.intro_level();
     let mut values = if should_show_viz_bars(&guard, playback_is_playing) {
         let display_decay = decay_for_elapsed(guard.updated_at.elapsed());
@@ -411,17 +446,15 @@ pub fn render_audio_visualization(
         return;
     }
 
-    // One bar per plot column: bands are subsampled on narrow terminals and
+    // One bar per plot column: bands are merged on narrow terminals and
     // repeated on wide ones, so the axis labels always span the same width.
     let num_bars = usize::from(plot_rect.width).max(1);
     let max_val = u64::from(plot_rect.height) * 8;
     let vis_colors = theme.visualization();
 
-    let step = values.len() as f64 / num_bars as f64;
     let bar_values: Vec<(u64, f32)> = (0..num_bars)
         .map(|i| {
-            let idx = ((i as f64 * step) as usize).min(values.len() - 1);
-            let norm = values[idx];
+            let norm = column_value(&values, i, num_bars);
             let val = (norm * max_val as f32).round() as u64;
             let val = if norm > 0.0 { val.max(1) } else { 0 };
             (val, norm)
@@ -456,29 +489,75 @@ pub fn render_audio_visualization(
         values: bar_values.iter().map(|&(val, _)| val).collect(),
     };
     render_axis_frame(frame, chart_rect, axis_style, &coverage);
-    render_grid_lines(
-        frame,
-        plot_rect,
-        max_val,
-        sample_rate,
-        axis_style,
-        &coverage,
-    );
+    render_grid_lines(frame, plot_rect, max_val, axis_style, &coverage);
     render_y_axis_labels(frame, horiz[0], plot_rect, max_val, axis_style);
-    render_x_axis_labels(
-        frame,
-        plot_rect,
-        chart_rect,
-        hz_margin,
-        sample_rate,
-        axis_style,
-    );
+    render_x_axis_labels(frame, plot_rect, chart_rect, hz_margin, axis_style);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::BarCoverage;
+    use super::{column_value, x_axis_labels, BarCoverage};
+    use crate::vis::NUM_BANDS;
     use ratatui::layout::Rect;
+
+    #[test]
+    fn a_column_draws_the_tallest_band_it_covers() {
+        let drawn = |band: usize, columns: usize| {
+            let mut values = [0.0_f32; NUM_BANDS];
+            values[band] = 1.0;
+            (0..columns)
+                .filter(|&c| column_value(&values, c, columns) > 0.0)
+                .count()
+        };
+        // 77 plot columns is an 84-column playback pane: fewer columns than
+        // bands, and still no band may go undrawn.
+        for columns in [20, 77, 127] {
+            assert!((0..NUM_BANDS).all(|band| drawn(band, columns) == 1));
+        }
+        // With room to spare every band gets its own column or several.
+        assert!((0..NUM_BANDS).all(|band| drawn(band, NUM_BANDS) == 1));
+        assert!((0..NUM_BANDS).all(|band| drawn(band, 2 * NUM_BANDS) == 2));
+    }
+
+    #[test]
+    fn x_axis_labels_stay_apart_and_inside_the_axis() {
+        for width in 4..=240_u16 {
+            // Plot columns `1..=width`, end cap in the column after them.
+            let plot = Rect::new(1, 0, width, 7);
+            let cap = plot.right();
+            let mut labels = x_axis_labels(plot, cap);
+            labels.sort();
+            for (x, text) in &labels {
+                assert!(
+                    *x >= plot.x && x + text.len() as u16 <= cap,
+                    "{width}: {labels:?}"
+                );
+            }
+            for pair in labels.windows(2) {
+                let (x, text) = &pair[0];
+                assert!(x + (text.len() as u16) < pair[1].0, "{width}: {labels:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn x_axis_labels_keep_the_decades_when_space_runs_out() {
+        let texts = |width: u16| {
+            let plot = Rect::new(1, 0, width, 7);
+            let mut labels = x_axis_labels(plot, plot.right());
+            labels.sort();
+            labels.into_iter().map(|(_, text)| text).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            texts(77),
+            ["50", "100", "200", "500", "1k", "2k", "5k", "10k", "20k"]
+        );
+        let narrow = texts(24);
+        for decade in ["100", "1k", "10k"] {
+            assert!(narrow.iter().any(|text| text == decade), "{narrow:?}");
+        }
+        assert!(narrow.len() < 9, "{narrow:?}");
+    }
 
     #[test]
     fn bar_coverage_marks_only_cells_under_bars() {

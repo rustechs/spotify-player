@@ -285,7 +285,7 @@ cargo install spotify_player --no-default-features
 
 ### Audio Visualization
 
-Real-time audio visualization is displayed in the playback window as a frequency-band bar chart (128 log-scale bands from bass (left) to treble (right)) with dB and Hz axis labels, a themed grid, the progress bar directly below the chart, and repeat/shuffle/volume/device spread across a full-width row under the bar while music is streamed locally via the integrated [librespot](https://github.com/librespot-org/librespot) player.
+Real-time audio visualization is displayed in the playback window as a frequency-band bar chart (128 bands spaced evenly in pitch, from 40 Hz on the left to 20 kHz on the right) with dB and Hz axis labels, a themed grid, the progress bar directly below the chart, and repeat/shuffle/volume/device spread across a full-width row under the bar while music is streamed locally via the integrated [librespot](https://github.com/librespot-org/librespot) player.
 
 Set `enable_audio_visualization` to `true` in your config to enable this feature. The bars are colored by amplitude using the active theme's `visualization` component style (`low`/`mid`/`high` colors); see [config docs](./docs/config.md).
 

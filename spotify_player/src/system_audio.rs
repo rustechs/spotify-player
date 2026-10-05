@@ -112,10 +112,6 @@ fn capture_loop(bands: &Arc<Mutex<VisBands>>, source_cfg: &str) {
             continue;
         }
 
-        if !was_capturing {
-            processor.mark_warm_start();
-        }
-
         // Resolve the source only when (re)opening or on a coarse timer. With
         // `auto` this shells out to `pactl`, which must not run per 10 ms read.
         let resolved = if simple.is_none() || Instant::now() >= next_source_check {
@@ -134,7 +130,6 @@ fn capture_loop(bands: &Arc<Mutex<VisBands>>, source_cfg: &str) {
                         tracing::info!("system-audio-vis: capturing from '{desired_source}'");
                         simple = Some(s);
                         current_source = Some(desired_source);
-                        processor.mark_warm_start();
                         backoff.reset();
                     }
                     Err(err) => {
