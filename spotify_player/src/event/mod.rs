@@ -122,6 +122,33 @@ fn open_spotify_link(
 }
 
 /// Next volume after `delta`, or `None` when unchanged.
+/// Queue a volume change of `delta` and record the target at once, so the
+/// next wheel tick or key repeat steps from it rather than from the volume
+/// the last completed request left behind. The player worker sends only the
+/// last change of a flick.
+fn change_volume(
+    state: &SharedState,
+    client_pub: &flume::Sender<ClientRequest>,
+    delta: i32,
+) -> anyhow::Result<()> {
+    let new_volume = {
+        let mut player = state.player.write();
+        let Some(playback) = player.buffered_playback.as_mut() else {
+            return Ok(());
+        };
+        let Some(current) = playback.volume else {
+            return Ok(());
+        };
+        let Some(new_volume) = adjusted_volume(current, delta) else {
+            return Ok(());
+        };
+        playback.volume = Some(u32::from(new_volume));
+        new_volume
+    };
+    client_pub.send(ClientRequest::Player(PlayerRequest::Volume(new_volume)))?;
+    Ok(())
+}
+
 fn adjusted_volume(current: u32, delta: i32) -> Option<u8> {
     let new = (current as i32 + delta).clamp(0, 100) as u8;
     (u32::from(new) != current).then_some(new)
@@ -140,25 +167,11 @@ fn handle_mouse_event(
     match event.kind {
         crossterm::event::MouseEventKind::ScrollUp if enable_scroll => {
             let step = config::get_config().app_config.volume_scroll_step;
-            if let Some(ref playback) = state.player.read().buffered_playback {
-                if let Some(volume) = playback.volume {
-                    if let Some(new_volume) = adjusted_volume(volume, i32::from(step)) {
-                        client_pub
-                            .send(ClientRequest::Player(PlayerRequest::Volume(new_volume)))?;
-                    }
-                }
-            }
+            change_volume(state, client_pub, i32::from(step))?;
         }
         crossterm::event::MouseEventKind::ScrollDown if enable_scroll => {
             let step = config::get_config().app_config.volume_scroll_step;
-            if let Some(ref playback) = state.player.read().buffered_playback {
-                if let Some(volume) = playback.volume {
-                    if let Some(new_volume) = adjusted_volume(volume, -i32::from(step)) {
-                        client_pub
-                            .send(ClientRequest::Player(PlayerRequest::Volume(new_volume)))?;
-                    }
-                }
-            }
+            change_volume(state, client_pub, -i32::from(step))?;
         }
         // a left click event
         crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
@@ -666,14 +679,7 @@ fn handle_global_command(
             client_pub.send(ClientRequest::Player(PlayerRequest::Shuffle))?;
         }
         Command::VolumeChange { offset } => {
-            if let Some(ref playback) = state.player.read().buffered_playback {
-                if let Some(volume) = playback.volume {
-                    if let Some(new_volume) = adjusted_volume(volume, offset) {
-                        client_pub
-                            .send(ClientRequest::Player(PlayerRequest::Volume(new_volume)))?;
-                    }
-                }
-            }
+            change_volume(state, client_pub, offset)?;
         }
         Command::Mute => {
             client_pub.send(ClientRequest::Player(PlayerRequest::ToggleMute))?;

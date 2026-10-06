@@ -41,6 +41,10 @@ const PLAYER_RETRY_MAX_WAIT: Duration = Duration::from_secs(5);
 /// `Retry-After` counts whole seconds; a resend on the dot is rejected again.
 const PLAYER_RETRY_MARGIN: Duration = Duration::from_millis(500);
 
+/// A wheel flick or a held key queues one volume change per tick. After this
+/// pause only the last of them is sent; the UI already shows the target.
+const VOLUME_COALESCE_WINDOW: Duration = Duration::from_millis(150);
+
 type RequestOutcome = Result<anyhow::Result<()>, tokio::time::error::Elapsed>;
 
 /// Minimum gap between track-end playback refreshes. The watcher runs every 100ms and
@@ -112,13 +116,20 @@ async fn start_player_worker(
     // Requests taken off the channel while a resend was waiting, still to run.
     let mut backlog = std::collections::VecDeque::new();
     loop {
-        let request = match backlog.pop_front() {
+        let mut request = match backlog.pop_front() {
             Some(request) => request,
             None => match player_sub.recv_async().await {
                 Ok(request) => request,
                 Err(_) => return,
             },
         };
+        if matches!(request, ClientRequest::Player(PlayerRequest::Volume(_))) {
+            tokio::time::sleep(VOLUME_COALESCE_WINDOW).await;
+            backlog.extend(player_sub.drain());
+            if let Some(last) = take_last_volume(&mut backlog) {
+                request = last;
+            }
+        }
         let span = tracing::info_span!("player_request", request = ?request);
         let run = || {
             tokio::time::timeout(
@@ -145,6 +156,23 @@ async fn start_player_worker(
         }
         enqueue_request_toast(state, &request, outcome, PLAYER_REQUEST_TIMEOUT);
     }
+}
+
+/// Remove every volume change from `backlog` and return the last one. With
+/// one request per tick, only the final target matters.
+fn take_last_volume(
+    backlog: &mut std::collections::VecDeque<ClientRequest>,
+) -> Option<ClientRequest> {
+    let mut last = None;
+    backlog.retain(|queued| {
+        if matches!(queued, ClientRequest::Player(PlayerRequest::Volume(_))) {
+            last = Some(queued.clone());
+            false
+        } else {
+            true
+        }
+    });
+    last
 }
 
 /// How long to wait before sending a rejected player command once more:
@@ -505,6 +533,35 @@ mod tests {
             &queued(PlayerRequest::NextTrack),
             &PlayerRequest::NextTrack
         ));
+    }
+
+    #[test]
+    fn a_flick_of_the_wheel_sends_only_its_last_volume() {
+        let player = |request: PlayerRequest| ClientRequest::Player(request);
+        let mut backlog: std::collections::VecDeque<ClientRequest> = [
+            player(PlayerRequest::Volume(90)),
+            player(PlayerRequest::Shuffle),
+            player(PlayerRequest::Volume(85)),
+            player(PlayerRequest::Volume(80)),
+            player(PlayerRequest::NextTrack),
+        ]
+        .into_iter()
+        .collect();
+        assert!(matches!(
+            take_last_volume(&mut backlog),
+            Some(ClientRequest::Player(PlayerRequest::Volume(80)))
+        ));
+        // Everything else keeps its order.
+        assert!(matches!(
+            backlog.pop_front(),
+            Some(ClientRequest::Player(PlayerRequest::Shuffle))
+        ));
+        assert!(matches!(
+            backlog.pop_front(),
+            Some(ClientRequest::Player(PlayerRequest::NextTrack))
+        ));
+        assert!(backlog.is_empty());
+        assert!(take_last_volume(&mut backlog).is_none());
     }
 
     #[test]
