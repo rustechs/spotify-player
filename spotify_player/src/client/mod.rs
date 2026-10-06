@@ -104,6 +104,8 @@ pub struct AppClient {
     stream_conn: Arc<Mutex<Option<librespot_connect::Spirc>>>,
     /// Serialize session recreation and prevent concurrent hung reconnects.
     session_reconnect: Arc<tokio::sync::Mutex<()>>,
+    /// How a missing credential's browser login is shown.
+    login_prompt: auth::LoginPrompt,
 }
 
 impl Deref for AppClient {
@@ -227,13 +229,13 @@ fn paging_query<'a>(
 }
 
 impl AppClient {
-    /// Construct a new client
-    pub async fn new() -> Result<Self> {
+    /// Construct a new client, logging in through `login_prompt` where a Web API token is missing
+    pub async fn new(login_prompt: auth::LoginPrompt) -> Result<Self> {
         let configs = config::get_config();
         let auth_config = AuthConfig::new(configs)?;
 
         let mut api_client = new_api_client()?;
-        auth::prompt_for_user_token(&mut api_client, false)
+        auth::prompt_for_user_token(&mut api_client, false, &login_prompt)
             .await
             .context("authenticate Spotify Web API client")?;
 
@@ -254,6 +256,7 @@ impl AppClient {
             #[cfg(feature = "streaming")]
             stream_conn: Arc::new(Mutex::new(None)),
             session_reconnect: Arc::new(tokio::sync::Mutex::new(())),
+            login_prompt,
         })
     }
 
@@ -583,7 +586,8 @@ impl AppClient {
         });
 
         let session = self.auth_config.session();
-        let creds = auth::get_creds(&self.auth_config, reauth, true).context("get credentials")?;
+        let creds = auth::get_creds(&self.auth_config, reauth, true, &self.login_prompt)
+            .context("get credentials")?;
         self.spotify.set_session(session.clone()).await;
 
         #[allow(unused_mut)]

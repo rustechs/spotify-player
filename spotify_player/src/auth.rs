@@ -3,7 +3,10 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
 };
 
-use crate::config;
+use crate::{
+    config,
+    state::{PendingLogin, SharedState},
+};
 use anyhow::{Context as _, Result};
 use base64::Engine as _;
 use librespot_core::{authentication::Credentials, cache::Cache, Session};
@@ -95,6 +98,93 @@ impl AuthConfig {
     }
 }
 
+/// How a browser login is presented while the app waits for its OAuth redirect.
+#[derive(Clone)]
+pub enum LoginPrompt {
+    /// Print the authorization URL and progress to the terminal: CLI subcommands,
+    /// the daemon, and runs whose stdout is not a terminal.
+    Stdout,
+    /// Show a modal popup in the running TUI.
+    Tui(SharedState),
+}
+
+impl LoginPrompt {
+    /// Progress text: stdout in terminal mode, the log otherwise.
+    fn announce(&self, message: &str) {
+        match self {
+            Self::Stdout => println!("{message}"),
+            Self::Tui(_) => tracing::info!("{message}"),
+        }
+    }
+
+    /// Like [`Self::announce`] for warnings, which go to stderr in terminal mode.
+    fn warn(&self, message: &str) {
+        match self {
+            Self::Stdout => eprintln!("{message}"),
+            Self::Tui(_) => tracing::warn!("{message}"),
+        }
+    }
+
+    fn begin(&self, login: PendingLogin) {
+        match self {
+            Self::Stdout => println!("Browse to: {}", login.url),
+            Self::Tui(state) => state.ui.lock().show_login_popup(login),
+        }
+    }
+
+    fn approved(&self) {
+        if let Self::Tui(state) = self {
+            state.ui.lock().mark_login_approved();
+        }
+    }
+
+    fn end(&self) {
+        if let Self::Tui(state) = self {
+            state.ui.lock().close_login_popup();
+        }
+    }
+}
+
+/// A browser login in progress: opening it shows the prompt and opens the
+/// authorization URL in the browser; dropping it takes the prompt down again,
+/// however the login ended.
+struct BrowserLogin<'a> {
+    prompt: &'a LoginPrompt,
+    redirect_uri: String,
+}
+
+impl<'a> BrowserLogin<'a> {
+    fn open(prompt: &'a LoginPrompt, login: PendingLogin) -> Self {
+        open::that_in_background(&login.url);
+        let redirect_uri = login.redirect_uri.clone();
+        prompt.begin(login);
+        Self {
+            prompt,
+            redirect_uri,
+        }
+    }
+
+    /// Obtain the auth `code` from the redirect.
+    ///
+    /// If the redirect URI is an HTTP loopback address with a port, a local server collects the
+    /// code automatically; otherwise the user is prompted to paste the redirect URL on stdin,
+    /// which only works with [`LoginPrompt::Stdout`].
+    fn wait_for_code(&self, expected_state: Option<&str>) -> Result<String> {
+        let code = match redirect_socket_address(&self.redirect_uri) {
+            Some(addr) => listen_for_auth_code(addr, expected_state),
+            None => read_auth_code_from_stdin(expected_state),
+        }?;
+        self.prompt.approved();
+        Ok(code)
+    }
+}
+
+impl Drop for BrowserLogin<'_> {
+    fn drop(&mut self) {
+        self.prompt.end();
+    }
+}
+
 /// Make every credential file already cached in `cache_folder` owner-only.
 ///
 /// Files written from now on are restricted where they are written; this
@@ -126,8 +216,14 @@ pub fn restrict_cached_credentials(cache_folder: &std::path::Path) {
 /// # Args
 /// - `auth_config`: authentication configuration
 /// - `reauth`: whether to re-authenticate the application if no cached credentials are found
-// - `use_cached`: whether to use cached credentials if available
-pub fn get_creds(auth_config: &AuthConfig, reauth: bool, use_cached: bool) -> Result<Credentials> {
+/// - `use_cached`: whether to use cached credentials if available
+/// - `prompt`: how a re-authentication's browser login is shown
+pub fn get_creds(
+    auth_config: &AuthConfig,
+    reauth: bool,
+    use_cached: bool,
+    prompt: &LoginPrompt,
+) -> Result<Credentials> {
     let creds = if use_cached {
         auth_config.cache.credentials()
     } else {
@@ -138,13 +234,14 @@ pub fn get_creds(auth_config: &AuthConfig, reauth: bool, use_cached: bool) -> Re
         None => {
             let msg = "No cached credentials found, please authenticate the application first.";
             if reauth {
-                eprintln!("{msg}");
-                println!("Authenticating the librespot streaming client...");
+                prompt.warn(msg);
+                prompt.announce("Authenticating the librespot streaming client...");
 
                 let access_token = get_oauth_access_token(
                     SPOTIFY_CLIENT_ID,
                     &auth_config.login_redirect_uri,
                     OAUTH_SCOPES,
+                    prompt,
                 )?;
                 Credentials::with_access_token(access_token)
             } else {
@@ -161,7 +258,7 @@ pub fn get_creds(auth_config: &AuthConfig, reauth: bool, use_cached: bool) -> Re
 /// Authenticate the configured Web API client and its optional fallback using PKCE.
 ///
 /// This mirrors `rspotify`'s `prompt_for_token` (reusing/refreshing a cached token when possible),
-/// but replaces its callback listener with [`obtain_auth_code`], which is robust against stray
+/// but replaces its callback listener with [`listen_for_auth_code`], which is robust against stray
 /// browser requests on the callback port (see [`listen_for_auth_code`]).
 ///
 /// When `force` is set, cached tokens are ignored and fresh interactive authorization flows are
@@ -169,10 +266,11 @@ pub fn get_creds(auth_config: &AuthConfig, reauth: bool, use_cached: bool) -> Re
 pub async fn prompt_for_user_token(
     client: &mut crate::client::WebApiClient,
     force: bool,
+    prompt: &LoginPrompt,
 ) -> Result<()> {
-    prompt_for_web_api_token(client.primary_mut(), force, "configured client").await?;
+    prompt_for_web_api_token(client.primary_mut(), force, "configured client", prompt).await?;
     if let Some(fallback) = client.fallback_mut() {
-        prompt_for_web_api_token(fallback, force, "ncspot fallback client").await?;
+        prompt_for_web_api_token(fallback, force, "ncspot fallback client", prompt).await?;
     }
     Ok(())
 }
@@ -181,8 +279,9 @@ async fn prompt_for_web_api_token(
     client: &mut crate::client::PkceWebApiClient,
     force: bool,
     client_name: &str,
+    prompt: &LoginPrompt,
 ) -> Result<()> {
-    authorize_web_api_client(client, force, client_name).await?;
+    authorize_web_api_client(client, force, client_name, prompt).await?;
     // Every successful path leaves a token cache on disk. It holds a long-lived
     // refresh token and `rspotify` creates it with the default umask.
     crate::utils::restrict_permissions(&client.get_config().cache_path);
@@ -193,6 +292,7 @@ async fn authorize_web_api_client(
     client: &mut crate::client::PkceWebApiClient,
     force: bool,
     client_name: &str,
+    prompt: &LoginPrompt,
 ) -> Result<()> {
     // Reuse a cached token when possible, refreshing it if it has expired.
     if !force {
@@ -241,12 +341,23 @@ async fn authorize_web_api_client(
 
     // No usable cached token: run the interactive authorization code flow.
     // `get_authorize_url` also generates and stores the PKCE verifier used by `request_token`.
-    println!("Authenticating the {client_name} for Spotify Web API access...");
+    prompt.announce(&format!(
+        "Authenticating the {client_name} for Spotify Web API access..."
+    ));
     let url = client
         .get_authorize_url(None)
         .with_context(|| format!("get authorize URL for {client_name}"))?;
     let oauth = client.get_oauth();
-    let code = obtain_auth_code(&url, &oauth.redirect_uri, Some(&oauth.state))?;
+    let login = BrowserLogin::open(
+        prompt,
+        PendingLogin::new(
+            format!("Web API access for the {client_name}"),
+            client.get_creds().id.clone(),
+            url,
+            oauth.redirect_uri.clone(),
+        ),
+    );
+    let code = login.wait_for_code(Some(&oauth.state))?;
     client
         .request_token(&code)
         .await
@@ -256,31 +367,33 @@ async fn authorize_web_api_client(
 }
 
 /// Run the authorization code with PKCE flow for `librespot` and return an access token.
-fn get_oauth_access_token(client_id: &str, redirect_uri: &str, scopes: &[&str]) -> Result<String> {
+fn get_oauth_access_token(
+    client_id: &str,
+    redirect_uri: &str,
+    scopes: &[&str],
+    prompt: &LoginPrompt,
+) -> Result<String> {
     let pkce = Pkce::new_random();
     let state = random_url_safe(16);
     let auth_url = build_authorize_url(client_id, redirect_uri, scopes, &pkce.challenge, &state)?;
 
-    let code = obtain_auth_code(auth_url.as_str(), redirect_uri, Some(&state))?;
+    let login = BrowserLogin::open(
+        prompt,
+        PendingLogin::new(
+            "the librespot streaming client",
+            client_id,
+            auth_url.as_str(),
+            redirect_uri,
+        ),
+    );
+    let code = login.wait_for_code(Some(&state))?;
     exchange_code_for_token(client_id, redirect_uri, &code, &pkce.verifier)
 }
 
-/// Open the authorization URL in a browser and obtain the auth `code` from the redirect.
-///
-/// If `redirect_uri` is an HTTP loopback address with a port, a local server collects the code
-/// automatically; otherwise the user is prompted to paste the redirect URL on stdin.
-fn obtain_auth_code(
-    auth_url: &str,
-    redirect_uri: &str,
-    expected_state: Option<&str>,
-) -> Result<String> {
-    open::that_in_background(auth_url);
-    println!("Browse to: {auth_url}");
-
-    match redirect_socket_address(redirect_uri) {
-        Some(addr) => listen_for_auth_code(addr, expected_state),
-        None => read_auth_code_from_stdin(expected_state),
-    }
+/// Whether logins with `redirect_uri` collect the auth code with a local
+/// callback server, as opposed to asking for the redirect URL on stdin.
+pub fn redirect_uses_callback_server(redirect_uri: &str) -> bool {
+    redirect_socket_address(redirect_uri).is_some()
 }
 
 /// Spawn a local HTTP server that waits for the OAuth redirect and returns the auth `code`.
@@ -511,7 +624,7 @@ mod test {
                     ..Default::default()
                 },
             ));
-        prompt_for_web_api_token(&mut client, false, "test client")
+        prompt_for_web_api_token(&mut client, false, "test client", &LoginPrompt::Stdout)
             .await
             .unwrap();
 
@@ -624,5 +737,62 @@ mod test {
         let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(Sha256::digest(verifier.as_bytes()));
         assert_eq!(challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    }
+
+    /// A shared state without the global config, which tests never set.
+    fn test_state() -> SharedState {
+        use std::sync::Arc;
+
+        let dir = crate::utils::test_scratch_dir("login-prompt");
+        Arc::new(crate::state::State {
+            ui: parking_lot::Mutex::new(crate::state::UIState::default()),
+            player: parking_lot::RwLock::new(crate::state::PlayerState::default()),
+            data: parking_lot::RwLock::new(crate::state::AppData::new(&dir)),
+            is_daemon: false,
+            #[cfg(feature = "streaming")]
+            vis_bands: None,
+            logs: Arc::new(parking_lot::Mutex::new(std::collections::VecDeque::new())),
+        })
+    }
+
+    /// The TUI prompt shows the popup for the whole login and no longer.
+    #[test]
+    fn tui_prompt_shows_the_popup_until_the_login_ends() {
+        use crate::state::{LoginPhase, PopupState};
+
+        let state = test_state();
+        let prompt = LoginPrompt::Tui(state.clone());
+        // `BrowserLogin::open` would also launch a browser; begin the prompt by hand.
+        let login = BrowserLogin {
+            prompt: &prompt,
+            redirect_uri: NCSPOT_REDIRECT_URI.to_string(),
+        };
+        prompt.begin(PendingLogin::new(
+            "Web API access for the configured client",
+            NCSPOT_CLIENT_ID,
+            "https://accounts.spotify.com/authorize?x=1",
+            NCSPOT_REDIRECT_URI,
+        ));
+        {
+            let ui = state.ui.lock();
+            match &ui.popup {
+                Some(PopupState::Login(pending)) => {
+                    assert_eq!(pending.phase, LoginPhase::WaitingForBrowser);
+                    assert_eq!(pending.client_id, NCSPOT_CLIENT_ID);
+                    assert_eq!(pending.redirect_uri, NCSPOT_REDIRECT_URI);
+                }
+                other => panic!("expected the login popup, got {other:?}"),
+            }
+            assert!(ui.has_focused_popup());
+        }
+
+        prompt.approved();
+        assert!(matches!(
+            &state.ui.lock().popup,
+            Some(PopupState::Login(pending)) if pending.phase == LoginPhase::Approved
+        ));
+
+        drop(login);
+        assert!(state.ui.lock().popup.is_none());
     }
 }

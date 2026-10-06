@@ -2,7 +2,7 @@ use crate::{
     command,
     state::{
         model::{Album, Artist, Episode, EpisodeId, Playlist, Show, Track, TrackId},
-        ItemId,
+        ItemId, PendingLogin,
     },
     ui::single_line_input::LineInput,
 };
@@ -36,6 +36,8 @@ pub enum PopupState {
         message: String,
         action: ConfirmableAction,
     },
+    /// A browser login in progress; modal until the OAuth redirect arrives.
+    Login(PendingLogin),
 }
 
 #[derive(Debug, Clone)]
@@ -94,7 +96,10 @@ impl PopupState {
             | Self::ArtistList(.., list_state)
             | Self::ThemeList(.., list_state)
             | Self::ActionList(.., list_state) => Some(list_state),
-            Self::Search { .. } | Self::PlaylistCreate { .. } | Self::ConfirmAction { .. } => None,
+            Self::Search { .. }
+            | Self::PlaylistCreate { .. }
+            | Self::ConfirmAction { .. }
+            | Self::Login(..) => None,
         }
     }
 
@@ -108,7 +113,10 @@ impl PopupState {
             | Self::ArtistList(.., list_state)
             | Self::ThemeList(.., list_state)
             | Self::ActionList(.., list_state) => Some(list_state),
-            Self::Search { .. } | Self::PlaylistCreate { .. } | Self::ConfirmAction { .. } => None,
+            Self::Search { .. }
+            | Self::PlaylistCreate { .. }
+            | Self::ConfirmAction { .. }
+            | Self::Login(..) => None,
         }
     }
 

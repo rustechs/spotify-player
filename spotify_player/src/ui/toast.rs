@@ -43,9 +43,9 @@ pub fn render_toasts(frame: &mut Frame, ui: &UIStateGuard, content: Rect) {
             ToastKind::Error => "Error",
         };
 
-        // The toast is the only true overlay in the app (everything else is
-        // drawn into its own partition of the frame), so reset the cells first
-        // or the page text shows through the card.
+        // Toasts and the login popup are the only true overlays in the app
+        // (everything else is drawn into its own partition of the frame), so
+        // reset the cells first or the page text shows through the card.
         frame.render_widget(Clear, area);
         frame.render_widget(Block::default().style(ui.theme.app()), area);
         let block = Block::default()

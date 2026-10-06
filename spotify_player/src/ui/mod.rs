@@ -7,7 +7,7 @@ use crate::{
         PopupState, SearchFocusState, SharedState, Track, UIStateGuard,
     },
 };
-use anyhow::{Context as AnyhowContext, Result};
+use anyhow::Result;
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
@@ -26,6 +26,7 @@ type Terminal = ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::St
 
 #[cfg(feature = "image")]
 pub mod cover_image;
+mod login;
 mod page;
 mod playback;
 mod popup;
@@ -41,13 +42,20 @@ pub fn run(state: &SharedState, mut terminal: Terminal) -> Result<()> {
         config::get_config().app_config.app_refresh_duration_in_ms,
     );
     let mut last_terminal_size = None;
+    // `init_terminal` enabled mouse capture.
+    let mut mouse_captured = true;
 
     loop {
         {
             let mut ui = state.ui.lock();
             if !ui.is_running {
-                clean_up(terminal).context("clean up UI resources")?;
-                std::process::exit(0);
+                let exit_message = ui.exit_message.take();
+                // Exit even when the clean-up fails: a process that lingers
+                // without a UI is worse than a terminal left in raw mode.
+                if let Err(err) = clean_up(terminal) {
+                    tracing::error!("Failed to clean up UI resources: {err:#}");
+                }
+                exit(exit_message);
             }
 
             let terminal_size = terminal.size()?;
@@ -61,6 +69,16 @@ pub fn run(state: &SharedState, mut terminal: Terminal) -> Result<()> {
             }
 
             ui.toasts.expire_due(std::time::Instant::now());
+
+            // Selecting text needs the terminal's own mouse handling, so release
+            // the mouse while the login popup shows the URL to copy.
+            let capture_mouse = !matches!(ui.popup, Some(PopupState::Login(_)));
+            if capture_mouse != mouse_captured {
+                match set_mouse_capture(&mut terminal, capture_mouse) {
+                    Ok(()) => mouse_captured = capture_mouse,
+                    Err(err) => tracing::warn!("Failed to toggle mouse capture: {err:#}"),
+                }
+            }
 
             if let Err(err) = terminal.draw(|frame| {
                 // set the background and foreground colors for the application
@@ -159,10 +177,36 @@ fn clean_up(mut terminal: Terminal) -> Result<()> {
     Ok(())
 }
 
+/// Leave the process once the terminal is restored. The message is the one
+/// thing the TUI prints to the terminal itself: the user has to see why the
+/// application stopped.
+fn exit(message: Option<String>) -> ! {
+    match message {
+        Some(message) => {
+            eprintln!("{message}");
+            std::process::exit(1)
+        }
+        None => std::process::exit(0),
+    }
+}
+
+fn set_mouse_capture(terminal: &mut Terminal, enable: bool) -> Result<()> {
+    if enable {
+        crossterm::execute!(terminal.backend_mut(), crossterm::event::EnableMouseCapture)?;
+    } else {
+        crossterm::execute!(
+            terminal.backend_mut(),
+            crossterm::event::DisableMouseCapture
+        )?;
+    }
+    Ok(())
+}
+
 /// Render the application
 fn render_application(frame: &mut Frame, state: &SharedState, ui: &mut UIStateGuard, rect: Rect) {
     // rendering order: playback window -> shortcut help popup -> other popups -> main layout
-    // -> toast overlay (clipped to the main layout area, never on a popup or the playback window)
+    // -> login popup overlay -> toast overlay (both clipped to the main layout area, never on
+    // the playback window)
 
     // render playback window before other popups and windows to ensure nothing is rendered on top
     // of the playback window, which is to avoid "duplicated images" issue
@@ -174,6 +218,8 @@ fn render_application(frame: &mut Frame, state: &SharedState, ui: &mut UIStateGu
     let (rect, is_active) = popup::render_popup(frame, state, ui, rect);
 
     render_main_layout(is_active, frame, state, ui, rect);
+    // The login popup is modal: it floats over the (inactive) main layout.
+    login::render_login_popup(frame, ui, rect);
     toast::render_toasts(frame, ui, rect);
 }
 

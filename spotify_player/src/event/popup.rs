@@ -44,6 +44,9 @@ pub fn handle_key_sequence_for_popup(
                 action.clone(),
             );
         }
+        PopupState::Login(..) => {
+            return Ok(handle_key_sequence_for_login_popup(key_sequence, ui));
+        }
         _ => {}
     }
 
@@ -65,6 +68,7 @@ pub fn handle_key_sequence_for_popup(
         PopupState::ActionList(..) => {
             anyhow::bail!("action list popup should be handled before")
         }
+        PopupState::Login(..) => anyhow::bail!("login popup should be handled before"),
         PopupState::ArtistList(_, artists, _) => {
             let n_items = artists.len();
             let client_pub = client_pub.clone();
@@ -642,4 +646,148 @@ fn handle_key_sequence_for_confirm_popup(
     }
     ui.popup = None;
     Ok(true)
+}
+
+/// Printed after the terminal is restored when the user cancels a browser login.
+pub const LOGIN_CANCELLED_MESSAGE: &str = "Spotify login cancelled; no credentials were saved. \
+    Run spotify_player again to retry, or `spotify_player authenticate` to log in from the \
+    command line.";
+
+/// What a key does while the login popup is open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoginPopupAction {
+    OpenBrowser,
+    CopyUrl,
+    Cancel,
+    Ignore,
+}
+
+fn login_popup_action(key_sequence: &KeySequence) -> LoginPopupAction {
+    use crossterm::event::KeyCode;
+    match key_sequence.keys.as_slice() {
+        [Key::None(KeyCode::Char('o') | KeyCode::Enter)] => LoginPopupAction::OpenBrowser,
+        [Key::None(KeyCode::Char('c'))] => LoginPopupAction::CopyUrl,
+        [Key::None(KeyCode::Esc | KeyCode::Char('q')) | Key::Ctrl(KeyCode::Char('c'))] => {
+            LoginPopupAction::Cancel
+        }
+        _ => LoginPopupAction::Ignore,
+    }
+}
+
+/// The login popup is modal: every key is consumed here, so no page command or
+/// other popup can replace it while the browser login is pending.
+fn handle_key_sequence_for_login_popup(key_sequence: &KeySequence, ui: &mut UIStateGuard) -> bool {
+    let Some(PopupState::Login(login)) = &ui.popup else {
+        return false;
+    };
+    let url = login.url.clone();
+    match login_popup_action(key_sequence) {
+        LoginPopupAction::OpenBrowser => {
+            // Fire and forget, like the first open: the URL stays on screen either way.
+            open::that_in_background(&url);
+            ui.push_success_toast("Opening the authorization URL in the browser");
+        }
+        LoginPopupAction::CopyUrl => clipboard::copy_link(ui, url),
+        LoginPopupAction::Cancel => ui.quit_with_message(LOGIN_CANCELLED_MESSAGE),
+        LoginPopupAction::Ignore => {}
+    }
+    true
+}
+
+#[cfg(test)]
+mod login_popup_tests {
+    use super::*;
+    use crate::state::{PendingLogin, UIState};
+    use crossterm::event::KeyCode;
+
+    fn keys(keys: &[Key]) -> KeySequence {
+        KeySequence {
+            keys: keys.to_vec(),
+        }
+    }
+
+    fn ui_with_login_popup() -> parking_lot::Mutex<UIState> {
+        let mut ui = UIState::default();
+        ui.show_login_popup(PendingLogin::new(
+            "Web API access for the configured client",
+            "client-id",
+            "https://accounts.spotify.com/authorize?x=1",
+            "http://127.0.0.1:8989/login",
+        ));
+        parking_lot::Mutex::new(ui)
+    }
+
+    #[test]
+    fn keys_map_to_login_popup_actions() {
+        let cases = [
+            (Key::None(KeyCode::Char('o')), LoginPopupAction::OpenBrowser),
+            (Key::None(KeyCode::Enter), LoginPopupAction::OpenBrowser),
+            (Key::None(KeyCode::Char('c')), LoginPopupAction::CopyUrl),
+            (Key::None(KeyCode::Esc), LoginPopupAction::Cancel),
+            (Key::None(KeyCode::Char('q')), LoginPopupAction::Cancel),
+            (Key::Ctrl(KeyCode::Char('c')), LoginPopupAction::Cancel),
+            (Key::None(KeyCode::Char('d')), LoginPopupAction::Ignore),
+            (Key::None(KeyCode::Char('/')), LoginPopupAction::Ignore),
+            (Key::Ctrl(KeyCode::Char('o')), LoginPopupAction::Ignore),
+        ];
+        for (key, action) in cases {
+            assert_eq!(login_popup_action(&keys(&[key])), action, "{key:?}");
+        }
+        // A multi-key sequence never triggers an action by its last key.
+        assert_eq!(
+            login_popup_action(&keys(&[
+                Key::None(KeyCode::Char('g')),
+                Key::None(KeyCode::Char('q'))
+            ])),
+            LoginPopupAction::Ignore
+        );
+    }
+
+    #[test]
+    fn login_popup_swallows_page_and_popup_keys() {
+        let mutex = ui_with_login_popup();
+        let mut ui = mutex.lock();
+        for key in [
+            Key::None(KeyCode::Char('d')),
+            Key::None(KeyCode::Char('/')),
+            Key::None(KeyCode::Char('g')),
+            Key::None(KeyCode::Char('1')),
+            Key::Alt(KeyCode::Char('x')),
+        ] {
+            assert!(
+                handle_key_sequence_for_login_popup(&keys(&[key]), &mut ui),
+                "{key:?} must be consumed"
+            );
+        }
+        assert!(matches!(ui.popup, Some(PopupState::Login(_))));
+        assert!(ui.is_running);
+        assert!(ui.exit_message.is_none());
+    }
+
+    #[test]
+    fn esc_q_and_ctrl_c_cancel_the_login_and_quit() {
+        for key in [
+            Key::None(KeyCode::Esc),
+            Key::None(KeyCode::Char('q')),
+            Key::Ctrl(KeyCode::Char('c')),
+        ] {
+            let mutex = ui_with_login_popup();
+            let mut ui = mutex.lock();
+            assert!(handle_key_sequence_for_login_popup(&keys(&[key]), &mut ui));
+            assert!(!ui.is_running, "{key:?} must quit");
+            assert_eq!(ui.exit_message.as_deref(), Some(LOGIN_CANCELLED_MESSAGE));
+        }
+    }
+
+    #[test]
+    fn login_handler_ignores_other_popups() {
+        let mutex = parking_lot::Mutex::new(UIState::default());
+        let mut ui = mutex.lock();
+        ui.new_search_popup();
+        assert!(!handle_key_sequence_for_login_popup(
+            &keys(&[Key::None(KeyCode::Esc)]),
+            &mut ui
+        ));
+        assert!(ui.is_running);
+    }
 }

@@ -24,7 +24,11 @@ mod vis;
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
-use std::{collections::VecDeque, io::Write, sync::Arc};
+use std::{
+    collections::VecDeque,
+    io::{IsTerminal as _, Write},
+    sync::Arc,
+};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -141,14 +145,23 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
     #[cfg(all(feature = "system-audio-visualization", target_os = "linux"))]
     system_audio::start(state);
 
+    // A missing credential needs a browser login. Interactively the TUI starts
+    // first, so the prompt is a popup instead of text written over the screen.
+    let tui_login = login_in_tui(state);
+    if tui_login {
+        start_tui(state, &client_pub)?;
+    }
+    let login_prompt = if tui_login {
+        auth::LoginPrompt::Tui(state.clone())
+    } else {
+        auth::LoginPrompt::Stdout
+    };
+
     // create a Spotify API client
-    let client = client::AppClient::new()
-        .await
-        .context("construct app client")?;
-    client
-        .new_session(Some(state), true)
-        .await
-        .context("initialize new Spotify session")?;
+    let client = match connect(state, login_prompt).await {
+        Ok(client) => client,
+        Err(err) => return fail_startup(state, tui_login, err).await,
+    };
 
     // request user data
     client_pub.send(client::ClientRequest::GetCurrentUser)?;
@@ -201,29 +214,8 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
             }
         })?;
 
-    if !state.is_daemon {
-        #[cfg(feature = "image")]
-        ui::init_image_picker(state).context("initialize image picker")?;
-        let terminal = ui::init_terminal().context("initialize terminal")?;
-
-        // terminal event handler task
-        std::thread::Builder::new()
-            .name("terminal-event-handler".to_string())
-            .spawn({
-                let client_pub = client_pub.clone();
-                let state = state.clone();
-                move || {
-                    run_supervised("terminal-event-handler", || {
-                        event::start_event_handler(&state, &client_pub);
-                    });
-                }
-            })?;
-
-        // application UI task
-        std::thread::Builder::new().name("ui".to_string()).spawn({
-            let state = state.clone();
-            move || ui::run(&state, terminal)
-        })?;
+    if !state.is_daemon && !tui_login {
+        start_tui(state, &client_pub)?;
     }
 
     #[cfg(feature = "media-control")]
@@ -257,6 +249,80 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
     }
 
     // Keep the runtime alive; the tasks and threads spawned above do the work.
+    std::future::pending::<()>().await;
+    Ok(())
+}
+
+/// Whether a missing credential's browser login is shown as a popup in the TUI.
+///
+/// That needs an interactive terminal and a loopback redirect URI: without the
+/// callback server the login reads the redirect URL from stdin, which the TUI
+/// owns. The daemon and a non-terminal stdout keep the printed prompt.
+fn login_in_tui(state: &state::SharedState) -> bool {
+    !state.is_daemon
+        && std::io::stdout().is_terminal()
+        && auth::redirect_uses_callback_server(&config::get_config().app_config.login_redirect_uri)
+}
+
+/// Take over the terminal and start the event-handler and UI threads.
+fn start_tui(
+    state: &state::SharedState,
+    client_pub: &flume::Sender<client::ClientRequest>,
+) -> Result<()> {
+    #[cfg(feature = "image")]
+    ui::init_image_picker(state).context("initialize image picker")?;
+    let terminal = ui::init_terminal().context("initialize terminal")?;
+
+    // terminal event handler task
+    std::thread::Builder::new()
+        .name("terminal-event-handler".to_string())
+        .spawn({
+            let client_pub = client_pub.clone();
+            let state = state.clone();
+            move || {
+                run_supervised("terminal-event-handler", || {
+                    event::start_event_handler(&state, &client_pub);
+                });
+            }
+        })?;
+
+    // application UI task
+    std::thread::Builder::new().name("ui".to_string()).spawn({
+        let state = state.clone();
+        move || ui::run(&state, terminal)
+    })?;
+    Ok(())
+}
+
+/// Create the Spotify client and its session, logging in where a credential is missing.
+async fn connect(
+    state: &state::SharedState,
+    login_prompt: auth::LoginPrompt,
+) -> Result<client::AppClient> {
+    let client = client::AppClient::new(login_prompt)
+        .await
+        .context("construct app client")?;
+    client
+        .new_session(Some(state), true)
+        .await
+        .context("initialize new Spotify session")?;
+    Ok(client)
+}
+
+/// Report a startup failure. With the TUI up, the UI thread owns the terminal
+/// and has to restore it before the error is printed, so the message is handed
+/// over and this task waits for the process to exit. Otherwise the error
+/// propagates to `main` as before.
+async fn fail_startup(
+    state: &state::SharedState,
+    tui_started: bool,
+    err: anyhow::Error,
+) -> Result<()> {
+    if !tui_started {
+        return Err(err);
+    }
+    tracing::error!("Failed to start the application: {err:#}");
+    state.ui.lock().quit_with_message(format!("Error: {err:#}"));
     std::future::pending::<()>().await;
     Ok(())
 }

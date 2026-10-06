@@ -221,6 +221,9 @@ pub fn render_popup(
 
                 (chunks[0], true)
             }
+            // Drawn as an overlay after the main layout (see `ui::render_application`);
+            // here it only takes the focus away from the page.
+            PopupState::Login(..) => (rect, false),
         },
     }
 }

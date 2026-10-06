@@ -193,6 +193,8 @@ docker run --rm \
 
 The simplest way to authenticate is to just **run the application** — on first use it prompts for whichever credentials are not yet cached. Each prompt opens the Spotify authorization page in your browser; after you approve access, Spotify redirects to a local loopback address (`login_redirect_uri`, default `http://127.0.0.1:8989/login`) where `spotify_player` captures the authorization code and exchanges it for an access token. Credentials are cached in the application's [cache folder](#caches), so this is a one-time step per machine.
 
+In the TUI, each prompt is a modal **login popup**: it names the client that needs your approval, shows the full authorization URL on its own rows so it can be selected and copied, and waits with a spinner until the browser redirect arrives, then closes by itself. While it is open, `o` or `enter` opens the authorization page in the browser again, `c` copies the URL with the clipboard command `spotify_player` detects (`wl-copy`, `xclip`, `xsel`, `pbcopy`), and `esc`, `q` or `C-c` cancel the login and quit with a message; every other key is ignored. The `authenticate` command, a [daemon](#daemon), runs whose stdout is not a terminal, and a `login_redirect_uri` without a port (where the redirect URL has to be pasted on stdin) print the URL instead.
+
 Alternatively, run the `spotify_player authenticate` CLI command to authenticate all required credentials up front — useful for setting things up ahead of a [daemon](#daemon) or headless launch. Unlike a normal launch, `authenticate` always forces fresh interactive logins, ignoring cached credentials, so it can also be used to re-authenticate from scratch.
 
 ### How authentication works
@@ -237,7 +239,7 @@ Use a custom client ID to avoid competing for the shared ncspot client's rate li
 
 To configure one, [register an application](https://developer.spotify.com/dashboard) on the Spotify developer dashboard, add your `login_redirect_uri` (default `http://127.0.0.1:8989/login`) to the app's allowed redirect URIs, then set `client_id` (or `client_id_command`) in `app.toml`. See the [Client id command](https://github.com/aome510/spotify-player/blob/master/docs/config.md#client-id-command) section of the configuration docs for details.
 
-After changing the client ID, re-run `spotify_player authenticate` to refresh the custom and fallback tokens.
+After changing the client ID, start the application: it prompts for the new client's token and keeps the cached fallback token. To refresh every token instead, re-run `spotify_player authenticate`.
 
 ## Features
 

@@ -12,10 +12,12 @@ use ratatui_image::picker::Picker;
 
 pub type UIStateGuard<'a> = parking_lot::MutexGuard<'a, UIState>;
 
+mod login;
 mod page;
 mod popup;
 mod toast;
 
+pub use login::*;
 pub use page::*;
 pub use popup::*;
 pub use toast::*;
@@ -50,6 +52,9 @@ pub struct UIState {
     pub history: Vec<PageState>,
     pub popup: Option<PopupState>,
     pub toasts: ToastQueue,
+    /// Why the app stops, when the user has to see it: the UI thread prints
+    /// it to stderr after restoring the terminal and exits with a failure code.
+    pub exit_message: Option<String>,
 
     /// The rectangle representing the playback progress bar,
     /// which is mainly used to handle mouse click events (for seeking command)
@@ -93,6 +98,29 @@ impl UIState {
 
     pub fn close_popup_or_dismiss_toast(&mut self) {
         close_popup_or_dismiss_toast(&mut self.popup, &mut self.toasts);
+    }
+
+    /// Stop the application and print `message` once the terminal is restored.
+    pub fn quit_with_message(&mut self, message: impl Into<String>) {
+        self.is_running = false;
+        self.exit_message = Some(message.into());
+    }
+
+    pub fn show_login_popup(&mut self, login: PendingLogin) {
+        self.popup = Some(PopupState::Login(login));
+    }
+
+    pub fn mark_login_approved(&mut self) {
+        if let Some(PopupState::Login(login)) = &mut self.popup {
+            login.phase = LoginPhase::Approved;
+        }
+    }
+
+    /// Close the login popup; any other popup is left alone.
+    pub fn close_login_popup(&mut self) {
+        if matches!(self.popup, Some(PopupState::Login(_))) {
+            self.popup = None;
+        }
     }
 
     pub fn push_success_toast(&mut self, message: impl Into<String>) {
@@ -167,6 +195,7 @@ impl Default for UIState {
             }],
             popup: None,
             toasts: ToastQueue::default(),
+            exit_message: None,
 
             playback_progress_bar_rect: Rect::default(),
 
@@ -218,5 +247,57 @@ mod tests {
             Some("api failed")
         );
         assert!(ui.popup.is_none());
+    }
+
+    fn pending_login() -> PendingLogin {
+        PendingLogin::new(
+            "Web API access for the configured client",
+            "client-id",
+            "https://accounts.spotify.com/authorize?x=1",
+            "http://127.0.0.1:8989/login",
+        )
+    }
+
+    #[test]
+    fn login_popup_follows_the_login() {
+        let mut ui = UIState::default();
+        ui.mark_login_approved();
+        ui.close_login_popup();
+        assert!(ui.popup.is_none(), "no-ops without a login popup");
+
+        ui.show_login_popup(pending_login());
+        assert!(ui.has_focused_popup(), "the login popup takes the focus");
+        assert!(matches!(
+            &ui.popup,
+            Some(PopupState::Login(login)) if login.phase == LoginPhase::WaitingForBrowser
+        ));
+
+        ui.mark_login_approved();
+        assert!(matches!(
+            &ui.popup,
+            Some(PopupState::Login(login)) if login.phase == LoginPhase::Approved
+        ));
+
+        ui.close_login_popup();
+        assert!(ui.popup.is_none());
+    }
+
+    #[test]
+    fn closing_the_login_popup_leaves_other_popups_alone() {
+        let mut ui = UIState::default();
+        ui.new_search_popup();
+        ui.mark_login_approved();
+        ui.close_login_popup();
+        assert!(matches!(ui.popup, Some(PopupState::Search { .. })));
+    }
+
+    #[test]
+    fn quit_with_message_stops_the_ui_and_keeps_the_message() {
+        let mut ui = UIState::default();
+        assert!(ui.is_running);
+        assert!(ui.exit_message.is_none());
+        ui.quit_with_message("Spotify login cancelled");
+        assert!(!ui.is_running);
+        assert_eq!(ui.exit_message.as_deref(), Some("Spotify login cancelled"));
     }
 }

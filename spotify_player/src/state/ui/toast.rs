@@ -295,7 +295,8 @@ fn char_width(c: char) -> usize {
     unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
 }
 
-fn wrap_toast_lines(text: &str, width: usize) -> Vec<String> {
+/// Word-wrap `text` to rows of at most `width` columns; words wider than a row are split.
+pub fn wrap_toast_lines(text: &str, width: usize) -> Vec<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Vec::new();

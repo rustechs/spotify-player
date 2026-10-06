@@ -180,7 +180,7 @@ fn try_connect_to_client(socket: &UdpSocket, configs: &config::Configs) -> Resul
 
             // create a Spotify API client
             let client = rt
-                .block_on(client::AppClient::new())
+                .block_on(client::AppClient::new(crate::auth::LoginPrompt::Stdout))
                 .context("construct app client")?;
             rt.block_on(client.new_session(None, false))
                 .context("new session")?;
@@ -215,11 +215,15 @@ pub fn handle_cli_subcommand(cmd: &str, args: &ArgMatches) -> Result<()> {
             // Force re-authentication of every Web API identity, followed by librespot.
             let mut api_client = client::new_api_client()?;
             let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(crate::auth::prompt_for_user_token(&mut api_client, true))
-                .context("authenticate Spotify Web API client")?;
+            rt.block_on(crate::auth::prompt_for_user_token(
+                &mut api_client,
+                true,
+                &crate::auth::LoginPrompt::Stdout,
+            ))
+            .context("authenticate Spotify Web API client")?;
 
             let auth_config = AuthConfig::new(configs)?;
-            crate::auth::get_creds(&auth_config, true, false)?;
+            crate::auth::get_creds(&auth_config, true, false, &crate::auth::LoginPrompt::Stdout)?;
             std::process::exit(0);
         }
         "generate" => {
